@@ -1,4 +1,8 @@
-nostrfeedz.com {
+{
+    email kyle@privkey.io
+}
+
+readstr.privkey.io {
     # Reverse proxy to the Next.js app
     reverse_proxy app:3000 {
         # Health check
@@ -30,9 +34,4 @@ nostrfeedz.com {
         output stdout
         format console
     }
-}
-
-# Redirect www to non-www
-www.nostrfeedz.com {
-    redir https://nostrfeedz.com{uri} permanent
 }
