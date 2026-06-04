@@ -1,4 +1,4 @@
-# Nostr-Feedz (Active Fork)
+# readstr (Active Fork)
 
 **This is an active fork of the original [Nostr-Feedz](https://github.com/PlebOne/Nostr-Feedz).**
 The original repository appears to be no longer maintained. This fork is actively maintained and improved.
@@ -17,7 +17,7 @@ A modern, Google Reader-style feed aggregator that combines traditional RSS feed
 
 ## Overview
 
-Nostr-Feedz is a full-stack web application built with Next.js that provides a unified reading experience for RSS feeds, Nostr long-form content, and video feeds from YouTube and Rumble. It features a clean, three-panel interface reminiscent of Google Reader, allowing users to subscribe to their favorite blogs, Nostr authors, and video channels in one place.
+readstr is a full-stack web application built with Next.js that provides a unified reading experience for RSS feeds, Nostr long-form content, and video feeds from YouTube and Rumble. It features a clean, three-panel interface reminiscent of Google Reader, allowing users to subscribe to their favorite blogs, Nostr authors, and video channels in one place.
 
 ## Features
 
@@ -150,8 +150,8 @@ Nostr-Feedz is a full-stack web application built with Next.js that provides a u
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/privkeyio/Nostr-Feedz.git
-cd Nostr-Feedz
+git clone https://github.com/privkeyio/readstr.git
+cd readstr
 ```
 
 2. Install dependencies:
