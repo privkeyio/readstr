@@ -1,70 +1,34 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
-import * as jwt from 'jsonwebtoken'
-
-// Flash webhook event types
-type FlashEventType = {
-  id: string
-  name: 'user_signed_up' | 'renewal_successful' | 'renewal_failed' | 'user_paused_subscription' | 'user_cancelled_subscription'
-}
-
-type FlashWebhookPayload = {
-  eventType: FlashEventType
-  data: {
-    public_key?: string
-    name?: string
-    email?: string
-    npub?: string
-    external_uuid?: string
-  }
-}
+import { verifyFlashWebhook } from '@/server/auth/flash-webhook'
 
 const TRIAL_DAYS = 7
 
 export async function POST(request: NextRequest) {
   try {
-    // Get Authorization header
-    const authHeader = request.headers.get('authorization')
-    const token = authHeader?.split(' ')[1]
+    const authHeader = request.headers.get('authorization') ?? undefined
 
-    if (!token) {
-      return NextResponse.json({ error: 'No token provided' }, { status: 401 })
-    }
-
-    // Get subscription key from environment
-    const subscriptionKey = process.env.FLASH_SUBSCRIPTION_KEY
-    if (!subscriptionKey) {
-      console.error('FLASH_SUBSCRIPTION_KEY not configured')
-      return NextResponse.json({ error: 'Server configuration error' }, { status: 500 })
-    }
-
-    // Verify and decode JWT
-    let decoded: any
+    let rawBody: unknown
     try {
-      decoded = jwt.verify(token, subscriptionKey, { algorithms: ['HS256'] })
-    } catch (error) {
-      console.error('JWT verification failed:', error)
-      return NextResponse.json({ error: 'Invalid token' }, { status: 401 })
+      rawBody = await request.json()
+    } catch {
+      return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
     }
 
-    // Get payload
-    const payload: FlashWebhookPayload = await request.json()
-
-    // Extract user identifier
-    const userPubkey = payload.data.npub || payload.data.external_uuid || decoded.user_public_key
-
-    if (!userPubkey) {
-      console.error('No user identifier found in webhook')
-      return NextResponse.json({ error: 'No user identifier' }, { status: 400 })
+    const result = verifyFlashWebhook(authHeader, rawBody)
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error }, { status: result.status })
     }
+
+    const { userPubkey, eventName } = result
 
     console.log('Flash webhook received:', {
-      event: payload.eventType.name,
+      event: eventName,
       userPubkey: userPubkey.substring(0, 10) + '...',
     })
 
     // Handle different event types
-    switch (payload.eventType.name) {
+    switch (eventName) {
       case 'user_signed_up':
         // Create or update subscription to ACTIVE
         await db.userSubscription.upsert({

@@ -3,22 +3,63 @@ import { type CreateNextContextOptions } from '@trpc/server/adapters/next'
 import superjson from 'superjson'
 import { ZodError } from 'zod'
 import { db } from '@/server/db'
+import { verifyNip98Header } from '@/server/auth/nip98'
+
+/**
+ * Reconstruct the external request URL exactly as the client fetched it.
+ *
+ * The app deploys behind Caddy (see Caddyfile), which terminates TLS and
+ * reverse-proxies to the app over http. We therefore prefer the
+ * `x-forwarded-proto` / `x-forwarded-host` headers (set by the proxy) to
+ * rebuild the https URL the client actually signed in its NIP-98 `u` tag.
+ * If those are absent (e.g. local dev), we fall back to the Host header.
+ *
+ * Note: the `u`-tag comparison in verifyNip98Header ignores scheme/host and
+ * matches on path + sorted query, so minor proxy discrepancies are tolerated.
+ */
+function reconstructUrl(req: CreateNextContextOptions['req']): string {
+  const forwardedProto = (req.headers['x-forwarded-proto'] as string | undefined)
+    ?.split(',')[0]
+    ?.trim()
+  const proto =
+    forwardedProto ?? (process.env.NODE_ENV === 'production' ? 'https' : 'http')
+  const host =
+    (req.headers['x-forwarded-host'] as string | undefined)?.split(',')[0]?.trim() ??
+    (req.headers.host as string | undefined) ??
+    'localhost'
+  const path = req.url ?? '/'
+  return `${proto}://${host}${path}`
+}
 
 export const createTRPCContext = async (opts: CreateNextContextOptions) => {
   const { req } = opts
-  
-  // Extract Nostr pubkey from headers (set by client)
-  const nostrPubkey = req.headers['x-nostr-pubkey'] as string | undefined
-  
-  console.log('tRPC Server Context:', {
-    hasNostrPubkey: !!nostrPubkey,
-    pubkeyPreview: nostrPubkey ? nostrPubkey.slice(0, 8) + '...' : 'none',
-    headers: Object.keys(req.headers),
-  })
-  
+
+  // Authenticate via NIP-98 (kind 27235) signed HTTP Auth. The verified hex
+  // pubkey is derived from the signature, never from a client-asserted header.
+  const url = reconstructUrl(req)
+  const method = (req.method ?? 'GET').toUpperCase()
+  const authHeader = req.headers['authorization'] as string | undefined
+
+  let nostrPubkey = await verifyNip98Header(authHeader, { url, method })
+
+  // Migration escape hatch: ONLY when explicitly enabled, fall back to the old
+  // insecure plaintext header so the team can roll out without an outage.
+  // This MUST be unset/false in production (anyone can impersonate any user).
+  if (!nostrPubkey && process.env.ALLOW_INSECURE_HEADER_AUTH === 'true') {
+    const insecurePubkey = req.headers['x-nostr-pubkey'] as string | undefined
+    if (insecurePubkey) {
+      console.warn(
+        '⚠️ INSECURE AUTH: trusting unverified x-nostr-pubkey header because ' +
+          'ALLOW_INSECURE_HEADER_AUTH=true. This is forgeable and MUST be ' +
+          'disabled in production.'
+      )
+      nostrPubkey = insecurePubkey
+    }
+  }
+
   return {
     db,
-    nostrPubkey, // Nostr public key for authenticated requests
+    nostrPubkey: nostrPubkey ?? null, // verified hex pubkey, or null when unauthenticated
   }
 }
 

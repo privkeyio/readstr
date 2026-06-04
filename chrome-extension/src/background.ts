@@ -96,6 +96,10 @@ async function getNostrAuthHeader(
     return generateAuthHeader(url, method, nostrAuth.pubkey, nostrAuth.privateKeyHex);
   }
 
+  // TODO: nip07 signing must happen in a content/page context. There is no
+  // window.nostr in the background service worker, so we cannot produce a
+  // NIP-98 event here for the nip07 method. Requests for nip07 users will be
+  // unauthenticated until signing is delegated to a page/content script.
   return null;
 }
 
@@ -113,8 +117,8 @@ async function fetchWithAuth<T>(
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   } else if (nostrAuth && nostrAuth.pubkey) {
-    // Server expects x-nostr-pubkey header for authentication
-    headers['x-nostr-pubkey'] = nostrAuth.pubkey;
+    // Authenticate via signed NIP-98 event; the server derives identity from
+    // the verified signature, not from any plaintext pubkey header.
     const nostrHeader = await getNostrAuthHeader(url, options.method ?? 'GET', nostrAuth);
     if (nostrHeader) {
       headers['Authorization'] = nostrHeader;
@@ -200,7 +204,6 @@ async function markItemAsRead(itemId: string): Promise<void> {
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   } else if (nostrAuth && nostrAuth.pubkey) {
-    headers['x-nostr-pubkey'] = nostrAuth.pubkey;
     const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth);
     if (nostrHeader) {
       headers['Authorization'] = nostrHeader;
@@ -233,7 +236,6 @@ async function markAllAsRead(): Promise<void> {
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   } else if (nostrAuth && nostrAuth.pubkey) {
-    headers['x-nostr-pubkey'] = nostrAuth.pubkey;
     const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth);
     if (nostrHeader) {
       headers['Authorization'] = nostrHeader;
@@ -269,7 +271,6 @@ async function addFavorite(itemId: string): Promise<void> {
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   } else if (nostrAuth && nostrAuth.pubkey) {
-    headers['x-nostr-pubkey'] = nostrAuth.pubkey;
     const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth);
     if (nostrHeader) {
       headers['Authorization'] = nostrHeader;
@@ -302,7 +303,6 @@ async function removeFavorite(itemId: string): Promise<void> {
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   } else if (nostrAuth && nostrAuth.pubkey) {
-    headers['x-nostr-pubkey'] = nostrAuth.pubkey;
     const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth);
     if (nostrHeader) {
       headers['Authorization'] = nostrHeader;
@@ -911,7 +911,6 @@ async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boo
         if (storage.authToken) {
           headers['Authorization'] = `Bearer ${storage.authToken}`;
         } else if (storage.nostrAuth?.pubkey) {
-          headers['x-nostr-pubkey'] = storage.nostrAuth.pubkey;
           const nostrHeader = await getNostrAuthHeader(url, 'POST', storage.nostrAuth);
           if (nostrHeader) {
             headers['Authorization'] = nostrHeader;
