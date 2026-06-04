@@ -101,16 +101,26 @@ export async function createNip98AuthEvent(
   url: string,
   method: string,
   pubkey: string,
-  privateKeyHex?: string
+  privateKeyHex?: string,
+  body?: string | null
 ): Promise<NostrEvent> {
+  const tags: string[][] = [
+    ['u', url],
+    ['method', method.toUpperCase()],
+  ];
+
+  // Bind the request body into the signature via the NIP-98 `payload` tag so a
+  // captured header cannot be replayed against a different body.
+  if (body) {
+    const digest = bytesToHex(sha256(new TextEncoder().encode(body)));
+    tags.push(['payload', digest]);
+  }
+
   const unsignedEvent: UnsignedEvent = {
     pubkey,
     created_at: Math.floor(Date.now() / 1000),
     kind: 27235,
-    tags: [
-      ['u', url],
-      ['method', method.toUpperCase()],
-    ],
+    tags,
     content: '',
   };
 
@@ -135,9 +145,10 @@ export async function generateAuthHeader(
   url: string,
   method: string,
   pubkey: string,
-  privateKeyHex?: string
+  privateKeyHex?: string,
+  body?: string | null
 ): Promise<string> {
-  const event = await createNip98AuthEvent(url, method, pubkey, privateKeyHex);
+  const event = await createNip98AuthEvent(url, method, pubkey, privateKeyHex, body);
   return encodeNip98AuthHeader(event);
 }
 

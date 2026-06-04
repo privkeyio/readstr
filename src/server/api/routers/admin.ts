@@ -1,19 +1,26 @@
 import { z } from "zod";
-import { createTRPCRouter, publicProcedure } from "@/server/api/trpc";
-import { db } from "@/server/db";
+import { createTRPCRouter, protectedProcedure } from "@/server/api/trpc";
+import { nip19 } from 'nostr-tools';
 
 const ADMIN_NPUB = 'npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7';
 
-export const adminRouter = createTRPCRouter({
-  getStats: publicProcedure
-    .input(z.object({
-      npub: z.string(),
-    }))
-    .query(async ({ input }) => {
-      if (input.npub !== ADMIN_NPUB) {
-        throw new Error('Unauthorized');
-      }
+const decodedAdmin = nip19.decode(ADMIN_NPUB);
+if (decodedAdmin.type !== 'npub' || !/^[0-9a-f]{64}$/.test(decodedAdmin.data)) {
+  throw new Error('admin: ADMIN_NPUB did not decode to a valid hex pubkey');
+}
+const ADMIN_HEX = decodedAdmin.data;
 
+const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
+  if (ctx.nostrPubkey !== ADMIN_HEX) {
+    throw new Error('UNAUTHORIZED');
+  }
+  return next();
+});
+
+export const adminRouter = createTRPCRouter({
+  getStats: adminProcedure
+    .query(async ({ ctx }) => {
+      const db = ctx.db;
       const now = new Date();
       const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
       const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
@@ -108,16 +115,12 @@ export const adminRouter = createTRPCRouter({
       };
     }),
 
-  getUserGrowth: publicProcedure
+  getUserGrowth: adminProcedure
     .input(z.object({
-      npub: z.string(),
       days: z.number().optional().default(30),
     }))
-    .query(async ({ input }) => {
-      if (input.npub !== ADMIN_NPUB) {
-        throw new Error('Unauthorized');
-      }
-
+    .query(async ({ input, ctx }) => {
+      const db = ctx.db;
       const now = new Date();
       const startDate = new Date(now.getTime() - input.days * 24 * 60 * 60 * 1000);
 
@@ -171,16 +174,12 @@ export const adminRouter = createTRPCRouter({
       return growthData;
     }),
 
-  getActivityHistory: publicProcedure
+  getActivityHistory: adminProcedure
     .input(z.object({
-      npub: z.string(),
       days: z.number().optional().default(30),
     }))
-    .query(async ({ input }) => {
-      if (input.npub !== ADMIN_NPUB) {
-        throw new Error('Unauthorized');
-      }
-
+    .query(async ({ input, ctx }) => {
+      const db = ctx.db;
       const now = new Date();
       const startDate = new Date(now.getTime() - input.days * 24 * 60 * 60 * 1000);
 

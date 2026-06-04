@@ -24,17 +24,17 @@ export default function AdminPage() {
   }, [user, isConnected, router])
 
   const { data: stats, isLoading: statsLoading } = api.admin.getStats.useQuery(
-    { npub: user?.npub || '' },
+    undefined,
     { enabled: isConnected && user?.npub === ADMIN_NPUB }
   )
 
   const { data: userGrowth, isLoading: growthLoading } = api.admin.getUserGrowth.useQuery(
-    { npub: user?.npub || '', days: timeRange },
+    { days: timeRange },
     { enabled: isConnected && user?.npub === ADMIN_NPUB }
   )
 
   const { data: activity, isLoading: activityLoading } = api.admin.getActivityHistory.useQuery(
-    { npub: user?.npub || '', days: timeRange },
+    { days: timeRange },
     { enabled: isConnected && user?.npub === ADMIN_NPUB }
   )
 

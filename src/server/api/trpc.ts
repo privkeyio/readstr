@@ -1,28 +1,9 @@
 import { initTRPC } from '@trpc/server'
-import { type CreateNextContextOptions } from '@trpc/server/adapters/next'
 import superjson from 'superjson'
 import { ZodError } from 'zod'
-import { db } from '@/server/db'
+import { type TRPCContext } from '@/server/auth/request-context'
 
-export const createTRPCContext = async (opts: CreateNextContextOptions) => {
-  const { req } = opts
-  
-  // Extract Nostr pubkey from headers (set by client)
-  const nostrPubkey = req.headers['x-nostr-pubkey'] as string | undefined
-  
-  console.log('tRPC Server Context:', {
-    hasNostrPubkey: !!nostrPubkey,
-    pubkeyPreview: nostrPubkey ? nostrPubkey.slice(0, 8) + '...' : 'none',
-    headers: Object.keys(req.headers),
-  })
-  
-  return {
-    db,
-    nostrPubkey, // Nostr public key for authenticated requests
-  }
-}
-
-const t = initTRPC.context<typeof createTRPCContext>().create({
+const t = initTRPC.context<TRPCContext>().create({
   transformer: superjson,
   errorFormatter({ shape, error }) {
     return {
@@ -62,18 +43,8 @@ const inputSanitizer = t.middleware(({ next, rawInput }) => {
     return value
   }
 
-  const sanitizedInput = sanitizeValue(rawInput)
-  
-  // Log if sanitization changed anything (for debugging)
-  if (JSON.stringify(rawInput) !== JSON.stringify(sanitizedInput)) {
-    console.log('🧹 Input sanitized:', {
-      before: JSON.stringify(rawInput),
-      after: JSON.stringify(sanitizedInput),
-    })
-  }
-  
   return next({
-    rawInput: sanitizedInput,
+    rawInput: sanitizeValue(rawInput),
   })
 })
 
