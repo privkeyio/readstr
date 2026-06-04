@@ -41,7 +41,7 @@ Works with self-hosted Nostr Feedz instances. Just configure your web app URL in
 - No data collection or analytics
 - Private keys never leave your device
 - All communication uses HTTPS
-- Open source: https://github.com/wksantiago/Nostr-Feedz
+- Open source: https://github.com/privkeyio/readstr
 
 ### Permissions Explained
 
