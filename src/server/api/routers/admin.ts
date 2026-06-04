@@ -10,13 +10,16 @@ if (decodedAdmin.type !== 'npub' || !/^[0-9a-f]{64}$/.test(decodedAdmin.data)) {
 }
 const ADMIN_HEX = decodedAdmin.data;
 
-export const adminRouter = createTRPCRouter({
-  getStats: protectedProcedure
-    .query(async ({ ctx }) => {
-      if (ctx.nostrPubkey !== ADMIN_HEX) {
-        throw new Error('UNAUTHORIZED');
-      }
+const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
+  if (ctx.nostrPubkey !== ADMIN_HEX) {
+    throw new Error('UNAUTHORIZED');
+  }
+  return next();
+});
 
+export const adminRouter = createTRPCRouter({
+  getStats: adminProcedure
+    .query(async ({ ctx }) => {
       const db = ctx.db;
       const now = new Date();
       const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
@@ -112,15 +115,11 @@ export const adminRouter = createTRPCRouter({
       };
     }),
 
-  getUserGrowth: protectedProcedure
+  getUserGrowth: adminProcedure
     .input(z.object({
       days: z.number().optional().default(30),
     }))
     .query(async ({ input, ctx }) => {
-      if (ctx.nostrPubkey !== ADMIN_HEX) {
-        throw new Error('UNAUTHORIZED');
-      }
-
       const db = ctx.db;
       const now = new Date();
       const startDate = new Date(now.getTime() - input.days * 24 * 60 * 60 * 1000);
@@ -175,15 +174,11 @@ export const adminRouter = createTRPCRouter({
       return growthData;
     }),
 
-  getActivityHistory: protectedProcedure
+  getActivityHistory: adminProcedure
     .input(z.object({
       days: z.number().optional().default(30),
     }))
     .query(async ({ input, ctx }) => {
-      if (ctx.nostrPubkey !== ADMIN_HEX) {
-        throw new Error('UNAUTHORIZED');
-      }
-
       const db = ctx.db;
       const now = new Date();
       const startDate = new Date(now.getTime() - input.days * 24 * 60 * 60 * 1000);

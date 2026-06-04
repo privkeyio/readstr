@@ -98,11 +98,14 @@ function pruneSeen(now: number): void {
   }
 }
 
-// Returns true if the id was already consumed; otherwise records it.
-function consumeEventId(id: string, now: number): boolean {
+// Returns true if the id was already consumed; otherwise records it. The entry
+// is retained until the event's own acceptance window closes
+// (`created_at + tolerance`) so a future-dated event cannot be evicted early and
+// replayed while its timestamp is still valid.
+function consumeEventId(id: string, createdAt: number, now: number): boolean {
   pruneSeen(now)
   if (seenEventIds.has(id)) return true
-  seenEventIds.set(id, now + TIMESTAMP_TOLERANCE_SECONDS)
+  seenEventIds.set(id, createdAt + TIMESTAMP_TOLERANCE_SECONDS)
   return false
 }
 
@@ -160,7 +163,7 @@ export async function verifyNip98Header(
     }
 
     // 7. Single-use: reject an event id we have already accepted in-window.
-    if (consumeEventId(event.id, now)) return null
+    if (consumeEventId(event.id, event.created_at, now)) return null
 
     // All checks passed; the pubkey is now trustworthy.
     return event.pubkey

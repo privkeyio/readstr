@@ -92,8 +92,15 @@ export function TRPCReactProvider(props: {
                 // signature via the NIP-98 `payload` tag (sha256 of the exact
                 // bytes we send). We add it inside the sign wrapper so the hash
                 // commits to the same string the server hashes server-side.
+                const isMutation = method !== 'GET' && method !== 'HEAD'
+                if (isMutation && typeof init?.body !== 'string') {
+                  // The server requires a `payload` tag for every mutation. tRPC
+                  // sends a JSON string body; a non-string body would silently
+                  // omit the tag and 401, so surface the mismatch instead.
+                  throw new Error('cannot sign mutation: non-string request body')
+                }
                 const payloadHash =
-                  method !== 'GET' && method !== 'HEAD' && typeof init?.body === 'string'
+                  isMutation && typeof init?.body === 'string'
                     ? await sha256Hex(init.body)
                     : null
 
