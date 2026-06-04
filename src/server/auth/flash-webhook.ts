@@ -139,21 +139,23 @@ export function verifyFlashWebhook(
     }
   }
 
-  // Event type — prefer the token's eventType.name; if the body carries one it
-  // must agree with the token's (when the token provides one).
+  // Event type — the token is authoritative. The signed event name MUST be
+  // present; we never fall back to the unsigned body event name. If the body
+  // also carries one it must agree with the token's.
   const tokenEvent = asString(decoded.eventType?.name)
   const bodyEvent = asString(body.eventType?.name)
 
-  if (tokenEvent && bodyEvent && !equalsIgnoreCase(tokenEvent, bodyEvent)) {
+  if (!tokenEvent) {
+    console.warn('[flash-webhook] rejected: signed token has no event name')
+    return { ok: false, status: 403, error: 'Missing event in token' }
+  }
+
+  if (bodyEvent && !equalsIgnoreCase(tokenEvent, bodyEvent)) {
     console.warn('[flash-webhook] rejected: body event name does not match signed token event name')
     return { ok: false, status: 403, error: 'Event mismatch' }
   }
 
-  const eventName = tokenEvent ?? bodyEvent
-  if (!eventName) {
-    console.warn('[flash-webhook] rejected: no event name present')
-    return { ok: false, status: 400, error: 'No event type' }
-  }
+  const eventName = tokenEvent
 
   // 5. Validate the resolved event is known.
   if (!KNOWN_EVENTS.has(eventName)) {

@@ -137,9 +137,9 @@ export async function verifyNip98Header(
       return null
     }
 
-    // 4. Method tag matches (when present).
+    // 4. Method tag is required and must match.
     const methodTag = getTag(event, 'method')
-    if (methodTag && methodTag.toUpperCase() !== opts.method.toUpperCase()) {
+    if (!methodTag || methodTag.toUpperCase() !== opts.method.toUpperCase()) {
       return null
     }
 

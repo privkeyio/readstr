@@ -85,6 +85,31 @@ async function saveStorageData(data: Partial<StorageData>): Promise<void> {
   await chrome.storage.local.set(data);
 }
 
+// NIP07_DELEGATION_PENDING: nip07 signing must happen in a content/page context
+// because there is no window.nostr in the background service worker. Until that
+// delegation is implemented, nip07 users cannot produce a signed NIP-98 event
+// (including the `payload` body binding) and their protected requests are
+// unauthenticated. Reviewers: implementing content/page-context delegation for
+// nip07 signing is the prioritized follow-up.
+let warnedNip07Unauthenticated = false;
+
+async function warnNip07Unauthenticated(): Promise<void> {
+  if (warnedNip07Unauthenticated) return;
+  warnedNip07Unauthenticated = true;
+  try {
+    await chrome.notifications.create({
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: 'Limited functionality',
+      message:
+        'Browser extension signing (NIP-07) is not yet supported in the background. ' +
+        'Syncing and read/favorite actions are disabled. Sign in with an nsec key for full access.',
+    });
+  } catch {
+    // Notifications may be unavailable; the warning is best-effort.
+  }
+}
+
 async function getNostrAuthHeader(
   url: string,
   method: string,
@@ -97,11 +122,12 @@ async function getNostrAuthHeader(
     return generateAuthHeader(url, method, nostrAuth.pubkey, nostrAuth.privateKeyHex, body);
   }
 
-  // TODO: nip07 signing must happen in a content/page context. There is no
-  // window.nostr in the background service worker, so we cannot produce a
-  // NIP-98 event (including the `payload` body binding) here for the nip07
-  // method. Requests for nip07 users will be unauthenticated until signing is
-  // delegated to a page/content script.
+  // See NIP07_DELEGATION_PENDING above: we cannot sign for nip07 here. Surface a
+  // one-time warning so the user understands why protected actions fail, and
+  // return null so the request proceeds without a forged/absent auth header.
+  if (nostrAuth.method === 'nip07') {
+    void warnNip07Unauthenticated();
+  }
   return null;
 }
 
