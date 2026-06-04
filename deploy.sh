@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Nostr-Feedz Deployment Script
+# Readstr Deployment Script
 set -e
 
-echo "🚀 Starting Nostr-Feedz deployment..."
+echo "🚀 Starting Readstr deployment..."
 
 # Check if .env.production exists
 if [ ! -f .env.production ]; then

@@ -172,7 +172,7 @@ export async function fetchAndParseFeed(url: string): Promise<ParsedFeed> {
     
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Nostr-Feedz/1.0 Feed Reader',
+        'User-Agent': 'Readstr/1.0 Feed Reader',
         'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml',
       },
       // Set a reasonable timeout
@@ -208,7 +208,7 @@ export async function discoverFeedUrl(url: string): Promise<string[]> {
   try {
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Nostr-Feedz/1.0 Feed Reader',
+        'User-Agent': 'Readstr/1.0 Feed Reader',
       },
       signal: AbortSignal.timeout(5000),
     })

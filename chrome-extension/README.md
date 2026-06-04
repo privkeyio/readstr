@@ -1,6 +1,6 @@
-# Nostr-Feedz Chrome Extension
+# Readstr Chrome Extension
 
-A Chrome browser extension for Nostr-Feedz. Makes it easy to check feeds, get notifications, and subscribe to new RSS/Nostr content right from the browser.
+A Chrome browser extension for Readstr. Makes it easy to check feeds, get notifications, and subscribe to new RSS/Nostr content right from the browser.
 
 Similar to the Feeder.co RSS extension.
 
@@ -37,6 +37,6 @@ Built with TypeScript and Manifest V3.
 
 ## License
 
-Same as Nostr-Feedz repo (MIT or whatever it uses).
+Same as Readstr repo (MIT or whatever it uses).
 
 Feedback welcome!

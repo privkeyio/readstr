@@ -1,4 +1,4 @@
-# Nostr-Feedz Project Instructions
+# Readstr Project Instructions
 
 ## Tech Stack
 - **Framework**: Next.js (Full-Stack, App Router)

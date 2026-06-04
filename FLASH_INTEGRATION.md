@@ -1,6 +1,6 @@
 # PayWithFlash Integration
 
-Nostr-Feedz uses [PayWithFlash](https://paywithflash.com) for Bitcoin Lightning subscription payments.
+Readstr uses [PayWithFlash](https://paywithflash.com) for Bitcoin Lightning subscription payments.
 
 ## Setup
 

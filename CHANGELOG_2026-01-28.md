@@ -1,6 +1,6 @@
-# Nostr-Feedz Updates - January 28, 2026
+# Readstr Updates - January 28, 2026
 
-Today we shipped several important improvements to Nostr-Feedz, our decentralized RSS and Nostr feed reader. Here's what's new!
+Today we shipped several important improvements to Readstr, our decentralized RSS and Nostr feed reader. Here's what's new!
 
 ## 🎉 What's New
 
@@ -47,7 +47,7 @@ This makes it easier for admins to access the dashboard without having to manual
 
 ### CLI Development Guide
 
-We've created a comprehensive guide for developers who want to build a command-line interface (CLI) version of Nostr-Feedz. This is exciting for terminal lovers and developers who want to integrate Nostr-Feedz into their workflows!
+We've created a comprehensive guide for developers who want to build a command-line interface (CLI) version of Readstr. This is exciting for terminal lovers and developers who want to integrate Readstr into their workflows!
 
 **What's included:**
 - Complete architecture using **Go** programming language
@@ -58,7 +58,7 @@ We've created a comprehensive guide for developers who want to build a command-l
 - Full keyboard navigation
 
 **Why this matters:** 
-- Use Nostr-Feedz in your terminal
+- Use Readstr in your terminal
 - Perfect for remote servers and minimalist setups
 - Fully compatible with the web version through Nostr sync
 - Your subscriptions and read status stay in sync across all devices
@@ -125,7 +125,7 @@ When you import feeds from another device, if they have categories:
 3. Assigns the feed to that category
 4. Your organization stays consistent across devices
 
-**Example:** You organize feeds into "Tech 💻", "News 📰", and "Bitcoin ₿" on your desktop. When you open Nostr-Feedz on your phone, those exact categories appear with the same colors and icons.
+**Example:** You organize feeds into "Tech 💻", "News 📰", and "Bitcoin ₿" on your desktop. When you open Readstr on your phone, those exact categories appear with the same colors and icons.
 
 See [CATEGORY_SYNC.md](./CATEGORY_SYNC.md) for implementation details.
 
@@ -186,9 +186,9 @@ All changes have been:
 
 ## 🙏 Thank You
 
-Thank you to everyone using Nostr-Feedz and providing feedback! These improvements came directly from listening to what users needed.
+Thank you to everyone using Readstr and providing feedback! These improvements came directly from listening to what users needed.
 
-If you haven't tried Nostr-Feedz yet:
+If you haven't tried Readstr yet:
 - 🌐 Visit [nostrfeedz.com](https://nostrfeedz.com)
 - 🔐 Connect with your Nostr extension (Alby, nos2x, etc.)
 - 📰 Subscribe to your favorite RSS feeds and Nostr authors
@@ -199,7 +199,7 @@ If you haven't tried Nostr-Feedz yet:
 
 ## 🐛 Found a Bug?
 
-Report issues on our [GitHub repository](https://github.com/privkeyio/Nostr-Feedz) or reach out on Nostr:
+Report issues on our [GitHub repository](https://github.com/privkeyio/readstr) or reach out on Nostr:
 - **npub**: `npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7`
 
 ---

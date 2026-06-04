@@ -1,8 +1,8 @@
-# Nostr-Feedz CLI Development Guide
+# Readstr CLI Development Guide
 
 ## Project Overview
 
-Build a **command-line interface (CLI) client** for Nostr-Feedz using **Go** and **Charm's Bubble Tea framework** for TUI components. The CLI should work both as a **standalone RSS/Nostr feed reader** and optionally sync with the **Nostr-Feedz web app** via Nostr protocol and REST APIs.
+Build a **command-line interface (CLI) client** for Readstr using **Go** and **Charm's Bubble Tea framework** for TUI components. The CLI should work both as a **standalone RSS/Nostr feed reader** and optionally sync with the **Readstr web app** via Nostr protocol and REST APIs.
 
 ### Target Features
 - **RSS & Nostr Feed Management**: Subscribe, list, read feeds
@@ -63,7 +63,7 @@ nostrfeedz-cli/
 │   │   ├── fetcher.go           # RSS/Nostr feed fetcher
 │   │   └── parser.go            # Content parser
 │   ├── api/
-│   │   └── client.go            # Nostr-Feedz API client
+│   │   └── client.go            # Readstr API client
 │   └── config/
 │       └── config.go            # Configuration management
 ├── pkg/
@@ -159,7 +159,7 @@ CREATE TABLE preferences (
 
 ## Nostr Integration
 
-Nostr-Feedz uses two types of Nostr events for cross-device synchronization:
+Readstr uses two types of Nostr events for cross-device synchronization:
 - **Kind 30404** - Subscription list sync (which feeds you're subscribed to)
 - **Kind 30405** - Read status sync (which articles you've read)
 
@@ -557,7 +557,7 @@ func (m Model) View() string {
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│ Nostr-Feedz CLI                                          [Help: ?]  │
+│ Readstr CLI                                          [Help: ?]  │
 ├───────────────┬───────────────────────┬─────────────────────────────┤
 │   Feeds       │   Articles            │   Reader                    │
 │               │                       │                             │
@@ -948,7 +948,7 @@ func (f *Fetcher) fetchNostr(feed *Feed) ([]*FeedItem, error) {
 
 For questions or collaboration:
 - **Web App**: https://nostrfeedz.com
-- **GitHub**: https://github.com/privkeyio/Nostr-Feedz
+- **GitHub**: https://github.com/privkeyio/readstr
 - **Nostr**: npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7
 
 Happy coding! 🚀
