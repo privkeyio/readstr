@@ -51,14 +51,14 @@ function asString(value: unknown): string | undefined {
 }
 
 /**
- * Compare two identity strings for equality. We require plain (case
- * insensitive) string equality. NOTE: this intentionally does NOT attempt to
+ * Plain case-insensitive string equality, used both for identity binding and
+ * event-name matching. For identities this intentionally does NOT attempt to
  * reconcile an npub-encoded value against its hex equivalent — if the token
  * carries hex and the body carries npub (or vice versa), they are treated as a
  * mismatch and rejected. This is the conservative, fail-closed choice; loosen
  * it only once Flash's exact token schema is confirmed.
  */
-function identityMatches(a: string, b: string): boolean {
+function equalsIgnoreCase(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase()
 }
 
@@ -110,7 +110,7 @@ export function verifyFlashWebhook(
   if (tokenIdentity) {
     // Token carries an identity: it wins. If the body also provides one, it
     // MUST match — otherwise this is a body-retarget attempt.
-    if (bodyIdentity && !identityMatches(tokenIdentity, bodyIdentity)) {
+    if (bodyIdentity && !equalsIgnoreCase(tokenIdentity, bodyIdentity)) {
       console.warn(
         '[flash-webhook] rejected: body identity does not match signed token identity ' +
           '(possible replay/retarget attack)'
@@ -144,7 +144,7 @@ export function verifyFlashWebhook(
   const tokenEvent = asString(decoded.eventType?.name)
   const bodyEvent = asString(body.eventType?.name)
 
-  if (tokenEvent && bodyEvent && !identityMatches(tokenEvent, bodyEvent)) {
+  if (tokenEvent && bodyEvent && !equalsIgnoreCase(tokenEvent, bodyEvent)) {
     console.warn('[flash-webhook] rejected: body event name does not match signed token event name')
     return { ok: false, status: 403, error: 'Event mismatch' }
   }

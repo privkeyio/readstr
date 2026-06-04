@@ -5,7 +5,10 @@ import { nip19 } from 'nostr-tools';
 const ADMIN_NPUB = 'npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7';
 
 const decodedAdmin = nip19.decode(ADMIN_NPUB);
-const ADMIN_HEX = decodedAdmin.type === 'npub' ? decodedAdmin.data : '';
+if (decodedAdmin.type !== 'npub' || !/^[0-9a-f]{64}$/.test(decodedAdmin.data)) {
+  throw new Error('admin: ADMIN_NPUB did not decode to a valid hex pubkey');
+}
+const ADMIN_HEX = decodedAdmin.data;
 
 export const adminRouter = createTRPCRouter({
   getStats: protectedProcedure

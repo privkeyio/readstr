@@ -88,18 +88,20 @@ async function saveStorageData(data: Partial<StorageData>): Promise<void> {
 async function getNostrAuthHeader(
   url: string,
   method: string,
-  nostrAuth: NostrAuthData | null
+  nostrAuth: NostrAuthData | null,
+  body: string | null = null
 ): Promise<string | null> {
   if (!nostrAuth || !nostrAuth.pubkey) return null;
 
   if (nostrAuth.method === 'nsec' && nostrAuth.privateKeyHex) {
-    return generateAuthHeader(url, method, nostrAuth.pubkey, nostrAuth.privateKeyHex);
+    return generateAuthHeader(url, method, nostrAuth.pubkey, nostrAuth.privateKeyHex, body);
   }
 
   // TODO: nip07 signing must happen in a content/page context. There is no
   // window.nostr in the background service worker, so we cannot produce a
-  // NIP-98 event here for the nip07 method. Requests for nip07 users will be
-  // unauthenticated until signing is delegated to a page/content script.
+  // NIP-98 event (including the `payload` body binding) here for the nip07
+  // method. Requests for nip07 users will be unauthenticated until signing is
+  // delegated to a page/content script.
   return null;
 }
 
@@ -196,6 +198,7 @@ async function markItemAsRead(itemId: string): Promise<void> {
   const baseUrl = sanitizeUrl(settings.webAppUrl);
   if (!baseUrl) return;
   const url = `${baseUrl}/api/trpc/feed.markAsRead`;
+  const body = JSON.stringify({ json: { itemId } });
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -204,7 +207,7 @@ async function markItemAsRead(itemId: string): Promise<void> {
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   } else if (nostrAuth && nostrAuth.pubkey) {
-    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth);
+    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth, body);
     if (nostrHeader) {
       headers['Authorization'] = nostrHeader;
     }
@@ -214,7 +217,7 @@ async function markItemAsRead(itemId: string): Promise<void> {
     method: 'POST',
     headers,
     credentials: 'include',
-    body: JSON.stringify({ json: { itemId } }),
+    body,
   });
 }
 
@@ -228,6 +231,7 @@ async function markAllAsRead(): Promise<void> {
   const baseUrl = sanitizeUrl(settings.webAppUrl);
   if (!baseUrl) return;
   const url = `${baseUrl}/api/trpc/feed.markAllAsRead`;
+  const body = JSON.stringify({ json: {} });
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -236,7 +240,7 @@ async function markAllAsRead(): Promise<void> {
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   } else if (nostrAuth && nostrAuth.pubkey) {
-    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth);
+    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth, body);
     if (nostrHeader) {
       headers['Authorization'] = nostrHeader;
     }
@@ -246,7 +250,7 @@ async function markAllAsRead(): Promise<void> {
     method: 'POST',
     headers,
     credentials: 'include',
-    body: JSON.stringify({ json: {} }),
+    body,
   });
 
   updateBadge(0);
@@ -263,6 +267,7 @@ async function addFavorite(itemId: string): Promise<void> {
   const baseUrl = sanitizeUrl(settings.webAppUrl);
   if (!baseUrl) return;
   const url = `${baseUrl}/api/trpc/feed.addFavorite`;
+  const body = JSON.stringify({ json: { itemId } });
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -271,7 +276,7 @@ async function addFavorite(itemId: string): Promise<void> {
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   } else if (nostrAuth && nostrAuth.pubkey) {
-    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth);
+    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth, body);
     if (nostrHeader) {
       headers['Authorization'] = nostrHeader;
     }
@@ -281,7 +286,7 @@ async function addFavorite(itemId: string): Promise<void> {
     method: 'POST',
     headers,
     credentials: 'include',
-    body: JSON.stringify({ json: { itemId } }),
+    body,
   });
 }
 
@@ -295,6 +300,7 @@ async function removeFavorite(itemId: string): Promise<void> {
   const baseUrl = sanitizeUrl(settings.webAppUrl);
   if (!baseUrl) return;
   const url = `${baseUrl}/api/trpc/feed.removeFavorite`;
+  const body = JSON.stringify({ json: { itemId } });
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -303,7 +309,7 @@ async function removeFavorite(itemId: string): Promise<void> {
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   } else if (nostrAuth && nostrAuth.pubkey) {
-    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth);
+    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth, body);
     if (nostrHeader) {
       headers['Authorization'] = nostrHeader;
     }
@@ -313,7 +319,7 @@ async function removeFavorite(itemId: string): Promise<void> {
     method: 'POST',
     headers,
     credentials: 'include',
-    body: JSON.stringify({ json: { itemId } }),
+    body,
   });
 }
 
@@ -906,12 +912,19 @@ async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boo
     if (hasAuth && baseUrl) {
       try {
         const url = `${baseUrl}/api/trpc/feed.subscribeFeed`;
+        const body = JSON.stringify({
+          json: {
+            type: 'RSS',
+            url: sanitizedFeedUrl,
+            title: newFeed.title,
+          },
+        });
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 
         if (storage.authToken) {
           headers['Authorization'] = `Bearer ${storage.authToken}`;
         } else if (storage.nostrAuth?.pubkey) {
-          const nostrHeader = await getNostrAuthHeader(url, 'POST', storage.nostrAuth);
+          const nostrHeader = await getNostrAuthHeader(url, 'POST', storage.nostrAuth, body);
           if (nostrHeader) {
             headers['Authorization'] = nostrHeader;
           }
@@ -921,13 +934,7 @@ async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boo
           method: 'POST',
           headers,
           credentials: 'include',
-          body: JSON.stringify({
-            json: {
-              type: 'RSS',
-              url: sanitizedFeedUrl,
-              title: newFeed.title,
-            },
-          }),
+          body,
         });
       } catch (err) {
         console.error('Failed to sync feed with account:', err);

@@ -48,25 +48,31 @@ export async function POST(request: NextRequest) {
         console.log('User subscription activated:', userPubkey.substring(0, 10) + '...')
         break
 
-      case 'renewal_successful':
-        // Extend subscription by 30 days
-        await db.userSubscription.update({
+      case 'renewal_successful': {
+        // Extend subscription by 30 days. Upsert so a webhook for a row we have
+        // not seen yet does not 500 and trigger infinite Flash retries.
+        const subscriptionEndsAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+        await db.userSubscription.upsert({
           where: { userPubkey },
-          data: {
+          create: {
+            userPubkey,
             status: 'ACTIVE',
-            subscriptionEndsAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+            trialEndsAt: new Date(),
+            subscriptionEndsAt,
+            cancelledAt: null,
           },
+          update: { status: 'ACTIVE', subscriptionEndsAt, cancelledAt: null },
         })
         console.log('Subscription renewed:', userPubkey.substring(0, 10) + '...')
         break
+      }
 
       case 'renewal_failed':
         // Mark as PAST_DUE
-        await db.userSubscription.update({
+        await db.userSubscription.upsert({
           where: { userPubkey },
-          data: {
-            status: 'PAST_DUE',
-          },
+          create: { userPubkey, status: 'PAST_DUE', trialEndsAt: new Date() },
+          update: { status: 'PAST_DUE' },
         })
         console.log('Renewal failed:', userPubkey.substring(0, 10) + '...')
         break
@@ -74,12 +80,10 @@ export async function POST(request: NextRequest) {
       case 'user_paused_subscription':
       case 'user_cancelled_subscription':
         // Mark as cancelled but keep until end date
-        await db.userSubscription.update({
+        await db.userSubscription.upsert({
           where: { userPubkey },
-          data: {
-            status: 'CANCELLED',
-            cancelledAt: new Date(),
-          },
+          create: { userPubkey, status: 'CANCELLED', trialEndsAt: new Date(), cancelledAt: new Date() },
+          update: { status: 'CANCELLED', cancelledAt: new Date() },
         })
         console.log('Subscription cancelled:', userPubkey.substring(0, 10) + '...')
         break

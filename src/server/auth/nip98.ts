@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import { verifyEvent, type Event as NostrToolsEvent } from 'nostr-tools'
 
 /**
@@ -30,9 +31,11 @@ const TIMESTAMP_TOLERANCE_SECONDS = 60
  * Tradeoff: we match on pathname + the *sorted* set of query parameters, and we
  * ignore scheme/host. This is slightly looser than a full-URL match but is the
  * tightest comparison that survives a reverse proxy reliably. The signature
- * still binds the event to this exact path + input, which is what matters for
- * replay/scoping; an attacker cannot forge the event for a different procedure
- * or input without the user's key.
+ * binds the event to this exact path + query input. For GET requests the input
+ * lives in the query string, so it is covered by the `u` tag. For mutations the
+ * body is NOT in the URL, so a captured header could otherwise be replayed with
+ * a different body within the clock-skew window — the `payload` tag (see
+ * verifyNip98Header) closes that gap by binding sha256(body) into the signature.
  */
 function urlTagMatches(signedUrl: string, requestUrl: string): boolean {
   try {
@@ -83,6 +86,26 @@ function getTag(event: NostrToolsEvent, name: string): string | undefined {
   return tag?.[1]
 }
 
+// Single-use tracking of consumed event ids to prevent replay within the
+// acceptance window. An id is only valid until its signed `created_at` falls
+// out of tolerance, after which the timestamp check rejects it regardless, so
+// we can safely evict entries once they expire.
+const seenEventIds = new Map<string, number>()
+
+function pruneSeen(now: number): void {
+  for (const [id, expiresAt] of seenEventIds) {
+    if (expiresAt <= now) seenEventIds.delete(id)
+  }
+}
+
+// Returns true if the id was already consumed; otherwise records it.
+function consumeEventId(id: string, now: number): boolean {
+  pruneSeen(now)
+  if (seenEventIds.has(id)) return true
+  seenEventIds.set(id, now + TIMESTAMP_TOLERANCE_SECONDS)
+  return false
+}
+
 /**
  * Verify a NIP-98 Authorization header.
  *
@@ -91,7 +114,7 @@ function getTag(event: NostrToolsEvent, name: string): string | undefined {
  */
 export async function verifyNip98Header(
   authHeader: string | undefined,
-  opts: { url: string; method: string }
+  opts: { url: string; method: string; body?: string | null }
 ): Promise<string | null> {
   try {
     if (!authHeader) return null
@@ -121,6 +144,23 @@ export async function verifyNip98Header(
     const uTag = getTag(event, 'u')
     if (!uTag) return null
     if (!urlTagMatches(uTag, opts.url)) return null
+
+    // 6. Body binding via `payload` tag (NIP-98). For non-GET methods the body
+    // is not covered by the `u` tag, so we require the signature to commit to
+    // sha256(rawBody). When present, it must match; for mutations it is
+    // mandatory so a captured header cannot be replayed against a new body.
+    const method = opts.method.toUpperCase()
+    const payloadTag = getTag(event, 'payload')
+    const isMutation = method !== 'GET' && method !== 'HEAD'
+    if (payloadTag || isMutation) {
+      if (!payloadTag) return null
+      const body = opts.body ?? ''
+      const digest = createHash('sha256').update(body, 'utf8').digest('hex')
+      if (digest !== payloadTag.toLowerCase()) return null
+    }
+
+    // 7. Single-use: reject an event id we have already accepted in-window.
+    if (consumeEventId(event.id, now)) return null
 
     // All checks passed; the pubkey is now trustworthy.
     return event.pubkey

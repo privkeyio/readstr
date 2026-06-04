@@ -12,6 +12,14 @@ import { type UnsignedEvent, type Event as NostrEvent } from 'nostr-tools'
 
 export const api = createTRPCReact<AppRouter>()
 
+async function sha256Hex(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input)
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(digest))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
 // Current signer, kept in a module-scoped ref so the per-request fetch wrapper
 // (created once when the client is built) always sees the latest auth state.
 // `sign` is null when the user can't sign (e.g. npub+password read-only mode),
@@ -80,13 +88,26 @@ export function TRPCReactProvider(props: {
             const sign = currentSign
             if (sign) {
               try {
+                // For mutations the body is not in the URL, so bind it into the
+                // signature via the NIP-98 `payload` tag (sha256 of the exact
+                // bytes we send). We add it inside the sign wrapper so the hash
+                // commits to the same string the server hashes server-side.
+                const payloadHash =
+                  method !== 'GET' && method !== 'HEAD' && typeof init?.body === 'string'
+                    ? await sha256Hex(init.body)
+                    : null
+
                 // nip98.getToken builds + signs the kind 27235 event and returns
                 // the base64 token; the `true` arg prepends the "Nostr " scheme.
                 const token = await nip98.getToken(
                   url,
                   method,
                   async e => {
-                    const signed = await sign(e as unknown as UnsignedEvent)
+                    const event = e as unknown as UnsignedEvent
+                    if (payloadHash) {
+                      event.tags = [...event.tags, ['payload', payloadHash]]
+                    }
+                    const signed = await sign(event)
                     if (!signed) throw new Error('signing returned null')
                     return signed as unknown as NostrEvent
                   },

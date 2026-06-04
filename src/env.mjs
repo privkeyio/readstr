@@ -20,6 +20,21 @@ const client = z.object({
   // No client-side env vars needed for now
 })
 
+// Both escape-hatch flags are full auth-bypass foot-guns. Refuse to boot if
+// either is enabled in production.
+const refineInsecureFlags = (val, ctx) => {
+  if (val.NODE_ENV !== 'production') return
+  for (const flag of ['ALLOW_INSECURE_HEADER_AUTH', 'ALLOW_FLASH_BODY_IDENTITY']) {
+    if (val[flag] === 'true') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [flag],
+        message: `${flag} must not be 'true' in production (auth bypass)`,
+      })
+    }
+  }
+}
+
 const processEnv = {
   DATABASE_URL: process.env.DATABASE_URL,
   NODE_ENV: process.env.NODE_ENV,
@@ -30,7 +45,7 @@ const processEnv = {
   ALLOW_FLASH_BODY_IDENTITY: process.env.ALLOW_FLASH_BODY_IDENTITY,
 }
 
-const merged = server.merge(client)
+const merged = server.merge(client).superRefine(refineInsecureFlags)
 
 let env = {} as z.infer<typeof merged>
 
