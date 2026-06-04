@@ -199,7 +199,7 @@ If you haven't tried Nostr-Feedz yet:
 
 ## 🐛 Found a Bug?
 
-Report issues on our [GitHub repository](https://github.com/PlebOne/Nostr-Feedz) or reach out on Nostr:
+Report issues on our [GitHub repository](https://github.com/privkeyio/Nostr-Feedz) or reach out on Nostr:
 - **npub**: `npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7`
 
 ---

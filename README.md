@@ -1,6 +1,19 @@
-# Nostr-Feedz
+# Nostr-Feedz (Active Fork)
+
+**This is an active fork of the original [Nostr-Feedz](https://github.com/PlebOne/Nostr-Feedz).**
+The original repository appears to be no longer maintained. This fork is actively maintained and improved.
 
 A modern, Google Reader-style feed aggregator that combines traditional RSS feeds with Nostr's decentralized long-form content (NIP-23) and video content.
+
+## Improvements in This Fork
+
+- **Automatic bidirectional sync** with category support
+- **Dual organization modes**: Tags or Categories, with an Uncategorized fallback
+- **Chrome extension** with feed detection, background sync, offline caching, and desktop notifications
+- **Admin Dashboard** for managing the feed directory
+- **Go/Charm TUI client** with a CLI development guide
+- Configurable Nostr relays with the missing `nostrRelays` migration restored
+- Fixes to organization mode switching and overall stability
 
 ## Overview
 
@@ -137,7 +150,7 @@ Nostr-Feedz is a full-stack web application built with Next.js that provides a u
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/PlebOne/Nostr-Feedz.git
+git clone https://github.com/privkeyio/Nostr-Feedz.git
 cd Nostr-Feedz
 ```
 

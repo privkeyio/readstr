@@ -948,7 +948,7 @@ func (f *Fetcher) fetchNostr(feed *Feed) ([]*FeedItem, error) {
 
 For questions or collaboration:
 - **Web App**: https://nostrfeedz.com
-- **GitHub**: https://github.com/PlebOne/Nostr-Feedz
+- **GitHub**: https://github.com/privkeyio/Nostr-Feedz
 - **Nostr**: npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7
 
 Happy coding! 🚀
