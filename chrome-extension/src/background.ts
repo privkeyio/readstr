@@ -709,6 +709,11 @@ async function handleMessage(
         return { success: true };
       }
 
+      const existing = await getStorageData();
+      if (existing.nostrAuth?.method === 'nsec' && existing.nostrAuth.privateKeyHex) {
+        return { success: true };
+      }
+
       const nostrAuth: NostrAuthData = {
         method: session.method === 'nip07' ? 'nip07' : 'nsec',
         pubkey: session.pubkey,
