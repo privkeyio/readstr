@@ -17,7 +17,7 @@ import {
   publishSubscriptionList,
   buildSubscriptionListFromFeeds,
 } from '@/lib/nostr-sync'
-import type { UnsignedEvent, Event } from 'nostr-tools'
+import type { UnsignedEvent } from 'nostr-tools'
 import type { inferRouterOutputs } from '@trpc/server'
 import type { AppRouter } from '@/server/api/root'
 
@@ -54,7 +54,7 @@ const QUICK_MARK_READ_OPTIONS: { value: MarkReadBehavior; label: string; helper:
 ]
 
 export function FeedReader() {
-  const { user, disconnect, authMethod, signEvent: signNostrEvent } = useNostrAuth()
+  const { user, disconnect, authMethod, signEvent: signNostrEvent, signEventOrThrow } = useNostrAuth()
   const { theme } = useTheme()
   const router = useRouter()
   const utils = api.useUtils()
@@ -771,13 +771,7 @@ export function FeedReader() {
 
       const subscriptionList = buildSubscriptionListFromFeeds(allSubscriptions)
 
-      const signEvent = async (event: UnsignedEvent): Promise<Event> => {
-        const signedEvent = await signNostrEvent(event)
-        if (!signedEvent) throw new Error('Failed to sign event')
-        return signedEvent
-      }
-
-      const result = await publishSubscriptionList(subscriptionList, signEvent)
+      const result = await publishSubscriptionList(subscriptionList, signEventOrThrow)
       
       if (result.success) {
         console.log('✅ Auto-export successful:', result.eventId)
@@ -788,7 +782,7 @@ export function FeedReader() {
       console.error('❌ Auto-export error:', error)
       // Silently fail - don't interrupt user experience
     }
-  }, [user?.npub, authMethod, signNostrEvent, utils.feed])
+  }, [user?.npub, authMethod, signEventOrThrow, utils.feed])
 
   // Handle importing feeds from Nostr sync
   const handleImportFeeds = async (feedsToImport: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => {

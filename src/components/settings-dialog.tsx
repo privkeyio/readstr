@@ -12,7 +12,6 @@ import {
   setLastSyncTime,
   type SubscriptionList,
 } from '@/lib/nostr-sync'
-import type { UnsignedEvent, Event } from 'nostr-tools'
 
 export type MarkReadBehavior = 'on-open' | 'after-10s' | 'never'
 export type OrganizationMode = 'tags' | 'categories'
@@ -117,7 +116,7 @@ const CATEGORY_COLORS = [
 const CATEGORY_ICONS = ['📁', '📰', '🎬', '🎵', '💼', '🎮', '📚', '🔬', '💡', '🌍', '⚡', '🎯']
 
 export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds }: SettingsDialogProps) {
-  const { authMethod, signEvent: signNostrEvent } = useNostrAuth()
+  const { user, authMethod, signEventOrThrow } = useNostrAuth()
   const [activeTab, setActiveTab] = useState<SettingsTab>('relays')
   const [relays, setRelays] = useState<Relay[]>([])
   const [newRelayUrl, setNewRelayUrl] = useState('')
@@ -201,7 +200,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
 
   // Export subscriptions to Nostr
   const handleExportToNostr = async () => {
-    if (authMethod !== 'nip07') {
+    if (authMethod !== 'nip07' || !user?.pubkey) {
       alert('Connect with a Nostr browser extension (NIP-07) to sync.')
       return
     }
@@ -211,13 +210,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
     try {
       const subscriptionList = buildSubscriptionListFromFeeds(feeds)
 
-      const signEvent = async (event: UnsignedEvent): Promise<Event> => {
-        const signedEvent = await signNostrEvent(event)
-        if (!signedEvent) throw new Error('Failed to sign event')
-        return signedEvent
-      }
-
-      const result = await publishSubscriptionList(subscriptionList, signEvent)
+      const result = await publishSubscriptionList(subscriptionList, signEventOrThrow)
       
       if (result.success) {
         const now = Math.floor(Date.now() / 1000)

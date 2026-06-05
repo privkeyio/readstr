@@ -1,6 +1,6 @@
 'use client'
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react'
 import { Event, nip19, UnsignedEvent } from 'nostr-tools'
 
 export type NostrAuthMethod = 'nip07' | 'npub_password' | null
@@ -24,6 +24,7 @@ export interface NostrAuthState {
   connect: (method: NostrAuthMethod, credentials?: { npub?: string; password?: string }) => Promise<void>
   disconnect: () => void
   signEvent: (event: UnsignedEvent) => Promise<Event | null>
+  signEventOrThrow: (event: UnsignedEvent) => Promise<Event>
   getPublicKey: () => string | null
 }
 
@@ -189,7 +190,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
     localStorage.removeItem('nostr_session')
   }
 
-  const signEvent = async (unsignedEvent: UnsignedEvent): Promise<Event | null> => {
+  const signEvent = useCallback(async (unsignedEvent: UnsignedEvent): Promise<Event | null> => {
     if (!isConnected || !user) return null
 
     try {
@@ -210,7 +211,13 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
       console.error('Signing failed:', error)
       return null
     }
-  }
+  }, [isConnected, user, authMethod])
+
+  const signEventOrThrow = useCallback(async (unsignedEvent: UnsignedEvent): Promise<Event> => {
+    const signedEvent = await signEvent(unsignedEvent)
+    if (!signedEvent) throw new Error('Failed to sign event')
+    return signedEvent
+  }, [signEvent])
 
   const getPublicKeyMethod = (): string | null => {
     return user?.pubkey || null
@@ -223,6 +230,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
     connect,
     disconnect,
     signEvent,
+    signEventOrThrow,
     getPublicKey: getPublicKeyMethod,
   }
 
