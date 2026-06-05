@@ -62,7 +62,7 @@ This repo is checked out on two kinds of machines. **Figure out which one you ar
 | `bd dolt push` / Session Completion beads steps | Apply | Do **not** apply — there is no path for beads data to reach origin |
 | Hosts readstr.privkey.io | No | Yes (host Caddy → app container) |
 
-**How to tell where you are:** run `bd vc status`. If it errors with *"requires Dolt backend"*, you are on the **server** — do all issue tracking on the dev machine instead, and skip every beads/`bd dolt push` step when ending a session here. (Note: `bd dolt` is not a valid command in current bd versions regardless; sync is handled by the daemon / `bd vc` on the dev box.)
+**How to tell where you are:** run `bd vc status`. If it errors with *"requires Dolt backend"*, you are on the **server** — do all issue tracking on the dev machine instead, and skip every beads/`bd dolt push` step when ending a session here. (Note: on the dev box, `bd dolt push` is the correct sync command in bd 1.0.4 — it pushes the Dolt data to `refs/dolt/data` on origin. There is no `bd daemon` in 1.0.4; `bd vc status` is just for inspecting local branch/commit state.)
 
 **Server session completion** is just code, no beads:
 ```bash
