@@ -99,21 +99,6 @@ export default function LegalPage() {
             </div>
           </section>
 
-          <div className="mt-12 border-t border-[#27ae60]/15 pt-8 text-center">
-            <p className="mb-2 text-[#B3B3B3]">
-              © {new Date().getFullYear()}{' '}
-              <a
-                href="https://privkey.io"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="font-semibold text-[#27ae60] transition-colors hover:text-[#2ecc71]"
-              >
-                PrivKey LLC
-              </a>
-            </p>
-            <p className="text-sm font-medium text-[#27ae60]">Your keys, your stack</p>
-          </div>
-
           <div className="mt-8 text-center">
             <Link
               href="/"
