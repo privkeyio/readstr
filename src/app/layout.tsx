@@ -1,19 +1,30 @@
 import './globals.css'
-import { Inter } from 'next/font/google'
+import { Inter, Space_Grotesk } from 'next/font/google'
 import { TRPCReactProvider } from '@/trpc/react'
 import { NostrAuthProvider } from '@/contexts/NostrAuthContext'
 import { ThemeProvider } from '@/contexts/ThemeContext'
 import { Footer } from '@/components/footer'
 
 const inter = Inter({ subsets: ['latin'] })
+const spaceGrotesk = Space_Grotesk({
+  subsets: ['latin'],
+  variable: '--font-brand',
+  weight: ['400', '500', '600', '700'],
+})
 
 export const metadata = {
-  title: 'Nostr Feedz',
-  description: 'A decentralized social feed powered by Nostr',
+  title: 'Readstr — by PrivKey',
+  description: 'Readstr: a sovereign RSS + Nostr feed reader by PrivKey. Your keys, your stack.',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'default',
-    title: 'Nostr Feedz',
+    title: 'Readstr',
+  },
+  openGraph: {
+    title: 'Readstr — by PrivKey',
+    description: 'A sovereign RSS + Nostr feed reader by PrivKey. Your keys, your stack.',
+    siteName: 'Readstr',
+    type: 'website',
   },
 }
 
@@ -21,7 +32,7 @@ export const viewport = {
   width: 'device-width',
   initialScale: 1,
   maximumScale: 5,
-  themeColor: '#3B82F6',
+  themeColor: '#27ae60',
 }
 
 export default function RootLayout({
@@ -30,12 +41,12 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en">
+    <html lang="en" className={spaceGrotesk.variable}>
       <head>
         <link rel="manifest" href="/manifest.json" />
-        <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-        <link rel="apple-touch-icon" href="/icon-192.png" />
-        <meta name="theme-color" content="#3B82F6" />
+        <link rel="icon" href="/privkey-favicon.png" type="image/png" />
+        <link rel="apple-touch-icon" href="/privkey-favicon.png" />
+        <meta name="theme-color" content="#27ae60" />
       </head>
       <body className={`${inter.className} flex flex-col min-h-screen`}>
         <ThemeProvider>

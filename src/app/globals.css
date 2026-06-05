@@ -22,11 +22,12 @@
   
   --color-border-primary: 226 232 240;
   --color-border-secondary: 241 245 249;
-  --color-border-accent: 59 130 246;
-  
-  --color-accent: 59 130 246;
-  --color-accent-hover: 37 99 235;
-  --color-accent-light: 219 234 254;
+  --color-border-accent: 39 174 96;
+
+  /* PrivKey brand green (#27ae60) */
+  --color-accent: 39 174 96;
+  --color-accent-hover: 34 153 84;
+  --color-accent-light: 220 245 230;
   
   --color-surface: 255 255 255;
   --color-surface-raised: 255 255 255;
@@ -69,11 +70,12 @@ html.dark {
   
   --color-border-primary: 51 65 85;
   --color-border-secondary: 71 85 105;
-  --color-border-accent: 96 165 250;
-  
-  --color-accent: 96 165 250;
-  --color-accent-hover: 147 197 253;
-  --color-accent-light: 30 58 138;
+  --color-border-accent: 46 204 113;
+
+  /* PrivKey brand green (dark variant) */
+  --color-accent: 46 204 113;
+  --color-accent-hover: 88 214 141;
+  --color-accent-light: 20 83 45;
   
   --color-surface: 30 41 59;
   --color-surface-raised: 51 65 85;
@@ -183,6 +185,11 @@ body {
    ============================================ */
 
 @layer utilities {
+  /* PrivKey brand font (Space Grotesk) for marketing surfaces */
+  .font-brand {
+    font-family: var(--font-brand), 'Space Grotesk', system-ui, sans-serif;
+  }
+
   /* Background utilities */
   .bg-theme-primary { background-color: rgb(var(--color-bg-primary)); }
   .bg-theme-secondary { background-color: rgb(var(--color-bg-secondary)); }

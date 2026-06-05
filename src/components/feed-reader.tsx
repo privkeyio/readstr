@@ -941,7 +941,7 @@ export function FeedReader() {
             </svg>
           </button>
           <h1 className="text-lg font-bold text-theme-primary tracking-tight">
-            <span className="text-theme-accent">Nostr</span> Feedz
+            Readstr
           </h1>
           <div className="flex items-center gap-1">
             <ThemeToggleButton />
@@ -1037,7 +1037,7 @@ export function FeedReader() {
         <div className="hidden md:block p-5 border-b border-theme-primary flex-shrink-0">
           <div className="flex items-center justify-between mb-4">
             <h1 className="text-xl font-bold text-theme-primary tracking-tight">
-              <span className="text-theme-accent">Nostr</span> Feedz
+              Readstr
             </h1>
             <div className="flex items-center gap-1">
               <button

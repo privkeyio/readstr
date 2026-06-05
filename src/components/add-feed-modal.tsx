@@ -275,7 +275,7 @@ export function AddFeedModal({ isOpen, onClose, onAddFeed, isLoading = false, er
                     onClick={handleClose}
                     className="font-semibold text-theme-accent hover:underline"
                   >
-                    Check out the Nostr Feedz Guide
+                    Check out the Readstr Guide
                   </Link>
                   {' '}to generate RSS feeds from any npub.
                 </p>
