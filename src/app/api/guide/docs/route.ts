@@ -201,7 +201,7 @@ export async function GET() {
     cors: {
       description: 'CORS is enabled for all origins',
       allowedOrigins: '*',
-      allowedMethods: ['GET', 'POST', 'OPTIONS'],
+      allowedMethods: ['GET', 'OPTIONS'],
     },
   }
   

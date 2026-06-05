@@ -22,10 +22,15 @@ function sanitizeUrl(urlString: string): string | null {
   try {
     const url = new URL(urlString);
     if (!ALLOWED_PROTOCOLS.includes(url.protocol)) return null;
-    return url.href.replace(/\/+$/, '');
+    return url.href;
   } catch {
     return null;
   }
+}
+
+function normalizeBaseUrl(urlString: string): string | null {
+  const sanitized = sanitizeUrl(urlString);
+  return sanitized ? sanitized.replace(/\/+$/, '') : null;
 }
 
 const CONTAINER_ID = 'nostr-feedz-container';
@@ -307,7 +312,7 @@ async function syncWithAccount(feed: LocalFeed): Promise<void> {
     const hasAuth = authToken || nostrAuth?.pubkey;
     if (!hasAuth || !settings?.webAppUrl) return;
 
-    const baseUrl = sanitizeUrl(settings.webAppUrl);
+    const baseUrl = normalizeBaseUrl(settings.webAppUrl);
     if (!baseUrl || !feed.url) return;
 
     const url = `${baseUrl}/api/trpc/feed.subscribeFeed`;
@@ -315,8 +320,6 @@ async function syncWithAccount(feed: LocalFeed): Promise<void> {
 
     if (authToken) {
       headers['Authorization'] = `Bearer ${authToken}`;
-    } else if (nostrAuth?.pubkey) {
-      headers['x-nostr-pubkey'] = nostrAuth.pubkey;
     }
 
     await fetch(url, {
