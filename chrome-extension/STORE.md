@@ -125,7 +125,7 @@ English
 ### Small Tile (440x280)
 - Readstr logo centered
 - "RSS feeds, everywhere" tagline
-- Purple/blue gradient background
+- Green gradient background
 
 ### Large Tile (920x680)
 - Split view: left side shows feed detection on a webpage, right side shows the popup
