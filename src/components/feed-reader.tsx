@@ -54,7 +54,7 @@ const QUICK_MARK_READ_OPTIONS: { value: MarkReadBehavior; label: string; helper:
 ]
 
 export function FeedReader() {
-  const { user, disconnect, authMethod, signEvent: signNostrEvent, signEventOrThrow } = useNostrAuth()
+  const { user, disconnect, authMethod, signEventOrThrow } = useNostrAuth()
   const { theme } = useTheme()
   const router = useRouter()
   const utils = api.useUtils()
@@ -726,11 +726,7 @@ export function FeedReader() {
         content: noteContent,
       }
 
-      const signedEvent = await signNostrEvent(unsignedEvent)
-
-      if (!signedEvent) {
-        throw new Error('Failed to sign event')
-      }
+      const signedEvent = await signEventOrThrow(unsignedEvent)
 
       // Publish to relays
       const pool = new SimplePool()
