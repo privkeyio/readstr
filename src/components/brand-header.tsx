@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import Image from 'next/image'
+import { PrivKeyLogo } from './privkey-logo'
 
 export function BrandHeader({
   cta,
@@ -10,14 +10,7 @@ export function BrandHeader({
     <header className="w-full border-b border-[#27ae60]/15">
       <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-5">
         <Link href="/" className="flex items-center gap-3">
-          <Image
-            src="/privkey-logo-white.png"
-            alt="PrivKey"
-            width={234}
-            height={60}
-            priority
-            className="h-[60px] w-auto"
-          />
+          <PrivKeyLogo priority />
           <span className="hidden text-sm font-medium tracking-wide text-white/40 sm:inline">
             /
           </span>

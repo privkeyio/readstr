@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import Image from 'next/image'
+import { PrivKeyLogo } from './privkey-logo'
 
 export function Footer() {
   return (
@@ -7,13 +7,7 @@ export function Footer() {
       <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
         <div className="flex flex-col items-center justify-between gap-4 text-sm text-[#B3B3B3] md:flex-row">
           <div className="flex items-center gap-3">
-            <Image
-              src="/privkey-logo-white.png"
-              alt="PrivKey"
-              width={234}
-              height={60}
-              className="h-[60px] w-auto opacity-90"
-            />
+            <PrivKeyLogo className="h-[60px] w-auto opacity-90" />
             <span className="hidden text-white/30 sm:inline">|</span>
             <span className="hidden font-medium text-[#27ae60] sm:inline">
               Your keys, your stack
