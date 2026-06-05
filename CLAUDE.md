@@ -51,20 +51,51 @@ bd close <id>         # Complete work
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
 
+## Machine Roles: Dev vs Server
+
+This repo is checked out on two kinds of machines. **Figure out which one you are on before following the Beads "Session Completion" workflow above** — that workflow is written for the dev machine and does NOT apply on the server.
+
+| | **Dev machine** | **Server / deploy host** |
+|---|---|---|
+| Purpose | Write code, track work | Pull latest code, build, serve |
+| Beads | Source of truth. Dolt backend → syncs to `refs/dolt/data` on origin | Stealth mode (`.beads/` is in `.git/info/exclude`), SQLite backend — does NOT sync anywhere |
+| `bd dolt push` / Session Completion beads steps | Apply | Do **not** apply — there is no path for beads data to reach origin |
+| Hosts readstr.privkey.io | No | Yes (host Caddy → app container) |
+
+**How to tell where you are:** run `bd vc status`. If it errors with *"requires Dolt backend"*, you are on the **server** — do all issue tracking on the dev machine instead, and skip every beads/`bd dolt push` step when ending a session here. (Note: `bd dolt` is not a valid command in current bd versions regardless; sync is handled by the daemon / `bd vc` on the dev box.)
+
+**Server session completion** is just code, no beads:
+```bash
+git pull --rebase
+git push        # only if you committed code changes here
+```
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+npm install
+npm run build       # next build --webpack
+npx tsc --noEmit    # typecheck (no dedicated script)
+npm run lint        # next lint
+npm run dev         # local dev server
 ```
+
+## Deployment (server host only)
+
+The app runs via Docker Compose: a `postgres` service and an `app` service built from `Dockerfile`. The bundled `caddy` service is disabled (`docker-compose.override.yml`); the **host** Caddy owns ports 80/443 and reverse-proxies to the app on `127.0.0.1:3100`.
+
+To ship repo updates on the server:
+```bash
+git pull --rebase
+docker compose up -d --build app   # rebuild + restart only the app container
+docker compose ps                  # confirm it's up
+docker compose logs -f app         # watch startup
+```
+Postgres keeps its named volume across rebuilds. Note: the host Caddy bind-mounts its Caddyfile as a single file — edits that replace the file's inode won't be seen until the container is restarted.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Next.js 16 (App Router) + tRPC + Prisma/Postgres RSS & Nostr feed reader (PWA). Nostr auth is keyless via NIP-07 (`src/contexts/NostrAuthContext.tsx`); cross-device sync of subscriptions (kind 30404) and read status (kind 30405) goes through Nostr relays (`src/lib/nostr-sync.ts`) — the app never handles a private key.
 
 ## Conventions & Patterns
 
