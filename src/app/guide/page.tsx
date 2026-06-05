@@ -6,6 +6,7 @@ import { api } from "@/trpc/react";
 import { useRouter } from "next/navigation";
 import { useNostrAuth } from "@/contexts/NostrAuthContext";
 import { nip19 } from "nostr-tools";
+import { BrandHeader } from "@/components/brand-header";
 
 export default function GuidePage() {
   const { isConnected, getPublicKey } = useNostrAuth();
@@ -141,22 +142,27 @@ export default function GuidePage() {
   };
 
   return (
-    <main className="min-h-screen bg-gradient-to-b from-[#2e026d] to-[#15162c] text-white p-4 md:p-8">
-      <div className="max-w-7xl mx-auto">
+    <main className="font-brand relative flex min-h-screen flex-col bg-gradient-to-br from-[#1a1a1a] via-[#0d1117] to-[#161b22] text-white">
+      <BrandHeader cta={{ href: "/guide/submit", label: "Submit a Feed" }} />
+
+      <div className="mx-auto w-full max-w-6xl px-4 py-12">
         {/* Header */}
-        <div className="bg-white/10 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8 mb-6 border border-purple-400/30">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div className="mb-8 rounded-2xl border border-[#27ae60]/20 bg-white/[0.06] p-6 backdrop-blur-xl md:p-8">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
-              <h1 className="text-3xl md:text-4xl font-bold mb-2">
-                Nostr Feedz <span className="text-[hsl(280,100%,70%)]">Guide</span>
+              <h1 className="text-3xl font-extrabold tracking-tight md:text-4xl">
+                <span className="bg-gradient-to-br from-[#27ae60] via-[#2ecc71] to-[#58d68d] bg-clip-text text-transparent">
+                  Readstr
+                </span>{" "}
+                Guide
               </h1>
-              <p className="text-purple-200">
+              <p className="mt-2 text-base leading-relaxed text-[#B3B3B3]">
                 Discover long-form content creators on Nostr
               </p>
             </div>
-            <Link 
+            <Link
               href="/guide/submit"
-              className="bg-purple-600 text-white font-semibold py-2 px-6 rounded-md hover:bg-purple-700 text-center shadow-lg"
+              className="inline-block rounded-xl bg-gradient-to-br from-[#27ae60] to-[#229954] px-8 py-3 text-center text-base font-semibold text-white shadow-[0_4px_14px_rgba(39,174,96,0.25)] transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_8px_25px_rgba(39,174,96,0.35)]"
             >
               Submit a Feed
             </Link>
@@ -164,19 +170,19 @@ export default function GuidePage() {
         </div>
 
         {/* Filters */}
-        <div className="bg-white/10 backdrop-blur-sm rounded-lg shadow-lg p-6 mb-6 border border-purple-400/30">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold mb-3">Filter by Tags</h2>
+        <div className="mb-8 rounded-2xl border border-[#27ae60]/15 bg-white/[0.05] p-6 backdrop-blur-xl">
+          <div className="mb-5">
+            <h2 className="mb-3 text-lg font-semibold text-white">Filter by Tags</h2>
             {availableTags && availableTags.length > 0 ? (
               <div className="flex flex-wrap gap-2">
                 {availableTags.map(({ tag, count }) => (
                   <button
                     key={tag}
                     onClick={() => handleToggleTag(tag)}
-                    className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                    className={`rounded-full px-3 py-1 text-sm font-medium transition-all duration-300 ${
                       selectedTags.includes(tag)
-                        ? 'bg-purple-600 text-white shadow-lg'
-                        : 'bg-white/20 text-white hover:bg-white/30 border border-purple-300/50'
+                        ? "bg-gradient-to-br from-[#27ae60] to-[#229954] text-white shadow-[0_4px_14px_rgba(39,174,96,0.25)]"
+                        : "border border-[#27ae60]/25 bg-white/10 text-[#B3B3B3] hover:border-[#27ae60]/50 hover:bg-[#27ae60]/10 hover:text-white"
                     }`}
                   >
                     {tag} ({count})
@@ -184,23 +190,23 @@ export default function GuidePage() {
                 ))}
               </div>
             ) : (
-              <p className="text-purple-200">No tags available yet</p>
+              <p className="text-[#B3B3B3]">No tags available yet</p>
             )}
           </div>
 
           <div className="flex items-center gap-4">
-            <label htmlFor="orderBy" className="text-sm font-medium">
+            <label htmlFor="orderBy" className="text-sm font-medium text-white">
               Sort by:
             </label>
             <select
               id="orderBy"
               value={orderBy}
               onChange={(e) => setOrderBy(e.target.value as any)}
-              className="px-4 py-2 bg-white/20 border border-purple-400/50 text-white rounded-md focus:outline-none focus:ring-2 focus:ring-purple-400 backdrop-blur-sm"
+              className="rounded-xl border border-[#27ae60]/25 bg-white/10 px-4 py-2 text-white backdrop-blur-sm transition-colors focus:border-[#27ae60]/60 focus:outline-none focus:ring-2 focus:ring-[#27ae60]/40"
             >
-              <option value="popular" className="bg-slate-800">Most Popular</option>
-              <option value="recent_posts" className="bg-slate-800">Recently Posted</option>
-              <option value="newest" className="bg-slate-800">Newest Feeds</option>
+              <option value="popular" className="bg-[#161b22]">Most Popular</option>
+              <option value="recent_posts" className="bg-[#161b22]">Recently Posted</option>
+              <option value="newest" className="bg-[#161b22]">Newest Feeds</option>
             </select>
           </div>
         </div>
@@ -208,23 +214,23 @@ export default function GuidePage() {
         {/* Feeds List */}
         <div className="space-y-4">
           {feedsLoading ? (
-            <div className="bg-white/10 backdrop-blur-sm rounded-lg shadow p-8 text-center border border-purple-400/30">
-              <p className="text-purple-200">Loading feeds...</p>
+            <div className="rounded-2xl border border-[#27ae60]/15 bg-white/[0.05] p-8 text-center backdrop-blur-xl">
+              <p className="text-[#B3B3B3]">Loading feeds...</p>
             </div>
           ) : guideFeeds && guideFeeds.length > 0 ? (
             guideFeeds.map((feed: any) => (
               <div
                 key={feed.id}
-                className="bg-white/10 backdrop-blur-sm rounded-lg shadow-lg p-6 hover:shadow-xl transition-all border border-purple-400/30 hover:border-purple-400/60"
+                className="group rounded-2xl border border-[#27ae60]/15 bg-white/[0.06] p-6 backdrop-blur-xl transition-all duration-300 hover:-translate-y-1 hover:border-[#27ae60]/30 hover:bg-[#27ae60]/[0.08]"
               >
-                <div className="flex flex-col md:flex-row gap-4">
+                <div className="flex flex-col gap-4 md:flex-row">
                   {/* Profile Picture */}
                   {feed.picture && (
                     <div className="flex-shrink-0">
                       <img
                         src={feed.picture}
                         alt={feed.displayName}
-                        className="w-16 h-16 rounded-full object-cover border-2 border-purple-400/50"
+                        className="h-16 w-16 rounded-full border-2 border-[#27ae60]/40 object-cover"
                         onError={(e) => {
                           // Hide image if it fails to load (e.g., Twitter hotlinking blocked)
                           e.currentTarget.style.display = 'none'
@@ -235,15 +241,15 @@ export default function GuidePage() {
 
                   {/* Feed Info */}
                   <div className="flex-grow">
-                    <h3 className="text-xl font-bold mb-1 text-white">{feed.displayName}</h3>
+                    <h3 className="mb-1 text-xl font-bold text-white">{feed.displayName}</h3>
                     {feed.about && (
-                      <p className="text-purple-200 mb-3 line-clamp-2">
+                      <p className="mb-3 line-clamp-2 text-[#B3B3B3]">
                         {feed.about}
                       </p>
                     )}
 
                     {/* Meta Info */}
-                    <div className="flex flex-wrap gap-4 text-sm text-purple-200 mb-3">
+                    <div className="mb-3 flex flex-wrap gap-4 text-sm text-[#B3B3B3]">
                       <span>{feed.postCount} posts</span>
                       <span>{feed.subscriberCount} subscribers</span>
                       {feed.lastPublishedAt && (
@@ -256,10 +262,10 @@ export default function GuidePage() {
                     {/* Tags */}
                     {editingNpub === feed.npub ? (
                       <div className="mb-4">
-                        <label className="block text-sm font-medium text-purple-200 mb-2">
+                        <label className="mb-2 block text-sm font-medium text-[#B3B3B3]">
                           Edit Tags
                         </label>
-                        <div className="flex gap-2 mb-2">
+                        <div className="mb-2 flex gap-2">
                           <input
                             type="text"
                             value={editTagInput}
@@ -271,12 +277,12 @@ export default function GuidePage() {
                               }
                             }}
                             placeholder="Add a tag..."
-                            className="flex-1 px-3 py-2 bg-white/20 border border-purple-400/50 text-white rounded-md focus:outline-none focus:ring-2 focus:ring-purple-400"
+                            className="flex-1 rounded-xl border border-[#27ae60]/25 bg-white/10 px-3 py-2 text-white placeholder:text-white/40 focus:border-[#27ae60]/60 focus:outline-none focus:ring-2 focus:ring-[#27ae60]/40"
                           />
                           <button
                             onClick={handleAddEditTag}
                             disabled={editTags.length >= 10}
-                            className="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 disabled:opacity-50"
+                            className="rounded-xl bg-gradient-to-br from-[#27ae60] to-[#229954] px-4 py-2 font-semibold text-white transition-all duration-300 hover:-translate-y-0.5 disabled:opacity-50"
                           >
                             Add
                           </button>
@@ -286,12 +292,12 @@ export default function GuidePage() {
                             {editTags.map((tag) => (
                               <span
                                 key={tag}
-                                className="inline-flex items-center px-3 py-1 bg-purple-500/40 text-purple-100 rounded-full text-sm border border-purple-400/50"
+                                className="inline-flex items-center rounded-full border border-[#27ae60]/40 bg-[#27ae60]/15 px-3 py-1 text-sm text-white"
                               >
                                 {tag}
                                 <button
                                   onClick={() => handleRemoveEditTag(tag)}
-                                  className="ml-2 hover:text-white"
+                                  className="ml-2 text-[#B3B3B3] hover:text-white"
                                 >
                                   ×
                                 </button>
@@ -302,11 +308,11 @@ export default function GuidePage() {
                       </div>
                     ) : (
                       feed.tags.length > 0 && (
-                        <div className="flex flex-wrap gap-2 mb-4">
+                        <div className="mb-4 flex flex-wrap gap-2">
                           {feed.tags.map((tag: string) => (
                             <span
                               key={tag}
-                              className="px-2 py-1 bg-purple-500/30 text-purple-100 rounded text-xs border border-purple-400/50"
+                              className="rounded border border-[#27ae60]/30 bg-[#27ae60]/10 px-2 py-1 text-xs text-[#B3B3B3]"
                             >
                               {tag}
                             </span>
@@ -322,13 +328,13 @@ export default function GuidePage() {
                           <button
                             onClick={handleSaveTags}
                             disabled={updateTagsMutation.isPending || editTags.length === 0}
-                            className="px-4 py-2 bg-green-600 text-white font-semibold rounded-md hover:bg-green-700 disabled:opacity-50 text-sm"
+                            className="rounded-xl bg-gradient-to-br from-[#27ae60] to-[#229954] px-4 py-2 text-sm font-semibold text-white shadow-[0_4px_14px_rgba(39,174,96,0.25)] transition-all duration-300 hover:-translate-y-0.5 disabled:opacity-50"
                           >
                             {updateTagsMutation.isPending ? 'Saving...' : 'Save Tags'}
                           </button>
                           <button
                             onClick={handleCancelEdit}
-                            className="px-4 py-2 bg-white/20 text-white font-semibold rounded-md hover:bg-white/30 text-sm border border-purple-400/50"
+                            className="rounded-xl border border-[#27ae60]/25 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition-all duration-300 hover:border-[#27ae60]/50 hover:bg-white/20"
                           >
                             Cancel
                           </button>
@@ -337,14 +343,14 @@ export default function GuidePage() {
                         <>
                           <button
                             onClick={() => handleCopyRssUrl(feed.npub, feed.tags)}
-                            className="px-4 py-2 bg-white/20 text-white font-semibold rounded-md hover:bg-white/30 text-sm border border-purple-400/50"
+                            className="rounded-xl border border-[#27ae60]/25 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition-all duration-300 hover:border-[#27ae60]/50 hover:bg-white/20"
                           >
                             {copySuccess === feed.npub ? 'Copied!' : 'Copy RSS URL'}
                           </button>
                           <button
                             onClick={() => handleSubscribe(feed.npub, feed.displayName, feed.tags)}
                             disabled={subscribeMutation.isPending}
-                            className="px-4 py-2 bg-purple-600 text-white font-semibold rounded-md hover:bg-purple-700 disabled:opacity-50 text-sm shadow-lg"
+                            className="rounded-xl bg-gradient-to-br from-[#27ae60] to-[#229954] px-4 py-2 text-sm font-semibold text-white shadow-[0_4px_14px_rgba(39,174,96,0.25)] transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_8px_25px_rgba(39,174,96,0.35)] disabled:opacity-50"
                           >
                             {subscribeMutation.isPending ? 'Subscribing...' : 'Subscribe in App'}
                           </button>
@@ -352,14 +358,14 @@ export default function GuidePage() {
                             <>
                               <button
                                 onClick={() => handleStartEdit(feed.npub, feed.tags)}
-                                className="px-4 py-2 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-700 text-sm"
+                                className="rounded-xl border border-[#27ae60]/25 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition-all duration-300 hover:border-[#27ae60]/50 hover:bg-white/20"
                               >
                                 Edit Tags
                               </button>
                               <button
                                 onClick={() => handleDeleteEntry(feed.npub, feed.displayName)}
                                 disabled={deleteEntryMutation.isPending}
-                                className="px-4 py-2 bg-red-600 text-white font-semibold rounded-md hover:bg-red-700 disabled:opacity-50 text-sm"
+                                className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-300 transition-all duration-300 hover:bg-red-500/20 disabled:opacity-50"
                               >
                                 {deleteEntryMutation.isPending ? 'Deleting...' : 'Delete Entry'}
                               </button>
@@ -373,15 +379,15 @@ export default function GuidePage() {
               </div>
             ))
           ) : (
-            <div className="bg-white/10 backdrop-blur-sm rounded-lg shadow p-8 text-center border border-purple-400/30">
-              <p className="text-purple-200 mb-4">
+            <div className="rounded-2xl border border-[#27ae60]/15 bg-white/[0.05] p-8 text-center backdrop-blur-xl">
+              <p className="mb-4 text-[#B3B3B3]">
                 {selectedTags.length > 0
                   ? 'No feeds found with the selected tags.'
                   : 'No feeds in the guide yet. Be the first to submit one!'}
               </p>
               <Link
                 href="/guide/submit"
-                className="inline-block bg-purple-600 text-white font-semibold py-2 px-6 rounded-md hover:bg-purple-700 shadow-lg"
+                className="inline-block rounded-xl bg-gradient-to-br from-[#27ae60] to-[#229954] px-8 py-3 text-base font-semibold text-white shadow-[0_4px_14px_rgba(39,174,96,0.25)] transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_8px_25px_rgba(39,174,96,0.35)]"
               >
                 Submit a Feed
               </Link>
@@ -390,8 +396,8 @@ export default function GuidePage() {
         </div>
 
         {/* Back Link */}
-        <div className="mt-8 text-center">
-          <Link href="/" className="text-purple-300 hover:text-purple-200 hover:underline">
+        <div className="mt-10 text-center">
+          <Link href="/" className="text-sm font-medium text-[#27ae60] transition-colors hover:text-[#2ecc71]">
             &larr; Back to Home
           </Link>
         </div>

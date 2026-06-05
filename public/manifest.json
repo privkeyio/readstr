@@ -1,11 +1,11 @@
 {
-  "name": "Nostr Feedz",
-  "short_name": "Feedz",
-  "description": "A decentralized RSS and Nostr feed reader",
+  "name": "Readstr — by PrivKey",
+  "short_name": "Readstr",
+  "description": "A sovereign RSS and Nostr feed reader by PrivKey. Your keys, your stack.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#3B82F6",
+  "background_color": "#0d1117",
+  "theme_color": "#27ae60",
   "orientation": "portrait-primary",
   "icons": [
     {

@@ -876,7 +876,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
               <div>
                 <h3 className="text-lg font-bold text-theme-primary mb-2">About</h3>
                 <p className="text-sm text-theme-secondary">
-                  Nostr Feedz - A feed reader for RSS and Nostr long-form content (NIP-23)
+                  Readstr - A sovereign RSS and Nostr feed reader by PrivKey (NIP-23)
                 </p>
                 <p className="text-xs text-theme-tertiary mt-3">
                   Changes to relays will be applied on next feed refresh

@@ -2,6 +2,7 @@
 
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
 import { useEffect } from 'react'
+import { BrandHeader } from '@/components/brand-header'
 
 export default function TestAuthPage() {
   const { user, isConnected, connect, disconnect } = useNostrAuth()
@@ -16,72 +17,86 @@ export default function TestAuthPage() {
   }, [isConnected, user])
 
   return (
-    <div className="min-h-screen bg-gray-100 p-8">
-      <div className="max-w-2xl mx-auto bg-white rounded-lg shadow p-6">
-        <h1 className="text-2xl font-bold mb-4">Authentication Test Page</h1>
-        
-        <div className="space-y-4">
-          <div className="border-b pb-4">
-            <h2 className="font-semibold mb-2">Current State:</h2>
-            <ul className="list-disc list-inside space-y-1">
-              <li>Connected: {isConnected ? '✅ Yes' : '❌ No'}</li>
-              <li>Has User: {user ? '✅ Yes' : '❌ No'}</li>
-              {user && (
+    <main className="font-brand relative flex min-h-screen flex-col bg-gradient-to-br from-[#1a1a1a] via-[#0d1117] to-[#161b22] text-white">
+      <BrandHeader cta={{ href: '/reader', label: 'Go to Reader' }} />
+
+      <div className="mx-auto w-full max-w-2xl px-4 py-12">
+        <div className="rounded-2xl border border-[#27ae60]/20 bg-white/[0.06] p-6 backdrop-blur-xl md:p-8">
+          <h1 className="mb-4 text-2xl font-extrabold tracking-tight">Authentication Test Page</h1>
+
+          <div className="space-y-4">
+            <div className="border-b border-[#27ae60]/15 pb-4">
+              <h2 className="mb-2 font-semibold text-white">Current State:</h2>
+              <ul className="list-inside list-disc space-y-1 text-[#B3B3B3]">
+                <li>
+                  Connected:{' '}
+                  <span className={isConnected ? 'text-[#58d68d]' : 'text-red-400'}>
+                    {isConnected ? 'Yes' : 'No'}
+                  </span>
+                </li>
+                <li>
+                  Has User:{' '}
+                  <span className={user ? 'text-[#58d68d]' : 'text-red-400'}>
+                    {user ? 'Yes' : 'No'}
+                  </span>
+                </li>
+                {user && (
+                  <>
+                    <li>Pubkey: <code className="rounded bg-white/10 px-1 text-xs text-white">{user.pubkey}</code></li>
+                    <li>Npub: <code className="rounded bg-white/10 px-1 text-xs text-white">{user.npub}</code></li>
+                  </>
+                )}
+              </ul>
+            </div>
+
+            <div className="border-b border-[#27ae60]/15 pb-4">
+              <h2 className="mb-2 font-semibold text-white">LocalStorage:</h2>
+              <pre className="overflow-x-auto rounded-xl border border-[#27ae60]/15 bg-white/[0.05] p-2 text-xs text-[#B3B3B3]">
+                {typeof window !== 'undefined' ? localStorage.getItem('nostr_session') || 'No session found' : 'Loading...'}
+              </pre>
+            </div>
+
+            <div className="space-y-2">
+              <h2 className="font-semibold text-white">Actions:</h2>
+              {!isConnected ? (
                 <>
-                  <li>Pubkey: <code className="text-xs bg-gray-100 px-1">{user.pubkey}</code></li>
-                  <li>Npub: <code className="text-xs bg-gray-100 px-1">{user.npub}</code></li>
+                  <button
+                    onClick={() => connect('nip07')}
+                    className="block w-full rounded-xl bg-gradient-to-br from-[#27ae60] to-[#229954] px-4 py-2 font-semibold text-white shadow-[0_4px_14px_rgba(39,174,96,0.25)] transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_8px_25px_rgba(39,174,96,0.35)]"
+                  >
+                    Connect with Browser Extension (NIP-07)
+                  </button>
+                  <button
+                    onClick={() => {
+                      const npub = prompt('Enter your npub:')
+                      const password = prompt('Enter password:')
+                      if (npub && password) {
+                        connect('npub_password', { npub, password })
+                      }
+                    }}
+                    className="block w-full rounded-xl border border-[#27ae60]/25 bg-white/10 px-4 py-2 font-semibold text-white transition-all duration-300 hover:-translate-y-0.5 hover:border-[#27ae60]/50 hover:bg-white/20"
+                  >
+                    Connect with Npub + Password
+                  </button>
                 </>
+              ) : (
+                <button
+                  onClick={disconnect}
+                  className="block w-full rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 font-semibold text-red-300 transition-all duration-300 hover:bg-red-500/20"
+                >
+                  Disconnect
+                </button>
               )}
-            </ul>
-          </div>
+            </div>
 
-          <div className="border-b pb-4">
-            <h2 className="font-semibold mb-2">LocalStorage:</h2>
-            <pre className="text-xs bg-gray-100 p-2 rounded overflow-x-auto">
-              {typeof window !== 'undefined' ? localStorage.getItem('nostr_session') || 'No session found' : 'Loading...'}
-            </pre>
-          </div>
-
-          <div className="space-y-2">
-            <h2 className="font-semibold">Actions:</h2>
-            {!isConnected ? (
-              <>
-                <button
-                  onClick={() => connect('nip07')}
-                  className="block w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-                >
-                  Connect with Browser Extension (NIP-07)
-                </button>
-                <button
-                  onClick={() => {
-                    const npub = prompt('Enter your npub:')
-                    const password = prompt('Enter password:')
-                    if (npub && password) {
-                      connect('npub_password', { npub, password })
-                    }
-                  }}
-                  className="block w-full px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700"
-                >
-                  Connect with Npub + Password
-                </button>
-              </>
-            ) : (
-              <button
-                onClick={disconnect}
-                className="block w-full px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
-              >
-                Disconnect
-              </button>
-            )}
-          </div>
-
-          <div className="pt-4 border-t">
-            <a href="/reader" className="text-blue-600 hover:underline">
-              → Go to Feed Reader
-            </a>
+            <div className="border-t border-[#27ae60]/15 pt-4">
+              <a href="/reader" className="text-sm font-medium text-[#27ae60] transition-colors hover:text-[#2ecc71]">
+                Go to Feed Reader &rarr;
+              </a>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </main>
   )
 }

@@ -1,9 +1,10 @@
 <svg width="192" height="192" viewBox="0 0 192 192" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect width="192" height="192" rx="32" fill="#3B82F6"/>
-  <path d="M96 40C64.6538 40 40 64.6538 40 96C40 127.346 64.6538 152 96 152C127.346 152 152 127.346 152 96C152 64.6538 127.346 40 96 40Z" fill="white"/>
-  <circle cx="96" cy="80" r="12" fill="#3B82F6"/>
-  <circle cx="96" cy="112" r="12" fill="#3B82F6"/>
-  <rect x="76" y="88" width="40" height="8" rx="4" fill="#3B82F6"/>
-  <path d="M60 96L72 84V108L60 96Z" fill="#3B82F6"/>
-  <path d="M132 96L120 84V108L132 96Z" fill="#3B82F6"/>
+  <rect width="192" height="192" rx="40" fill="#0d1117"/>
+  <rect x="8" y="8" width="176" height="176" rx="34" fill="none" stroke="#27ae60" stroke-width="3" stroke-opacity="0.4"/>
+  <path d="M96 40C64.6538 40 40 64.6538 40 96C40 127.346 64.6538 152 96 152C127.346 152 152 127.346 152 96C152 64.6538 127.346 40 96 40Z" fill="#27ae60"/>
+  <circle cx="96" cy="80" r="12" fill="#0d1117"/>
+  <circle cx="96" cy="112" r="12" fill="#0d1117"/>
+  <rect x="76" y="88" width="40" height="8" rx="4" fill="#0d1117"/>
+  <path d="M60 96L72 84V108L60 96Z" fill="#27ae60"/>
+  <path d="M132 96L120 84V108L132 96Z" fill="#27ae60"/>
 </svg>
