@@ -52,22 +52,7 @@ export async function buildRequestContext(
   const method = req.method.toUpperCase()
   const authHeader = req.getHeader('authorization')
 
-  let nostrPubkey = await verifyNip98Header(authHeader, { url, method, body })
-
-  // Migration escape hatch — MUST be unset/false in production (env.mjs refuses
-  // to boot with it enabled in production). Falls back to the old insecure
-  // plaintext header so the team can roll out without an outage.
-  if (!nostrPubkey && process.env.ALLOW_INSECURE_HEADER_AUTH === 'true') {
-    const insecurePubkey = req.getHeader('x-nostr-pubkey')
-    if (insecurePubkey) {
-      console.warn(
-        '⚠️ INSECURE AUTH: trusting unverified x-nostr-pubkey header because ' +
-          'ALLOW_INSECURE_HEADER_AUTH=true. This is forgeable and MUST be ' +
-          'disabled in production.'
-      )
-      nostrPubkey = insecurePubkey
-    }
-  }
+  const nostrPubkey = await verifyNip98Header(authHeader, { url, method, body })
 
   return { db, nostrPubkey: nostrPubkey ?? null }
 }

@@ -5,9 +5,6 @@ const server = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   DEFAULT_RELAYS: z.string().optional(),
   NOSTR_BUNKER_URL: z.string().optional(),
-  // Migration escape hatch only. When 'true', the server falls back to trusting
-  // the unverified x-nostr-pubkey header. MUST be unset/false in production.
-  ALLOW_INSECURE_HEADER_AUTH: z.string().optional(),
   FLASH_SUBSCRIPTION_KEY: z.string().optional(),
   // Temporary fallback escape hatch. When 'true', the Flash webhook verifier
   // falls back to the unsigned request body identity when the verified JWT
@@ -20,18 +17,16 @@ const client = z.object({
   // No client-side env vars needed for now
 })
 
-// Both escape-hatch flags are full auth-bypass foot-guns. Refuse to boot if
-// either is enabled in production.
+// The escape-hatch flag is a full auth-bypass foot-gun. Refuse to boot if it
+// is enabled in production.
 const refineInsecureFlags = (val, ctx) => {
   if (val.NODE_ENV !== 'production') return
-  for (const flag of ['ALLOW_INSECURE_HEADER_AUTH', 'ALLOW_FLASH_BODY_IDENTITY']) {
-    if (val[flag] === 'true') {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: [flag],
-        message: `${flag} must not be 'true' in production (auth bypass)`,
-      })
-    }
+  if (val.ALLOW_FLASH_BODY_IDENTITY === 'true') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['ALLOW_FLASH_BODY_IDENTITY'],
+      message: `ALLOW_FLASH_BODY_IDENTITY must not be 'true' in production (auth bypass)`,
+    })
   }
 }
 
@@ -40,14 +35,13 @@ const processEnv = {
   NODE_ENV: process.env.NODE_ENV,
   DEFAULT_RELAYS: process.env.DEFAULT_RELAYS,
   NOSTR_BUNKER_URL: process.env.NOSTR_BUNKER_URL,
-  ALLOW_INSECURE_HEADER_AUTH: process.env.ALLOW_INSECURE_HEADER_AUTH,
   FLASH_SUBSCRIPTION_KEY: process.env.FLASH_SUBSCRIPTION_KEY,
   ALLOW_FLASH_BODY_IDENTITY: process.env.ALLOW_FLASH_BODY_IDENTITY,
 }
 
 const merged = server.merge(client).superRefine(refineInsecureFlags)
 
-let env = {} as z.infer<typeof merged>
+let env = {}
 
 if (!!process.env.SKIP_ENV_VALIDATION === false) {
   const isServer = typeof window === 'undefined'
@@ -73,7 +67,7 @@ if (!!process.env.SKIP_ENV_VALIDATION === false) {
             ? '❌ Attempted to access a server-side environment variable on the client'
             : `❌ Attempted to access server-side environment variable '${prop}' on the client`
         )
-      return target[prop as keyof typeof target]
+      return target[prop]
     },
   })
 }
