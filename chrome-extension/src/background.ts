@@ -21,21 +21,11 @@ import { feedDatabase } from './db/feedDatabase';
 const ALARM_NAME = 'refresh-feeds';
 const DEFAULT_POLL_INTERVAL = 5;
 const MAX_SEEN_ITEMS = 1000;
-const DEFAULT_WEB_APP_URL = 'https://nostrfeedz.com';
+const DEFAULT_WEB_APP_URL = 'https://readstr.privkey.io:8444';
 
 const ALLOWED_PROTOCOLS = ['https:', 'http:'];
 
-function isValidHttpUrl(urlString: string): boolean {
-  try {
-    const url = new URL(urlString);
-    return ALLOWED_PROTOCOLS.includes(url.protocol);
-  } catch {
-    return false;
-  }
-}
-
 function sanitizeUrl(urlString: string): string | null {
-  if (!isValidHttpUrl(urlString)) return null;
   try {
     const url = new URL(urlString);
     if (!ALLOWED_PROTOCOLS.includes(url.protocol)) return null;
@@ -43,6 +33,11 @@ function sanitizeUrl(urlString: string): string | null {
   } catch {
     return null;
   }
+}
+
+function normalizeBaseUrl(urlString: string): string | null {
+  const sanitized = sanitizeUrl(urlString);
+  return sanitized ? sanitized.replace(/\/+$/, '') : null;
 }
 
 const defaultSettings: ExtensionSettings = {
@@ -172,7 +167,7 @@ async function fetchFeeds(
   nostrAuth: NostrAuthData | null = null,
   forceSync = false
 ): Promise<Feed[]> {
-  const baseUrl = sanitizeUrl(settings.webAppUrl);
+  const baseUrl = normalizeBaseUrl(settings.webAppUrl);
   if (!baseUrl) {
     throw new Error('Invalid web app URL');
   }
@@ -196,7 +191,7 @@ async function fetchNewItems(
   nostrAuth: NostrAuthData | null = null,
   limit = 20
 ): Promise<FeedItem[]> {
-  const baseUrl = sanitizeUrl(settings.webAppUrl);
+  const baseUrl = normalizeBaseUrl(settings.webAppUrl);
   if (!baseUrl) {
     throw new Error('Invalid web app URL');
   }
@@ -221,7 +216,7 @@ async function markItemAsRead(itemId: string): Promise<void> {
   const hasAuth = authToken || (nostrAuth?.pubkey && nostrAuth.method !== 'none');
   if (!hasAuth) return;
 
-  const baseUrl = sanitizeUrl(settings.webAppUrl);
+  const baseUrl = normalizeBaseUrl(settings.webAppUrl);
   if (!baseUrl) return;
   const url = `${baseUrl}/api/trpc/feed.markAsRead`;
   const body = JSON.stringify({ json: { itemId } });
@@ -254,7 +249,7 @@ async function markAllAsRead(): Promise<void> {
   const hasAuth = authToken || (nostrAuth?.pubkey && nostrAuth.method !== 'none');
   if (!hasAuth) return;
 
-  const baseUrl = sanitizeUrl(settings.webAppUrl);
+  const baseUrl = normalizeBaseUrl(settings.webAppUrl);
   if (!baseUrl) return;
   const url = `${baseUrl}/api/trpc/feed.markAllAsRead`;
   const body = JSON.stringify({ json: {} });
@@ -290,7 +285,7 @@ async function addFavorite(itemId: string): Promise<void> {
   const hasAuth = authToken || (nostrAuth?.pubkey && nostrAuth.method !== 'none');
   if (!hasAuth) return;
 
-  const baseUrl = sanitizeUrl(settings.webAppUrl);
+  const baseUrl = normalizeBaseUrl(settings.webAppUrl);
   if (!baseUrl) return;
   const url = `${baseUrl}/api/trpc/feed.addFavorite`;
   const body = JSON.stringify({ json: { itemId } });
@@ -323,7 +318,7 @@ async function removeFavorite(itemId: string): Promise<void> {
   const hasAuth = authToken || (nostrAuth?.pubkey && nostrAuth.method !== 'none');
   if (!hasAuth) return;
 
-  const baseUrl = sanitizeUrl(settings.webAppUrl);
+  const baseUrl = normalizeBaseUrl(settings.webAppUrl);
   if (!baseUrl) return;
   const url = `${baseUrl}/api/trpc/feed.removeFavorite`;
   const body = JSON.stringify({ json: { itemId } });
@@ -354,7 +349,7 @@ async function fetchFavorites(
   authToken: string | null,
   nostrAuth: NostrAuthData | null = null
 ): Promise<FeedItem[]> {
-  const baseUrl = sanitizeUrl(settings.webAppUrl);
+  const baseUrl = normalizeBaseUrl(settings.webAppUrl);
   if (!baseUrl) {
     throw new Error('Invalid web app URL');
   }
@@ -446,7 +441,7 @@ async function tryRestoreAuthFromOpenTabs(): Promise<boolean> {
 
   try {
     const tabs = await chrome.tabs.query({
-      url: ['*://*.nostrfeedz.com/*', '*://nostrfeedz.com/*', '*://localhost:*'],
+      url: ['*://*.nostrfeedz.com/*', '*://nostrfeedz.com/*', '*://readstr.privkey.io/*', '*://localhost:*'],
     });
 
     for (const tab of tabs) {
@@ -709,6 +704,11 @@ async function handleMessage(
         return { success: true };
       }
 
+      const existing = await getStorageData();
+      if (existing.nostrAuth?.method === 'nsec' && existing.nostrAuth.privateKeyHex) {
+        return { success: true };
+      }
+
       const nostrAuth: NostrAuthData = {
         method: session.method === 'nip07' ? 'nip07' : 'nsec',
         pubkey: session.pubkey,
@@ -933,7 +933,7 @@ async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boo
     });
 
     const storage = await getStorageData();
-    const baseUrl = sanitizeUrl(storage.settings.webAppUrl);
+    const baseUrl = normalizeBaseUrl(storage.settings.webAppUrl);
     const hasAuth = storage.authToken || (storage.nostrAuth?.pubkey && storage.nostrAuth.method !== 'none');
     if (hasAuth && baseUrl) {
       try {
@@ -984,7 +984,7 @@ function setupContextMenu(): void {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: MENU_ID_PARENT,
-      title: 'Nostr Feedz',
+      title: 'Readstr',
       contexts: ['page', 'link'],
     });
 
@@ -1066,7 +1066,7 @@ chrome.notifications.onClicked.addListener((notificationId) => {
     const storage = await getStorageData();
 
     if (data && data !== 'batch') {
-      const baseUrl = sanitizeUrl(data.webAppUrl);
+      const baseUrl = normalizeBaseUrl(data.webAppUrl);
       const itemUrl = data.itemUrl ? sanitizeUrl(data.itemUrl) : null;
       const targetUrl = itemUrl ?? (baseUrl ? `${baseUrl}/item/${encodeURIComponent(data.itemId)}` : null);
       if (targetUrl) {
@@ -1101,7 +1101,7 @@ chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) =
       }
     } else if (data) {
       if (buttonIndex === 0) {
-        const baseUrl = sanitizeUrl(data.webAppUrl);
+        const baseUrl = normalizeBaseUrl(data.webAppUrl);
         const itemUrl = data.itemUrl ? sanitizeUrl(data.itemUrl) : null;
         const targetUrl = itemUrl ?? (baseUrl ? `${baseUrl}/item/${encodeURIComponent(data.itemId)}` : null);
         if (targetUrl) {

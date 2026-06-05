@@ -4,7 +4,7 @@ import type { LocalFeed, SyncSettings, ExtensionSettings, Feed, NostrAuthData } 
 import { isValidNsec } from './nostr';
 
 const DEFAULT_SYNC_SETTINGS: SyncSettings = {
-  webAppUrl: 'https://nostrfeedz.com',
+  webAppUrl: 'https://readstr.privkey.io:8444',
   pollIntervalMinutes: 5,
   notificationsEnabled: true,
   notifyOnNewItems: true,
@@ -59,7 +59,7 @@ function generateOPML(feeds: LocalFeed[]): string {
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<opml version="2.0">',
     '  <head>',
-    '    <title>Nostr Feedz Subscriptions</title>',
+    '    <title>Readstr Subscriptions</title>',
     `    <dateCreated>${new Date().toISOString()}</dateCreated>`,
     '  </head>',
     '  <body>',
@@ -392,7 +392,7 @@ function App() {
   return (
     <div className="container">
       <header className="header">
-        <h1>Nostr Feedz Options</h1>
+        <h1>Readstr Options</h1>
         <p>Manage your feeds and extension settings</p>
       </header>
 
@@ -628,14 +628,14 @@ function App() {
         <h2 className="section-title">Web App URL</h2>
 
         <div className="form-group">
-          <label className="form-label">Nostr Feedz URL</label>
+          <label className="form-label">Readstr URL</label>
           <input
             type="url"
             value={syncSettings.webAppUrl}
             onChange={(e) => void handleSettingChange('webAppUrl', e.target.value)}
-            placeholder="https://nostrfeedz.com"
+            placeholder="https://readstr.privkey.io:8444"
           />
-          <p className="form-hint">URL of your Nostr Feedz instance (for self-hosted)</p>
+          <p className="form-hint">URL of your Readstr instance (for self-hosted)</p>
         </div>
       </section>
 

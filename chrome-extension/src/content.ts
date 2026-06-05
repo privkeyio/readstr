@@ -8,6 +8,16 @@ interface DetectedFeed {
 
 const ALLOWED_PROTOCOLS = ['https:', 'http:'];
 
+function isTrustedHost(hostname: string): boolean {
+  return (
+    hostname === 'nostrfeedz.com' ||
+    hostname.endsWith('.nostrfeedz.com') ||
+    hostname === 'readstr.privkey.io' ||
+    hostname.endsWith('.readstr.privkey.io') ||
+    hostname === 'localhost'
+  );
+}
+
 function sanitizeUrl(urlString: string): string | null {
   try {
     const url = new URL(urlString);
@@ -16,6 +26,11 @@ function sanitizeUrl(urlString: string): string | null {
   } catch {
     return null;
   }
+}
+
+function normalizeBaseUrl(urlString: string): string | null {
+  const sanitized = sanitizeUrl(urlString);
+  return sanitized ? sanitized.replace(/\/+$/, '') : null;
 }
 
 const CONTAINER_ID = 'nostr-feedz-container';
@@ -199,7 +214,7 @@ function createFloatingButton(feeds: DetectedFeed[]): void {
   const fab = document.createElement('button');
   fab.id = BUTTON_ID;
   fab.className = 'nf-fab';
-  fab.title = `${feeds.length} feed${feeds.length > 1 ? 's' : ''} found - Add to Nostr Feedz`;
+  fab.title = `${feeds.length} feed${feeds.length > 1 ? 's' : ''} found - Add to Readstr`;
 
   const icon = document.createElement('span');
   icon.className = 'nf-fab-icon';
@@ -297,7 +312,7 @@ async function syncWithAccount(feed: LocalFeed): Promise<void> {
     const hasAuth = authToken || nostrAuth?.pubkey;
     if (!hasAuth || !settings?.webAppUrl) return;
 
-    const baseUrl = sanitizeUrl(settings.webAppUrl);
+    const baseUrl = normalizeBaseUrl(settings.webAppUrl);
     if (!baseUrl || !feed.url) return;
 
     const url = `${baseUrl}/api/trpc/feed.subscribeFeed`;
@@ -305,8 +320,6 @@ async function syncWithAccount(feed: LocalFeed): Promise<void> {
 
     if (authToken) {
       headers['Authorization'] = `Bearer ${authToken}`;
-    } else if (nostrAuth?.pubkey) {
-      headers['x-nostr-pubkey'] = nostrAuth.pubkey;
     }
 
     await fetch(url, {
@@ -329,7 +342,7 @@ async function syncWithAccount(feed: LocalFeed): Promise<void> {
 // Check if we're on nostrfeedz.com and sync auth with extension
 async function syncAuthFromWebApp(): Promise<void> {
   const hostname = window.location.hostname;
-  if (!hostname.includes('nostrfeedz.com') && !hostname.includes('localhost')) {
+  if (!isTrustedHost(hostname)) {
     return;
   }
 
@@ -359,7 +372,7 @@ async function syncAuthFromWebApp(): Promise<void> {
 // Watch for auth changes in localStorage
 function watchAuthChanges(): void {
   const hostname = window.location.hostname;
-  if (!hostname.includes('nostrfeedz.com') && !hostname.includes('localhost')) {
+  if (!isTrustedHost(hostname)) {
     return;
   }
 
@@ -399,7 +412,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ feeds });
   } else if (message.type === 'GET_SESSION') {
     const hostname = window.location.hostname;
-    if (!hostname.includes('nostrfeedz.com') && !hostname.includes('localhost')) {
+    if (!isTrustedHost(hostname)) {
       sendResponse({ session: null });
       return true;
     }

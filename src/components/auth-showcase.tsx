@@ -75,7 +75,7 @@ export function AuthShowcase() {
               setLoginMethod('nip07')
               setShowLoginForm(true)
             }}
-            className="rounded-lg bg-purple-600/20 px-6 py-3 font-semibold text-purple-400 hover:bg-purple-600/30 transition"
+            className="rounded-lg bg-[#27ae60]/20 px-6 py-3 font-semibold text-[#2ecc71] hover:bg-[#27ae60]/30 transition"
           >
             🔌 Browser Extension (NIP-07)
           </button>
@@ -85,7 +85,7 @@ export function AuthShowcase() {
               setLoginMethod('npub_password')
               setShowLoginForm(true)
             }}
-            className="rounded-lg bg-blue-600/20 px-6 py-3 font-semibold text-blue-400 hover:bg-blue-600/30 transition"
+            className="rounded-lg border border-white/20 bg-white/5 px-6 py-3 font-semibold text-gray-200 hover:bg-white/10 transition"
           >
             👤 npub + Password (Read-only)
           </button>
@@ -114,7 +114,7 @@ export function AuthShowcase() {
           <button
             onClick={handleConnect}
             disabled={loading}
-            className="w-full rounded-lg bg-purple-600 px-4 py-2 font-semibold text-white hover:bg-purple-700 disabled:opacity-50 transition"
+            className="w-full rounded-lg bg-[#27ae60] px-4 py-2 font-semibold text-white hover:bg-[#229954] disabled:opacity-50 transition"
           >
             {loading ? 'Connecting...' : 'Connect Extension'}
           </button>
@@ -136,7 +136,7 @@ export function AuthShowcase() {
                 value={npub}
                 onChange={(e) => setNpub(e.target.value)}
                 placeholder="npub1..."
-                className="w-full rounded-md bg-gray-700 px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full rounded-md bg-gray-700 px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#27ae60]"
               />
             </div>
             <div>
@@ -148,13 +148,13 @@ export function AuthShowcase() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Enter password"
-                className="w-full rounded-md bg-gray-700 px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full rounded-md bg-gray-700 px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#27ae60]"
               />
             </div>
             <button
               onClick={handleConnect}
               disabled={loading || !npub || !password}
-              className="w-full rounded-lg bg-blue-600 px-4 py-2 font-semibold text-white hover:bg-blue-700 disabled:opacity-50 transition"
+              className="w-full rounded-lg bg-[#27ae60] px-4 py-2 font-semibold text-white hover:bg-[#229954] disabled:opacity-50 transition"
             >
               {loading ? 'Connecting...' : 'Connect'}
             </button>

@@ -1,14 +1,14 @@
 # Chrome Web Store Listing
 
 ## Extension Name
-Nostr Feedz - RSS & Atom Feed Reader
+Readstr - RSS & Atom Feed Reader
 
 ## Short Description (132 characters max)
-Discover and subscribe to RSS/Atom feeds on any webpage. Sync with your Nostr Feedz account for cross-device reading.
+Discover and subscribe to RSS/Atom feeds on any webpage. Sync with your Readstr account for cross-device reading.
 
 ## Detailed Description
 
-**Nostr Feedz Extension** makes it effortless to discover and subscribe to RSS and Atom feeds across the web.
+**Readstr Extension** makes it effortless to discover and subscribe to RSS and Atom feeds across the web.
 
 ### Features
 
@@ -22,7 +22,7 @@ Subscribe to feeds instantly with a single click. No need to hunt for feed URLs 
 Right-click on any link to subscribe to it as a feed, or use the context menu to see all detected feeds on a page.
 
 **Nostr Account Sync**
-Sign in with your Nostr identity (nsec or NIP-07 signer) to sync your subscriptions with the Nostr Feedz web app. Your feeds and read state stay synchronized across all your devices.
+Sign in with your Nostr identity (nsec or NIP-07 signer) to sync your subscriptions with the Readstr web app. Your feeds and read state stay synchronized across all your devices.
 
 **Desktop Notifications**
 Get notified when new items arrive in your feeds. Control notification frequency and limits to avoid interruptions.
@@ -34,7 +34,7 @@ Feeds can be stored locally in your browser and synced via Chrome's built-in syn
 Easily migrate your subscriptions from other feed readers using standard OPML format.
 
 **Self-Hostable**
-Works with self-hosted Nostr Feedz instances. Just configure your web app URL in settings.
+Works with self-hosted Readstr instances. Just configure your web app URL in settings.
 
 ### Privacy
 
@@ -45,7 +45,7 @@ Works with self-hosted Nostr Feedz instances. Just configure your web app URL in
 
 ### Permissions Explained
 
-- **Host Permissions**: Required to detect feeds on any website and communicate with your configured Nostr Feedz instance
+- **Host Permissions**: Required to detect feeds on any website and communicate with your configured Readstr instance
 - **Storage**: Store your feed subscriptions and settings locally
 - **Notifications**: Alert you when new feed items arrive
 - **Alarms**: Periodically check for new content in the background
@@ -106,7 +106,7 @@ English
 **Content:**
 - Browser showing a page with visible RSS link
 - Right-click context menu open
-- "Nostr Feedz" submenu expanded
+- "Readstr" submenu expanded
 - "Subscribe to this link as feed" option highlighted
 
 ### Screenshot 6: Notifications (1280x800)
@@ -123,14 +123,14 @@ English
 ## Promotional Tile Ideas
 
 ### Small Tile (440x280)
-- Nostr Feedz logo centered
+- Readstr logo centered
 - "RSS feeds, everywhere" tagline
-- Purple/blue gradient background
+- Green gradient background
 
 ### Large Tile (920x680)
 - Split view: left side shows feed detection on a webpage, right side shows the popup
 - "Discover • Subscribe • Sync" at bottom
-- Nostr Feedz branding
+- Readstr branding
 
 ### Marquee (1400x560)
 - Panoramic view of the extension in action
@@ -141,7 +141,7 @@ English
 
 ## Store Listing Checklist
 
-- [ ] Extension name (45 chars max): `Nostr Feedz - RSS & Atom Feed Reader`
+- [ ] Extension name (45 chars max): `Readstr - RSS & Atom Feed Reader`
 - [ ] Short description (132 chars max): See above
 - [ ] Detailed description: See above
 - [ ] Category: Productivity

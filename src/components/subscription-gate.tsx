@@ -34,7 +34,7 @@ export function SubscriptionGate({ children }: SubscriptionGateProps) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-100 dark:bg-slate-900">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto mb-4"></div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#27ae60] mx-auto mb-4"></div>
           <p className="text-slate-600 dark:text-slate-400">Checking subscription...</p>
         </div>
       </div>
@@ -43,7 +43,7 @@ export function SubscriptionGate({ children }: SubscriptionGateProps) {
 
   if (!subscription?.hasAccess) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-gradient-to-b from-[#2e026d] to-[#15162c] p-4">
+      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-[#1a1a1a] via-[#0d1117] to-[#161b22] p-4">
         <div className="max-w-2xl w-full bg-white dark:bg-slate-800 rounded-lg shadow-2xl p-8">
           <div className="text-center mb-6">
             <h1 className="text-3xl font-bold text-slate-900 dark:text-white mb-2">
@@ -51,19 +51,19 @@ export function SubscriptionGate({ children }: SubscriptionGateProps) {
             </h1>
             <p className="text-lg text-slate-600 dark:text-slate-400">
               {String(subscription?.status) === 'EXPIRED'
-                ? 'Your free trial has ended. Subscribe to continue using Nostr Feedz Reader.'
-                : 'Subscribe to access the Nostr Feedz Reader'}
+                ? 'Your free trial has ended. Subscribe to continue using Readstr.'
+                : 'Subscribe to access Readstr'}
             </p>
           </div>
 
-          <div className="bg-gradient-to-r from-purple-500/10 to-pink-500/10 rounded-lg p-6 mb-6 border border-purple-300 dark:border-purple-700">
+          <div className="bg-gradient-to-r from-[#27ae60]/10 to-[#2ecc71]/10 rounded-lg p-6 mb-6 border border-[#27ae60]/40 dark:border-[#2ecc71]/40">
             <div className="text-center mb-4">
-              <div className="text-5xl font-bold text-purple-600 dark:text-purple-400 mb-2">
+              <div className="text-5xl font-bold text-[#27ae60] dark:text-[#2ecc71] mb-2">
                 <span className="block">1750</span>
                 <span className="text-2xl text-slate-600 dark:text-slate-400">sats/month</span>
               </div>
               <p className="text-slate-600 dark:text-slate-400">Unlimited RSS and Nostr feeds</p>
-              <p className="text-sm text-purple-600 dark:text-purple-400 mt-1 font-medium">
+              <p className="text-sm text-[#27ae60] dark:text-[#2ecc71] mt-1 font-medium">
                 7 day free trial • Pay with Bitcoin ₿
               </p>
             </div>
@@ -104,7 +104,7 @@ export function SubscriptionGate({ children }: SubscriptionGateProps) {
             <button
               onClick={handleSubscribe}
               disabled={isRedirecting}
-              className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-purple-400 text-white font-bold py-4 px-6 rounded-lg text-lg transition-colors shadow-lg"
+              className="w-full bg-[#27ae60] hover:bg-[#229954] disabled:bg-[#27ae60]/50 text-white font-bold py-4 px-6 rounded-lg text-lg transition-colors shadow-lg"
             >
               {isRedirecting ? 'Redirecting...' : 'Subscribe — 1750 sats/month'}
             </button>
@@ -116,7 +116,7 @@ export function SubscriptionGate({ children }: SubscriptionGateProps) {
             </p>
             <button
               onClick={() => router.push('/')}
-              className="text-purple-600 dark:text-purple-400 hover:underline"
+              className="text-[#27ae60] dark:text-[#2ecc71] hover:underline"
             >
               Back to Home
             </button>
@@ -133,14 +133,14 @@ export function SubscriptionGate({ children }: SubscriptionGateProps) {
   return (
     <>
       {showBanner && (
-        <div className="bg-purple-600 text-white px-4 py-2 text-center text-sm">
+        <div className="bg-[#27ae60] text-white px-4 py-2 text-center text-sm">
               {String(subscription?.status) === 'TRIAL' ? (
             <>
               Trial: {subscription.daysRemaining} day{subscription.daysRemaining !== 1 ? 's' : ''} remaining. 
               <button
                 onClick={handleSubscribe}
                 disabled={isRedirecting}
-                className="ml-2 underline font-semibold hover:text-purple-200 disabled:text-purple-300"
+                className="ml-2 underline font-semibold hover:text-white/80 disabled:text-white/60"
               >
                 {isRedirecting ? 'Redirecting...' : 'Subscribe for 1750 sats/month'}
               </button>

@@ -12,10 +12,10 @@ export async function OPTIONS() {
 
 export async function GET() {
   const docs = {
-    name: 'Nostr Feedz Guide API',
+    name: 'Readstr Guide API',
     version: '1.0',
-    description: 'REST API for accessing the Nostr Feedz guide - a curated directory of Nostr long-form content creators.',
-    baseUrl: 'https://nostrfeedz.com/api/guide',
+    description: 'REST API for accessing the Readstr guide - a curated directory of Nostr long-form content creators.',
+    baseUrl: 'https://readstr.privkey.io:8444/api/guide',
     
     endpoints: [
       {
@@ -69,9 +69,9 @@ export async function GET() {
                 subscriberCount: 42,
                 postCount: 15,
                 about: 'Writing about Bitcoin...',
-                subscribeUrl: 'https://nostrfeedz.com/subscribe?npub=npub1...',
-                webUrl: 'https://nostrfeedz.com/guide#npub1...',
-                rssUrl: 'https://nostrfeedz.com/api/nostr-rss?npub=npub1...',
+                subscribeUrl: 'https://readstr.privkey.io:8444/subscribe?npub=npub1...',
+                webUrl: 'https://readstr.privkey.io:8444/guide#npub1...',
+                rssUrl: 'https://readstr.privkey.io:8444/api/nostr-rss?npub=npub1...',
               },
             ],
             totalCount: 1,
@@ -123,7 +123,7 @@ export async function GET() {
             subscriberCount: 42,
             postCount: 15,
             lastPublishedAt: '2025-11-26T12:00:00.000Z',
-            subscribeUrl: 'https://nostrfeedz.com/subscribe?npub=npub1...',
+            subscribeUrl: 'https://readstr.privkey.io:8444/subscribe?npub=npub1...',
             recentPosts: [
               {
                 id: 'abc123...',
@@ -140,7 +140,7 @@ export async function GET() {
     
     oneClickSubscription: {
       description: 'Enable one-click subscription from native apps using deep links',
-      url: 'https://nostrfeedz.com/subscribe',
+      url: 'https://readstr.privkey.io:8444/subscribe',
       parameters: [
         {
           name: 'npub',
@@ -161,7 +161,7 @@ export async function GET() {
           description: 'URL to redirect to after successful subscription',
         },
       ],
-      example: 'https://nostrfeedz.com/subscribe?npub=npub1abc...&tags=bitcoin,nostr&return=https://yourapp.com/success',
+      example: 'https://readstr.privkey.io:8444/subscribe?npub=npub1abc...&tags=bitcoin,nostr&return=https://yourapp.com/success',
       behavior: [
         'If user is already logged in, subscription happens automatically',
         'If not logged in, prompts user to connect with Nostr extension',
@@ -171,7 +171,7 @@ export async function GET() {
     
     rssFeeds: {
       description: 'Get RSS feeds for individual Nostr authors',
-      url: 'https://nostrfeedz.com/api/nostr-rss',
+      url: 'https://readstr.privkey.io:8444/api/nostr-rss',
       parameters: [
         {
           name: 'npub',
@@ -186,7 +186,7 @@ export async function GET() {
           description: 'Tags to include in the RSS metadata',
         },
       ],
-      example: 'https://nostrfeedz.com/api/nostr-rss?npub=npub1abc...',
+      example: 'https://readstr.privkey.io:8444/api/nostr-rss?npub=npub1abc...',
     },
     
     rateLimits: {
@@ -201,7 +201,7 @@ export async function GET() {
     cors: {
       description: 'CORS is enabled for all origins',
       allowedOrigins: '*',
-      allowedMethods: ['GET', 'POST', 'OPTIONS'],
+      allowedMethods: ['GET', 'OPTIONS'],
     },
   }
   

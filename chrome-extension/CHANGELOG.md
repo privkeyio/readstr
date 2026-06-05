@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the Nostr Feedz Extension will be documented in this file.
+All notable changes to the Readstr Extension will be documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
@@ -17,7 +17,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - Initial release
-- Feed synchronization with Nostr Feedz web app
+- Feed synchronization with Readstr web app
 - Offline caching with IndexedDB
 - Real-time unread badge count
 - Desktop notifications for new items

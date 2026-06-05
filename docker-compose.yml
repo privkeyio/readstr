@@ -1,7 +1,7 @@
 services:
   postgres:
     image: postgres:15
-    container_name: nostr-feedz-db
+    container_name: readstr-db
     environment:
       POSTGRES_DB: nostr_feedz
       POSTGRES_USER: nostr_user
@@ -16,7 +16,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: nostr-feedz-app
+    container_name: readstr-app
     env_file:
       - .env.production
     environment:
@@ -31,7 +31,7 @@ services:
 
   caddy:
     image: caddy:2-alpine
-    container_name: nostr-feedz-caddy
+    container_name: readstr-caddy
     ports:
       - "80:80"
       - "443:443"

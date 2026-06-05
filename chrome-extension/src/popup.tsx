@@ -10,7 +10,7 @@ import { Statistics } from './components/Statistics';
 import { BulkActions } from './components/BulkActions';
 import { feedDatabase } from './db/feedDatabase';
 
-const DEFAULT_WEB_APP_URL = 'https://nostrfeedz.com';
+const DEFAULT_WEB_APP_URL = 'https://readstr.privkey.io:8444';
 
 interface RecentItem extends FeedItem {
   feedId: string;
@@ -476,7 +476,7 @@ function App() {
     return (
       <div className="container">
         <header className="header">
-          <h1>Nostr Feedz</h1>
+          <h1>Readstr</h1>
         </header>
         <div className="content-area">
           <ItemSkeleton />
@@ -492,7 +492,7 @@ function App() {
   return (
     <div className="container" ref={containerRef}>
       <header className="header">
-        <h1>Nostr Feedz</h1>
+        <h1>Readstr</h1>
         {totalUnread > 0 && <span className="badge total-badge">{totalUnread}</span>}
         <div className="header-actions">
           <ConnectionStatus isSyncing={refreshing} hasError={syncError} />

@@ -851,7 +851,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                   <button
                     onClick={handleExportToNostr}
                     disabled={syncState.status === 'syncing' || feeds.length === 0}
-                    className="flex items-center gap-2 px-4 py-2.5 bg-purple-600 text-white rounded-xl font-medium hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                    className="flex items-center gap-2 px-4 py-2.5 bg-theme-accent text-white rounded-xl font-medium hover:bg-[rgb(var(--color-accent-hover))] disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                   >
                     <span>⬆</span>
                     Export to Nostr
@@ -859,7 +859,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                   <button
                     onClick={handleImportFromNostr}
                     disabled={syncState.status === 'syncing' || !userPubkey}
-                    className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                    className="flex items-center gap-2 px-4 py-2.5 border border-theme-accent text-theme-accent bg-transparent rounded-xl font-medium hover:bg-theme-accent-light disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                   >
                     <span>⬇</span>
                     Import from Nostr
