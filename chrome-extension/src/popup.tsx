@@ -10,7 +10,7 @@ import { Statistics } from './components/Statistics';
 import { BulkActions } from './components/BulkActions';
 import { feedDatabase } from './db/feedDatabase';
 
-const DEFAULT_WEB_APP_URL = 'https://nostrfeedz.com';
+const DEFAULT_WEB_APP_URL = 'https://readstr.privkey.io:8444';
 
 interface RecentItem extends FeedItem {
   feedId: string;

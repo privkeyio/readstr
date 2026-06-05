@@ -329,7 +329,7 @@ async function syncWithAccount(feed: LocalFeed): Promise<void> {
 // Check if we're on nostrfeedz.com and sync auth with extension
 async function syncAuthFromWebApp(): Promise<void> {
   const hostname = window.location.hostname;
-  if (!hostname.includes('nostrfeedz.com') && !hostname.includes('localhost')) {
+  if (!hostname.includes('nostrfeedz.com') && !hostname.includes('readstr.privkey.io') && !hostname.includes('localhost')) {
     return;
   }
 
@@ -359,7 +359,7 @@ async function syncAuthFromWebApp(): Promise<void> {
 // Watch for auth changes in localStorage
 function watchAuthChanges(): void {
   const hostname = window.location.hostname;
-  if (!hostname.includes('nostrfeedz.com') && !hostname.includes('localhost')) {
+  if (!hostname.includes('nostrfeedz.com') && !hostname.includes('readstr.privkey.io') && !hostname.includes('localhost')) {
     return;
   }
 
@@ -399,7 +399,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ feeds });
   } else if (message.type === 'GET_SESSION') {
     const hostname = window.location.hostname;
-    if (!hostname.includes('nostrfeedz.com') && !hostname.includes('localhost')) {
+    if (!hostname.includes('nostrfeedz.com') && !hostname.includes('readstr.privkey.io') && !hostname.includes('localhost')) {
       sendResponse({ session: null });
       return true;
     }

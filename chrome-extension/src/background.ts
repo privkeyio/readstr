@@ -21,7 +21,7 @@ import { feedDatabase } from './db/feedDatabase';
 const ALARM_NAME = 'refresh-feeds';
 const DEFAULT_POLL_INTERVAL = 5;
 const MAX_SEEN_ITEMS = 1000;
-const DEFAULT_WEB_APP_URL = 'https://nostrfeedz.com';
+const DEFAULT_WEB_APP_URL = 'https://readstr.privkey.io:8444';
 
 const ALLOWED_PROTOCOLS = ['https:', 'http:'];
 
@@ -446,7 +446,7 @@ async function tryRestoreAuthFromOpenTabs(): Promise<boolean> {
 
   try {
     const tabs = await chrome.tabs.query({
-      url: ['*://*.nostrfeedz.com/*', '*://nostrfeedz.com/*', '*://localhost:*'],
+      url: ['*://*.nostrfeedz.com/*', '*://nostrfeedz.com/*', '*://readstr.privkey.io/*', '*://localhost:*'],
     });
 
     for (const tab of tabs) {

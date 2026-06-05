@@ -4,7 +4,7 @@ import type { LocalFeed, SyncSettings, ExtensionSettings, Feed, NostrAuthData } 
 import { isValidNsec } from './nostr';
 
 const DEFAULT_SYNC_SETTINGS: SyncSettings = {
-  webAppUrl: 'https://nostrfeedz.com',
+  webAppUrl: 'https://readstr.privkey.io:8444',
   pollIntervalMinutes: 5,
   notificationsEnabled: true,
   notifyOnNewItems: true,
@@ -633,7 +633,7 @@ function App() {
             type="url"
             value={syncSettings.webAppUrl}
             onChange={(e) => void handleSettingChange('webAppUrl', e.target.value)}
-            placeholder="https://nostrfeedz.com"
+            placeholder="https://readstr.privkey.io:8444"
           />
           <p className="form-hint">URL of your Readstr instance (for self-hosted)</p>
         </div>
