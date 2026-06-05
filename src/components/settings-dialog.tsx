@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { api } from '@/trpc/react'
+import { useNostrAuth } from '@/contexts/NostrAuthContext'
 import {
   publishSubscriptionList,
   fetchSubscriptionList,
@@ -116,6 +117,7 @@ const CATEGORY_COLORS = [
 const CATEGORY_ICONS = ['📁', '📰', '🎬', '🎵', '💼', '🎮', '📚', '🔬', '💡', '🌍', '⚡', '🎯']
 
 export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds }: SettingsDialogProps) {
+  const { authMethod, signEvent: signNostrEvent } = useNostrAuth()
   const [activeTab, setActiveTab] = useState<SettingsTab>('relays')
   const [relays, setRelays] = useState<Relay[]>([])
   const [newRelayUrl, setNewRelayUrl] = useState('')
@@ -199,8 +201,8 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
 
   // Export subscriptions to Nostr
   const handleExportToNostr = async () => {
-    if (!window.nostr) {
-      alert('Please install a Nostr browser extension (like Alby or nos2x) to sync.')
+    if (authMethod !== 'nip07') {
+      alert('Connect with a Nostr browser extension (NIP-07) to sync.')
       return
     }
 
@@ -208,12 +210,11 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
 
     try {
       const subscriptionList = buildSubscriptionListFromFeeds(feeds)
-      
+
       const signEvent = async (event: UnsignedEvent): Promise<Event> => {
-        const pubkey = await window.nostr!.getPublicKey()
-        const signedEvent = await window.nostr!.signEvent({ ...event, pubkey })
+        const signedEvent = await signNostrEvent(event)
         if (!signedEvent) throw new Error('Failed to sign event')
-        return signedEvent as Event
+        return signedEvent
       }
 
       const result = await publishSubscriptionList(subscriptionList, signEvent)

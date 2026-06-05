@@ -1,7 +1,7 @@
 'use client'
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
-import { Event, getPublicKey, nip19, UnsignedEvent, finalizeEvent } from 'nostr-tools'
+import { Event, nip19, UnsignedEvent } from 'nostr-tools'
 
 export type NostrAuthMethod = 'nip07' | 'npub_password' | null
 
@@ -37,7 +37,6 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
   const [isConnected, setIsConnected] = useState(false)
   const [user, setUser] = useState<NostrUser | null>(null)
   const [authMethod, setAuthMethod] = useState<NostrAuthMethod>(null)
-  const [privateKey, setPrivateKey] = useState<string | null>(null)
 
   // Check for existing connection on mount
   useEffect(() => {
@@ -187,7 +186,6 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
     setIsConnected(false)
     setUser(null)
     setAuthMethod(null)
-    setPrivateKey(null)
     localStorage.removeItem('nostr_session')
   }
 
@@ -198,7 +196,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
       switch (authMethod) {
         case 'nip07':
           if (window.nostr?.signEvent) {
-            return await window.nostr.signEvent(unsignedEvent)
+            return await window.nostr.signEvent({ ...unsignedEvent, pubkey: user.pubkey })
           }
           throw new Error('NIP-07 signing not available')
 
