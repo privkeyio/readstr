@@ -213,8 +213,8 @@ export function AddFeedModal({ isOpen, onClose, onAddFeed, isLoading = false, er
                 onClick={() => setFeedType('NOSTR')}
                 className={`flex-1 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 border-2 ${
                   feedType === 'NOSTR'
-                    ? 'bg-purple-100 border-purple-400 text-purple-700 shadow-theme-sm'
-                    : 'bg-theme-tertiary border-theme-secondary text-theme-secondary hover:border-purple-300'
+                    ? 'bg-theme-accent-light border-theme-accent text-theme-accent shadow-theme-sm'
+                    : 'bg-theme-tertiary border-theme-secondary text-theme-secondary hover:border-theme-accent/50'
                 }`}
               >
                 <span className="text-lg mr-2">⚡</span> Nostr (Articles & Videos)

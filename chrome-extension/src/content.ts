@@ -199,7 +199,7 @@ function createFloatingButton(feeds: DetectedFeed[]): void {
   const fab = document.createElement('button');
   fab.id = BUTTON_ID;
   fab.className = 'nf-fab';
-  fab.title = `${feeds.length} feed${feeds.length > 1 ? 's' : ''} found - Add to Nostr Feedz`;
+  fab.title = `${feeds.length} feed${feeds.length > 1 ? 's' : ''} found - Add to Readstr`;
 
   const icon = document.createElement('span');
   icon.className = 'nf-fab-icon';

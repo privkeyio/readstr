@@ -476,7 +476,7 @@ function App() {
     return (
       <div className="container">
         <header className="header">
-          <h1>Nostr Feedz</h1>
+          <h1>Readstr</h1>
         </header>
         <div className="content-area">
           <ItemSkeleton />
@@ -492,7 +492,7 @@ function App() {
   return (
     <div className="container" ref={containerRef}>
       <header className="header">
-        <h1>Nostr Feedz</h1>
+        <h1>Readstr</h1>
         {totalUnread > 0 && <span className="badge total-badge">{totalUnread}</span>}
         <div className="header-actions">
           <ConnectionStatus isSyncing={refreshing} hasError={syncError} />

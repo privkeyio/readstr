@@ -12,10 +12,10 @@
   width: 56px;
   height: 56px;
   border-radius: 28px;
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
   border: none;
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+  box-shadow: 0 4px 12px rgba(39, 174, 96, 0.4);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -25,7 +25,7 @@
 
 .nf-fab:hover {
   transform: scale(1.05);
-  box-shadow: 0 6px 20px rgba(99, 102, 241, 0.5);
+  box-shadow: 0 6px 20px rgba(39, 174, 96, 0.5);
 }
 
 .nf-fab:active {
@@ -130,7 +130,7 @@
   padding: 6px 12px;
   font-size: 13px;
   font-weight: 500;
-  background: #6366f1;
+  background: #27ae60;
   color: #fff;
   border: none;
   border-radius: 6px;
@@ -139,7 +139,7 @@
 }
 
 .nf-menu-add:hover:not(:disabled) {
-  background: #4f46e5;
+  background: #229954;
 }
 
 .nf-menu-add:disabled {

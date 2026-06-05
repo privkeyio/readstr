@@ -984,7 +984,7 @@ function setupContextMenu(): void {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: MENU_ID_PARENT,
-      title: 'Nostr Feedz',
+      title: 'Readstr',
       contexts: ['page', 'link'],
     });
 
