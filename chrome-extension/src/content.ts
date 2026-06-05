@@ -12,7 +12,7 @@ function sanitizeUrl(urlString: string): string | null {
   try {
     const url = new URL(urlString);
     if (!ALLOWED_PROTOCOLS.includes(url.protocol)) return null;
-    return url.href;
+    return url.href.replace(/\/+$/, '');
   } catch {
     return null;
   }
