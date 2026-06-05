@@ -17,7 +17,7 @@ import {
   publishSubscriptionList,
   buildSubscriptionListFromFeeds,
 } from '@/lib/nostr-sync'
-import type { UnsignedEvent, Event } from 'nostr-tools'
+import type { UnsignedEvent } from 'nostr-tools'
 import type { inferRouterOutputs } from '@trpc/server'
 import type { AppRouter } from '@/server/api/root'
 
@@ -54,7 +54,7 @@ const QUICK_MARK_READ_OPTIONS: { value: MarkReadBehavior; label: string; helper:
 ]
 
 export function FeedReader() {
-  const { user, disconnect } = useNostrAuth()
+  const { user, disconnect, authMethod, signEventOrThrow } = useNostrAuth()
   const { theme } = useTheme()
   const router = useRouter()
   const utils = api.useUtils()
@@ -703,8 +703,8 @@ export function FeedReader() {
 
   // Handle sharing to Nostr
   const handleShareToNostr = async (item: FeedItem, originalUrl: string | null | undefined) => {
-    if (!window.nostr) {
-      alert('Please install a Nostr browser extension (like Alby or nos2x) to share posts.')
+    if (authMethod !== 'nip07' || !user?.pubkey) {
+      alert('Connect with a Nostr browser extension (NIP-07) to share posts.')
       return
     }
 
@@ -712,30 +712,21 @@ export function FeedReader() {
     setShareSuccess(false)
 
     try {
-      // Get the user's public key
-      const pubkey = await window.nostr.getPublicKey()
-      
       // Build the share URL - for Nostr posts use habla.news, otherwise use original URL
       const shareUrl = originalUrl || item.url || ''
-      
+
       // Create the note content with attribution
       const noteContent = `📖 ${item.title}\n\n${shareUrl}\n\n— shared from nostrfeedz.com`
 
-      // Create unsigned event (kind 1 = short text note)
-      const unsignedEvent = {
+      const unsignedEvent: UnsignedEvent = {
         kind: 1,
-        pubkey,
+        pubkey: user.pubkey,
         created_at: Math.floor(Date.now() / 1000),
         tags: [] as string[][],
         content: noteContent,
       }
 
-      // Sign the event using NIP-07
-      const signedEvent = await window.nostr.signEvent(unsignedEvent)
-
-      if (!signedEvent) {
-        throw new Error('Failed to sign event')
-      }
+      const signedEvent = await signEventOrThrow(unsignedEvent)
 
       // Publish to relays
       const pool = new SimplePool()
@@ -763,27 +754,20 @@ export function FeedReader() {
 
   // Auto-export subscriptions to Nostr after changes
   const autoExportToNostr = useCallback(async () => {
-    // Only auto-export if user has Nostr extension and is logged in
-    if (!window.nostr || !user?.npub) {
+    // Only auto-export if signing is available through the active auth method
+    if (authMethod !== 'nip07' || !user?.npub) {
       return
     }
 
     try {
       console.log('🔄 Auto-exporting subscriptions to Nostr...')
-      
+
       // Fetch all subscriptions including deleted ones for proper sync
       const allSubscriptions = await utils.feed.getAllSubscriptionsForSync.fetch()
-      
-      const subscriptionList = buildSubscriptionListFromFeeds(allSubscriptions)
-      
-      const signEvent = async (event: UnsignedEvent): Promise<Event> => {
-        const pubkey = await window.nostr!.getPublicKey()
-        const signedEvent = await window.nostr!.signEvent({ ...event, pubkey })
-        if (!signedEvent) throw new Error('Failed to sign event')
-        return signedEvent as Event
-      }
 
-      const result = await publishSubscriptionList(subscriptionList, signEvent)
+      const subscriptionList = buildSubscriptionListFromFeeds(allSubscriptions)
+
+      const result = await publishSubscriptionList(subscriptionList, signEventOrThrow)
       
       if (result.success) {
         console.log('✅ Auto-export successful:', result.eventId)
@@ -794,7 +778,7 @@ export function FeedReader() {
       console.error('❌ Auto-export error:', error)
       // Silently fail - don't interrupt user experience
     }
-  }, [user?.npub, utils.feed])
+  }, [user?.npub, authMethod, signEventOrThrow, utils.feed])
 
   // Handle importing feeds from Nostr sync
   const handleImportFeeds = async (feedsToImport: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => {
