@@ -1,6 +1,7 @@
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import * as secp256k1 from '@noble/secp256k1';
+import { schnorr } from '@noble/curves/secp256k1';
 import { bech32 } from '@scure/base';
 
 export interface NostrEvent {
@@ -87,8 +88,7 @@ export async function signEvent(
   privateKeyHex: string
 ): Promise<NostrEvent> {
   const id = getEventHash(event);
-  const sigBytes = await secp256k1.signAsync(id, privateKeyHex);
-  const sig = sigBytes.toCompactHex();
+  const sig = bytesToHex(schnorr.sign(id, privateKeyHex));
 
   return {
     ...event,
