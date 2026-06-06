@@ -63,7 +63,7 @@ async function checkIfFeed(url: string): Promise<FeedDiscoveryResult> {
   try {
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; NostrFeedz/1.0; +https://github.com/yourrepo)'
+        'User-Agent': 'Mozilla/5.0 (compatible; readstr/1.0; +https://readstr.privkey.io)'
       },
       signal: AbortSignal.timeout(10000), // 10 second timeout
     })
@@ -136,7 +136,7 @@ async function findFeedInHTML(url: string): Promise<FeedDiscoveryResult> {
   try {
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; NostrFeedz/1.0)'
+        'User-Agent': 'Mozilla/5.0 (compatible; readstr/1.0)'
       },
       signal: AbortSignal.timeout(10000),
     })

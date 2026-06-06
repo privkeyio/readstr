@@ -80,8 +80,8 @@ export async function GET(request: NextRequest) {
         subscriberCount: feed.subscriberCount,
         postCount: feed.postCount,
         // Deep link URLs for one-click subscription
-        subscribeUrl: `https://nostrfeedz.com/subscribe?npub=${encodeURIComponent(feed.npub)}`,
-        webUrl: `https://nostrfeedz.com/guide#${feed.npub}`,
+        subscribeUrl: `https://readstr.privkey.io/subscribe?npub=${encodeURIComponent(feed.npub)}`,
+        webUrl: `https://readstr.privkey.io/guide#${feed.npub}`,
       }
       
       if (format === 'minimal') {
@@ -95,7 +95,7 @@ export async function GET(request: NextRequest) {
         lastPublishedAt: feed.lastPublishedAt?.toISOString() || null,
         createdAt: feed.createdAt.toISOString(),
         // RSS feed URL for this author
-        rssUrl: `https://nostrfeedz.com/api/nostr-rss?npub=${encodeURIComponent(feed.npub)}`,
+        rssUrl: `https://readstr.privkey.io/api/nostr-rss?npub=${encodeURIComponent(feed.npub)}`,
       }
     })
     
@@ -130,7 +130,7 @@ export async function GET(request: NextRequest) {
       },
       meta: {
         version: '1.0',
-        docsUrl: 'https://nostrfeedz.com/api/guide/docs',
+        docsUrl: 'https://readstr.privkey.io/api/guide/docs',
       },
     }, { headers: corsHeaders })
     
