@@ -70,9 +70,9 @@ export async function GET(
       lastPublishedAt: guideFeed.lastPublishedAt?.toISOString() || null,
       createdAt: guideFeed.createdAt.toISOString(),
       // Action URLs
-      subscribeUrl: `https://nostrfeedz.com/subscribe?npub=${encodeURIComponent(npub)}`,
-      webUrl: `https://nostrfeedz.com/guide#${npub}`,
-      rssUrl: `https://nostrfeedz.com/api/nostr-rss?npub=${encodeURIComponent(npub)}`,
+      subscribeUrl: `https://readstr.privkey.io/subscribe?npub=${encodeURIComponent(npub)}`,
+      webUrl: `https://readstr.privkey.io/guide#${npub}`,
+      rssUrl: `https://readstr.privkey.io/api/nostr-rss?npub=${encodeURIComponent(npub)}`,
     }
     
     // Optionally fetch recent posts from Nostr

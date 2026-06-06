@@ -720,7 +720,7 @@ export function FeedReader() {
       const shareUrl = originalUrl || item.url || ''
 
       // Create the note content with attribution
-      const noteContent = `📖 ${item.title}\n\n${shareUrl}\n\n— shared from nostrfeedz.com`
+      const noteContent = `📖 ${item.title}\n\n${shareUrl}\n\n— shared from readstr.privkey.io`
 
       const unsignedEvent: UnsignedEvent = {
         kind: 1,
