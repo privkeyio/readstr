@@ -53,16 +53,29 @@ bd close <id>         # Complete work
 
 ## Machine Roles: Dev vs Server
 
-This repo is checked out on two kinds of machines. **Figure out which one you are on before following the Beads "Session Completion" workflow above** — that workflow is written for the dev machine and does NOT apply on the server.
+This repo is checked out on three machines: **two Dolt-backed dev laptops** and **one server/deploy host**. **Figure out which one you are on before following the Beads "Session Completion" workflow above** — that workflow is written for the dev machines and does NOT apply on the server.
 
-| | **Dev machine** | **Server / deploy host** |
+| | **Dev laptops (×2)** | **Server / deploy host** |
 |---|---|---|
 | Purpose | Write code, track work | Pull latest code, build, serve |
 | Beads | Source of truth. Dolt backend → syncs to `refs/dolt/data` on origin | Stealth mode (`.beads/` is in `.git/info/exclude`), SQLite backend — does NOT sync anywhere |
 | `bd dolt push` / Session Completion beads steps | Apply | Do **not** apply — there is no path for beads data to reach origin |
 | Hosts readstr.privkey.io | No | Yes (host Caddy → app container) |
 
-**How to tell where you are:** run `bd vc status`. If it errors with *"requires Dolt backend"*, you are on the **server** — do all issue tracking on the dev machine instead, and skip every beads/`bd dolt push` step when ending a session here. (Note: on the dev box, `bd dolt push` is the correct sync command in bd 1.0.4 — it pushes the Dolt data to `refs/dolt/data` on origin. There is no `bd daemon` in 1.0.4; `bd vc status` is just for inspecting local branch/commit state.)
+**How to tell where you are:** run `bd vc status`. If it errors with *"requires Dolt backend"*, you are on the **server** — do all issue tracking on a dev laptop instead, and skip every beads/`bd dolt push` step when ending a session here. (Note: on a dev laptop, `bd dolt push` is the correct sync command in bd 1.0.4 — it pushes the Dolt data to `refs/dolt/data` on origin. There is no `bd daemon` in 1.0.4; `bd vc status` is just for inspecting local branch/commit state.)
+
+**Two dev laptops — keep them in sync.** Both laptops are Dolt sources of truth that round-trip through `refs/dolt/data` on origin (they never talk directly). On whichever laptop you sit down at: **`bd dolt pull` before you start, `bd dolt push` before you stop.**
+```bash
+# START of a dev session
+git pull --rebase
+bd dolt pull          # pull beads issue data the other laptop pushed
+# ... work, bd close/create, code ...
+# END of a dev session
+git pull --rebase
+bd dolt push          # mirror beads changes back to origin
+git push
+```
+Skipping `bd dolt pull` risks editing a stale copy and creating divergent Dolt history that must be merged. The server is NOT a participant in this — ignore its `bd list`.
 
 **Server session completion** is just code, no beads:
 ```bash
