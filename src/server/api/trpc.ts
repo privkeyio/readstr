@@ -1,4 +1,4 @@
-import { initTRPC } from '@trpc/server'
+import { initTRPC, TRPCError } from '@trpc/server'
 import superjson from 'superjson'
 import { ZodError } from 'zod'
 import { type TRPCContext } from '@/server/auth/request-context'
@@ -53,7 +53,10 @@ export const publicProcedure = t.procedure.use(inputSanitizer)
 
 const enforceNostrAuth = t.middleware(({ ctx, next }) => {
   if (!ctx.nostrPubkey) {
-    throw new Error('UNAUTHORIZED - Nostr authentication required')
+    throw new TRPCError({
+      code: 'UNAUTHORIZED',
+      message: 'Nostr authentication required',
+    })
   }
   return next({
     ctx: {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { createTRPCRouter, protectedProcedure } from "@/server/api/trpc";
 import { nip19 } from 'nostr-tools';
 
@@ -12,7 +13,7 @@ const ADMIN_HEX = decodedAdmin.data;
 
 const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
   if (ctx.nostrPubkey !== ADMIN_HEX) {
-    throw new Error('UNAUTHORIZED');
+    throw new TRPCError({ code: 'FORBIDDEN', message: 'Admin access required' });
   }
   return next();
 });
