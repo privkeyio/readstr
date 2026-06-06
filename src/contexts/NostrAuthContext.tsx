@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react'
 import { Event, nip19, UnsignedEvent } from 'nostr-tools'
 
-export type NostrAuthMethod = 'nip07' | 'npub_password' | null
+export type NostrAuthMethod = 'nip07' | 'npub_readonly' | null
 
 export interface NostrUser {
   pubkey: string
@@ -21,7 +21,7 @@ export interface NostrAuthState {
   isConnected: boolean
   user: NostrUser | null
   authMethod: NostrAuthMethod
-  connect: (method: NostrAuthMethod, credentials?: { npub?: string; password?: string }) => Promise<void>
+  connect: (method: NostrAuthMethod, credentials?: { npub?: string }) => Promise<void>
   disconnect: () => void
   signEvent: (event: UnsignedEvent) => Promise<Event | null>
   signEventOrThrow: (event: UnsignedEvent) => Promise<Event>
@@ -73,16 +73,19 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
             console.log('NIP-07 extension not found, clearing session')
             localStorage.removeItem('nostr_session')
           }
-        } else if (sessionData.method === 'npub_password' && sessionData.pubkey) {
-          // Restore npub+password session
-          setUser({ 
-            pubkey: sessionData.pubkey, 
-            npub: sessionData.npub 
+        } else if (sessionData.method === 'npub_readonly' && sessionData.pubkey) {
+          // Restore read-only npub session
+          setUser({
+            pubkey: sessionData.pubkey,
+            npub: sessionData.npub
           })
-          setAuthMethod('npub_password')
+          setAuthMethod('npub_readonly')
           setIsConnected(true)
-          console.log('Restored npub+password session')
+          console.log('Restored read-only npub session')
           return
+        } else {
+          // Unknown or legacy session method, clear it
+          localStorage.removeItem('nostr_session')
         }
       } catch (error) {
         console.error('Invalid stored session:', error)
@@ -96,17 +99,17 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
     }
   }
 
-  const connect = async (method: NostrAuthMethod, credentials?: { npub?: string; password?: string }) => {
+  const connect = async (method: NostrAuthMethod, credentials?: { npub?: string }) => {
     try {
       switch (method) {
         case 'nip07':
           await connectNIP07()
           break
-        case 'npub_password':
-          if (!credentials?.npub || !credentials?.password) {
-            throw new Error('npub and password required for npub_password method')
+        case 'npub_readonly':
+          if (!credentials?.npub) {
+            throw new Error('npub required for read-only view')
           }
-          await connectNpubPassword(credentials.npub, credentials.password)
+          await connectNpubReadonly(credentials.npub)
           break
         default:
           throw new Error('Invalid auth method')
@@ -149,35 +152,29 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
     }
   }
 
-  const connectNpubPassword = async (npub: string, password: string) => {
+  const connectNpubReadonly = async (npub: string) => {
     try {
       // Validate npub format
       const decoded = nip19.decode(npub)
       if (decoded.type !== 'npub') {
         throw new Error('Invalid npub format')
       }
-      
+
       const pubkey = decoded.data as string
-      
-      // For npub+password auth, we're essentially doing read-only access
-      // The user can view content but cannot sign events (no private key)
-      // This is perfect for a social media reader app
-      
-      // Store the session (encrypted with password in real app)
+
       const sessionData = {
         pubkey,
         npub,
-        method: 'npub_password',
+        method: 'npub_readonly',
         timestamp: Date.now()
       }
       localStorage.setItem('nostr_session', JSON.stringify(sessionData))
-      
+
       setUser({ pubkey, npub })
-      setAuthMethod('npub_password')
+      setAuthMethod('npub_readonly')
       setIsConnected(true)
-      
-      // Note: No private key stored, so signing will not be available
-      console.log('Connected with npub+password (read-only mode)')
+
+      console.log('Connected with read-only npub view')
     } catch (error) {
       throw new Error('Invalid npub provided or connection failed')
     }
@@ -201,8 +198,8 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
           }
           throw new Error('NIP-07 signing not available')
 
-        case 'npub_password':
-          throw new Error('Cannot sign events with npub+password authentication. Use NIP-07 extension for signing.')
+        case 'npub_readonly':
+          throw new Error('Cannot sign events in read-only npub view. Use a NIP-07 extension for signing.')
 
         default:
           throw new Error('No signing method available')
