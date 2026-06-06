@@ -12,9 +12,11 @@ import { SettingsDialog, MarkReadBehavior, OrganizationMode } from './settings-d
 import { FormattedContent } from './formatted-content'
 import { SimplePool } from 'nostr-tools'
 import { 
-  fetchSubscriptionList, 
+  fetchSubscriptionList,
   mergeSubscriptionLists,
   getLastSyncTime,
+  isSyncEventFresh,
+  setLastAppliedSyncCreatedAt,
   publishSubscriptionList,
   buildSubscriptionListFromFeeds,
 } from '@/lib/nostr-sync'
@@ -212,10 +214,19 @@ export function FeedReader() {
       try {
         const result = await fetchSubscriptionList(user.npub)
         if (!result.success || !result.data) return
-        
+
+        // Ignore stale events: a relay must not roll back state with an
+        // equal-or-older subscription list than the one we last applied.
+        if (!isSyncEventFresh('nostr-feedz-subscriptions', result.createdAt)) return
+
+        // Accept this event as the new freshness basis now that we're using its
+        // data, so a later stale event is rejected even if the user dismisses
+        // the import prompt below.
+        setLastAppliedSyncCreatedAt('nostr-feedz-subscriptions', result.createdAt!)
+
         // Check if there are new subscriptions to import
         if (result.data.rss.length === 0 && result.data.nostr.length === 0) return
-        
+
         const currentFeeds = feeds.map((f: Feed) => ({
           type: f.type,
           url: f.url || f.npub || '',
