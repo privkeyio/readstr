@@ -41,6 +41,19 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>('light')
   const [mounted, setMounted] = useState(false)
 
+  const applyTheme = useCallback((newTheme: Theme) => {
+    const root = document.documentElement
+    // Remove all theme classes
+    themeOrder.forEach(t => root.classList.remove(`theme-${t}`))
+    // Add new theme class
+    root.classList.add(`theme-${newTheme}`)
+    // Handle dark mode class for Tailwind
+    root.classList.toggle('dark', newTheme === 'dark')
+  }, [])
+
+  /* eslint-disable react-hooks/set-state-in-effect --
+     One-time mount initialization that must read browser-only APIs (localStorage,
+     matchMedia) unavailable during SSR, so it cannot be hoisted into render. */
   useEffect(() => {
     setMounted(true)
     const savedTheme = localStorage.getItem('theme') as Theme | null
@@ -53,23 +66,14 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       setThemeState(systemTheme)
       applyTheme(systemTheme)
     }
-  }, [])
-
-  const applyTheme = (newTheme: Theme) => {
-    const root = document.documentElement
-    // Remove all theme classes
-    themeOrder.forEach(t => root.classList.remove(`theme-${t}`))
-    // Add new theme class
-    root.classList.add(`theme-${newTheme}`)
-    // Handle dark mode class for Tailwind
-    root.classList.toggle('dark', newTheme === 'dark')
-  }
+  }, [applyTheme])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const setTheme = useCallback((newTheme: Theme) => {
     setThemeState(newTheme)
     localStorage.setItem('theme', newTheme)
     applyTheme(newTheme)
-  }, [])
+  }, [applyTheme])
 
   const cycleTheme = useCallback(() => {
     const currentIndex = themeOrder.indexOf(theme)

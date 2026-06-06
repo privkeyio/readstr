@@ -68,7 +68,9 @@ export function FormattedContent({
                 />
               ),
               img: ({ node, ...props }) => (
+                // eslint-disable-next-line @next/next/no-img-element -- remote image from arbitrary feed content, not suited to next/image
                 <img
+                  alt=""
                   className="max-w-full h-auto rounded-xl shadow-theme-md my-6"
                   loading="lazy"
                   {...props}

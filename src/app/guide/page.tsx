@@ -227,6 +227,7 @@ export default function GuidePage() {
                   {/* Profile Picture */}
                   {feed.picture && (
                     <div className="flex-shrink-0">
+                      {/* eslint-disable-next-line @next/next/no-img-element -- remote feed avatar from arbitrary domains, not suited to next/image */}
                       <img
                         src={feed.picture}
                         alt={feed.displayName}
