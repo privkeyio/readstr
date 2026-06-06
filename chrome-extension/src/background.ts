@@ -14,7 +14,10 @@ import {
   getPublicKeyFromPrivate,
   encodeNpub,
   generateAuthHeader,
+  buildUnsignedNip98Event,
+  encodeNip98AuthHeader,
 } from './nostr';
+import type { NostrEvent, UnsignedEvent } from './nostr';
 import { withRetry } from './utils/retry';
 import { feedDatabase } from './db/feedDatabase';
 
@@ -80,12 +83,11 @@ async function saveStorageData(data: Partial<StorageData>): Promise<void> {
   await chrome.storage.local.set(data);
 }
 
-// NIP07_DELEGATION_PENDING: nip07 signing must happen in a content/page context
-// because there is no window.nostr in the background service worker. Until that
-// delegation is implemented, nip07 users cannot produce a signed NIP-98 event
-// (including the `payload` body binding) and their protected requests are
-// unauthenticated. Reviewers: implementing content/page-context delegation for
-// nip07 signing is the prioritized follow-up.
+// nip07 signing is delegated to a page context with window.nostr (see
+// requestNip98FromOpenTab). When no readstr tab is open or the signer declines,
+// we cannot produce a signed NIP-98 event, so we surface a one-time warning
+// rather than emitting an unsigned request that silently 401s. Reset to false on
+// a successful signature so later breakage warns again.
 let warnedNip07Unauthenticated = false;
 
 async function warnNip07Unauthenticated(): Promise<void> {
@@ -97,12 +99,70 @@ async function warnNip07Unauthenticated(): Promise<void> {
       iconUrl: 'icons/icon128.png',
       title: 'Limited functionality',
       message:
-        'Browser extension signing (NIP-07) is not yet supported in the background. ' +
-        'Syncing and read/favorite actions are disabled. Sign in with an nsec key for full access.',
+        'Open readstr.privkey.io in a tab and approve the signing request to sync. ' +
+        'Browser extension signing (NIP-07) needs an open readstr tab with your signer.',
     });
   } catch {
     // Notifications may be unavailable; the warning is best-effort.
   }
+}
+
+// nip07 signing happens in a page context that owns window.nostr. We relay an
+// unsigned NIP-98 event to an open readstr tab, where content.ts hands it to the
+// page-world signer and returns the signed event. Returns null when no eligible
+// tab/signer is available or the user declines.
+// Keep in sync with the page-signer content_scripts match list in manifest.json.
+const NOSTR_TAB_URLS = [
+  '*://nostrfeedz.com/*',
+  '*://*.nostrfeedz.com/*',
+  '*://readstr.privkey.io/*',
+  '*://*.readstr.privkey.io/*',
+  '*://localhost/*',
+];
+
+// Serialize nip07 page-context signing. refreshFeeds fires getFeeds and
+// getFeedItems concurrently (Promise.all), and each protected request triggers
+// its own window.nostr.signEvent round-trip. NIP-07 signers commonly process
+// signing requests one at a time and reject/drop a second concurrent request;
+// the dropped one yields no auth header -> unsigned fetch -> 401 -> the shared
+// Promise.all rejects and the whole refresh falls back to stale cache (badge
+// stays correct from cached feed counts while the Recent list shows drifted,
+// locally-read items). Chaining signing so only one round-trip is in flight at a
+// time lets both fetches authenticate and keeps feeds and items consistent.
+let nip07SigningChain: Promise<unknown> = Promise.resolve();
+
+function serializeNip07Signing<T>(fn: () => Promise<T>): Promise<T> {
+  const run = nip07SigningChain.then(fn, fn);
+  nip07SigningChain = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+async function requestNip98FromOpenTab(
+  unsignedEvent: UnsignedEvent
+): Promise<NostrEvent | null> {
+  let tabs: chrome.tabs.Tab[];
+  try {
+    tabs = await chrome.tabs.query({ url: NOSTR_TAB_URLS });
+  } catch {
+    return null;
+  }
+
+  for (const tab of tabs) {
+    if (!tab.id) continue;
+    try {
+      const response = (await chrome.tabs.sendMessage(tab.id, {
+        type: 'SIGN_NIP98',
+        event: unsignedEvent,
+      })) as { signed?: NostrEvent; error?: string } | undefined;
+      if (response?.signed) return response.signed;
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 async function getNostrAuthHeader(
@@ -117,10 +177,15 @@ async function getNostrAuthHeader(
     return generateAuthHeader(url, method, nostrAuth.pubkey, nostrAuth.privateKeyHex, body);
   }
 
-  // See NIP07_DELEGATION_PENDING above: we cannot sign for nip07 here. Surface a
-  // one-time warning so the user understands why protected actions fail, and
-  // return null so the request proceeds without a forged/absent auth header.
   if (nostrAuth.method === 'nip07') {
+    const unsigned = buildUnsignedNip98Event(url, method, nostrAuth.pubkey, body);
+    const signed = await serializeNip07Signing(() => requestNip98FromOpenTab(unsigned));
+    if (signed) {
+      warnedNip07Unauthenticated = false;
+      return encodeNip98AuthHeader(signed);
+    }
+    // No open readstr tab / signer declined: surface the limited-functionality
+    // state instead of sending an unsigned request that silently 401s.
     void warnNip07Unauthenticated();
   }
   return null;
@@ -185,28 +250,53 @@ async function fetchFeeds(
   });
 }
 
+// Fetch unread items for the Recent list. getFeedItems orders by publishedAt
+// desc, so a plain (read+unread) page only surfaces unread items that happen to
+// be among the newest N — the badge (server-side total unread from getFeeds)
+// then drifts above the visible unread count when older items are still unread.
+// Request unreadOnly and page through nextCursor so Recent stays consistent with
+// the badge and the reader.
 async function fetchNewItems(
   settings: ExtensionSettings,
   authToken: string | null,
   nostrAuth: NostrAuthData | null = null,
-  limit = 20
+  limit = 50
 ): Promise<FeedItem[]> {
   const baseUrl = normalizeBaseUrl(settings.webAppUrl);
   if (!baseUrl) {
     throw new Error('Invalid web app URL');
   }
-  const input = JSON.stringify({ json: { limit } });
-  const url = `${baseUrl}/api/trpc/feed.getFeedItems?input=${encodeURIComponent(input)}`;
 
-  return withRetry(async () => {
-    const response = await fetchWithAuth<{ result: { data: { json: FeedItemsResponse } } }>(
-      url,
-      authToken,
-      {},
-      nostrAuth
-    );
-    return response.result.data.json.items;
-  });
+  const MAX_PAGES = 5;
+  const collected: FeedItem[] = [];
+  let cursor: string | undefined;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const input = JSON.stringify({ json: { limit, unreadOnly: true, cursor } });
+    const url = `${baseUrl}/api/trpc/feed.getFeedItems?input=${encodeURIComponent(input)}`;
+
+    const data = await withRetry(async () => {
+      const response = await fetchWithAuth<{ result: { data: { json: FeedItemsResponse } } }>(
+        url,
+        authToken,
+        {},
+        nostrAuth
+      );
+      return response.result.data.json;
+    });
+
+    collected.push(...data.items);
+    if (!data.nextCursor) break;
+    cursor = data.nextCursor;
+
+    if (page === MAX_PAGES - 1) {
+      console.warn(
+        `fetchNewItems: hit MAX_PAGES (${MAX_PAGES}) cap with more unread items remaining; list truncated to ${collected.length}.`
+      );
+    }
+  }
+
+  return collected;
 }
 
 async function markItemAsRead(itemId: string): Promise<void> {
@@ -440,9 +530,7 @@ async function tryRestoreAuthFromOpenTabs(): Promise<boolean> {
   }
 
   try {
-    const tabs = await chrome.tabs.query({
-      url: ['*://*.nostrfeedz.com/*', '*://nostrfeedz.com/*', '*://readstr.privkey.io/*', '*://localhost:*'],
-    });
+    const tabs = await chrome.tabs.query({ url: NOSTR_TAB_URLS });
 
     for (const tab of tabs) {
       if (!tab.id) continue;

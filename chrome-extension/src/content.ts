@@ -1,4 +1,12 @@
 import type { LocalFeed, ExtensionSettings } from './types';
+import {
+  NIP98_SIGN_REQUEST,
+  NIP98_SIGN_RESPONSE,
+  type Nip98SignResponse,
+} from './utils/nip98Bridge';
+import type { UnsignedEvent, NostrEvent } from './nostr';
+
+const SIGN_TIMEOUT_MS = 20000;
 
 interface DetectedFeed {
   url: string;
@@ -406,10 +414,57 @@ if (document.readyState === 'loading') {
   init();
 }
 
+// Relay a NIP-98 signing request from the background service worker to the
+// page-world signer (window.nostr) and back. The background has no window.nostr,
+// so it delegates here. Origin-checked and timed out so a stalled signer cannot
+// hang the caller.
+function requestPageSignature(unsignedEvent: UnsignedEvent): Promise<NostrEvent> {
+  return new Promise((resolve, reject) => {
+    const id = generateId();
+    const origin = window.location.origin;
+
+    const handler = (event: MessageEvent): void => {
+      if (event.source !== window || event.origin !== origin) return;
+      const data = event.data as Partial<Nip98SignResponse> | null;
+      if (!data || data.type !== NIP98_SIGN_RESPONSE || data.id !== id) return;
+      cleanup();
+      if (data.signed) {
+        resolve(data.signed);
+      } else {
+        reject(new Error(data.error ?? 'Signing failed'));
+      }
+    };
+
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Signing timed out'));
+    }, SIGN_TIMEOUT_MS);
+
+    const cleanup = (): void => {
+      clearTimeout(timeout);
+      window.removeEventListener('message', handler);
+    };
+
+    window.addEventListener('message', handler);
+    window.postMessage({ type: NIP98_SIGN_REQUEST, id, event: unsignedEvent }, origin);
+  });
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'GET_DETECTED_FEEDS') {
     const feeds = detectFeeds();
     sendResponse({ feeds });
+  } else if (message.type === 'SIGN_NIP98') {
+    if (!isTrustedHost(window.location.hostname)) {
+      sendResponse({ error: 'Untrusted host' });
+      return true;
+    }
+    requestPageSignature(message.event as UnsignedEvent)
+      .then((signed) => sendResponse({ signed }))
+      .catch((err: unknown) => {
+        sendResponse({ error: err instanceof Error ? err.message : 'Signing failed' });
+      });
+    return true;
   } else if (message.type === 'GET_SESSION') {
     const hostname = window.location.hostname;
     if (!isTrustedHost(hostname)) {

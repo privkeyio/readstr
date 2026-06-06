@@ -514,6 +514,7 @@ export const feedRouter = createTRPCRouter({
       feedIds: z.array(z.string()).optional(), // Array of feed IDs for tag filtering
       limit: z.number().min(1).max(100).default(50),
       cursor: z.string().optional(),
+      unreadOnly: z.boolean().optional(),
     }))
     .query(async ({ ctx, input }) => {
       const whereClause: Prisma.FeedItemWhereInput = {}
@@ -551,6 +552,14 @@ export const feedRouter = createTRPCRouter({
         }
       }
 
+      if (input.unreadOnly) {
+        whereClause.readItems = {
+          none: {
+            userPubkey: ctx.nostrPubkey,
+          },
+        }
+      }
+
       let items
       try {
         items = await ctx.db.feedItem.findMany({
@@ -568,9 +577,10 @@ export const feedRouter = createTRPCRouter({
               },
             },
           },
-          orderBy: {
-            publishedAt: 'desc',
-          },
+          orderBy: [
+            { publishedAt: 'desc' },
+            { id: 'desc' },
+          ],
           take: input.limit + 1,
           cursor: input.cursor ? { id: input.cursor } : undefined,
         })
