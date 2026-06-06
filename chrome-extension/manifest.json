@@ -44,6 +44,18 @@
       "js": ["content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://nostrfeedz.com/*",
+        "*://*.nostrfeedz.com/*",
+        "*://readstr.privkey.io/*",
+        "*://*.readstr.privkey.io/*",
+        "*://localhost/*"
+      ],
+      "js": ["page-signer.js"],
+      "world": "MAIN",
+      "run_at": "document_idle"
     }
   ]
 }

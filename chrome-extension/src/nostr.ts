@@ -97,13 +97,12 @@ export async function signEvent(
   };
 }
 
-export async function createNip98AuthEvent(
+export function buildUnsignedNip98Event(
   url: string,
   method: string,
   pubkey: string,
-  privateKeyHex?: string,
   body?: string | null
-): Promise<NostrEvent> {
+): UnsignedEvent {
   const tags: string[][] = [
     ['u', url],
     ['method', method.toUpperCase()],
@@ -116,13 +115,23 @@ export async function createNip98AuthEvent(
     tags.push(['payload', digest]);
   }
 
-  const unsignedEvent: UnsignedEvent = {
+  return {
     pubkey,
     created_at: Math.floor(Date.now() / 1000),
     kind: 27235,
     tags,
     content: '',
   };
+}
+
+export async function createNip98AuthEvent(
+  url: string,
+  method: string,
+  pubkey: string,
+  privateKeyHex?: string,
+  body?: string | null
+): Promise<NostrEvent> {
+  const unsignedEvent = buildUnsignedNip98Event(url, method, pubkey, body);
 
   if (privateKeyHex) {
     return signEvent(unsignedEvent, privateKeyHex);

@@ -35,6 +35,7 @@ const buildOptions = {
   entryPoints: [
     'src/background.ts',
     'src/content.ts',
+    'src/page-signer.ts',
     'src/popup.tsx',
     'src/options.tsx'
   ],
