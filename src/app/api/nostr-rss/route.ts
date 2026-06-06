@@ -1,6 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { SimplePool, nip19, Event, Filter } from 'nostr-tools';
 import RSS from 'rss';
+import { unified } from 'unified';
+import rehypeParse from 'rehype-parse';
+import rehypeSanitize, { defaultSchema, type Options as SanitizeSchema } from 'rehype-sanitize';
+import rehypeStringify from 'rehype-stringify';
+
+// Sanitize generated HTML before it lands in content:encoded. readstr's own UI
+// renders feeds through rehype-sanitize, but third-party RSS readers consume this
+// route's raw markup directly — unsanitized attacker content would be stored XSS.
+const sanitizeSchema: SanitizeSchema = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    code: [...(defaultSchema.attributes?.code || []), ['className', /^language-./]],
+  },
+};
+
+async function sanitizeHtml(html: string): Promise<string> {
+  return String(
+    await unified()
+      .use(rehypeParse, { fragment: true })
+      .use(rehypeSanitize, sanitizeSchema)
+      .use(rehypeStringify)
+      .process(html)
+  );
+}
 
 const DEFAULT_RELAYS = [
   'wss://relay.damus.io',
@@ -188,7 +213,7 @@ export async function GET(request: NextRequest) {
       
       // Convert Markdown to simple HTML for RSS readers
       // Basic conversion: paragraphs, headers, links, bold, italic, code, images
-      const htmlContent = convertMarkdownToHtml(fullContent, image);
+      const htmlContent = await sanitizeHtml(convertMarkdownToHtml(fullContent, image));
       
       // Build a proper naddr URL for long-form articles using Habla.news
       // naddr includes: kind, pubkey, d-tag identifier
