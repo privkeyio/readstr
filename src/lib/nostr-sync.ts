@@ -13,6 +13,10 @@ const SUBSCRIPTION_LIST_KIND = 30404
 // Kind 30405 for read status sync
 const READ_STATUS_KIND = 30405
 
+const debugLog = (...args: unknown[]) => {
+  if (process.env.NODE_ENV === 'development') console.log(...args)
+}
+
 // Subscription list event structure
 export interface SubscriptionList {
   rss: string[] // RSS feed URLs
@@ -129,7 +133,7 @@ export async function publishSubscriptionList(
     // Wait for at least one relay to accept (use Promise.race as fallback)
     await Promise.race(publishPromises)
     
-    console.log('Published subscription list to Nostr:', signedEvent.id)
+    debugLog('Published subscription list to Nostr:', signedEvent.id)
     
     return { success: true, eventId: signedEvent.id }
   } catch (error) {
@@ -379,11 +383,11 @@ export function mergeSubscriptionLists(
       .map(f => normalizeNpub(f.url))
   )
   
-  console.log('🔍 Sync merge - Local RSS URLs (normalized):', Array.from(localRssUrls))
-  console.log('🔍 Sync merge - Local Nostr npubs (normalized):', Array.from(localNpubs))
-  console.log('🔍 Sync merge - Remote RSS URLs:', remoteList.rss)
-  console.log('🔍 Sync merge - Remote Nostr npubs:', remoteList.nostr)
-  console.log('🔍 Sync merge - Remote deleted feeds:', remoteList.deleted)
+  debugLog('🔍 Sync merge - Local RSS URLs (normalized):', Array.from(localRssUrls))
+  debugLog('🔍 Sync merge - Local Nostr npubs (normalized):', Array.from(localNpubs))
+  debugLog('🔍 Sync merge - Remote RSS URLs:', remoteList.rss)
+  debugLog('🔍 Sync merge - Remote Nostr npubs:', remoteList.nostr)
+  debugLog('🔍 Sync merge - Remote deleted feeds:', remoteList.deleted)
   
   const toAdd: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }> = []
   const toRemove: Array<{ type: 'RSS' | 'NOSTR' | 'NOSTR_VIDEO'; url: string }> = []
@@ -410,7 +414,7 @@ export function mergeSubscriptionLists(
       : normalizeNpub(localFeed.url)
     
     if (remoteDeleted.has(normalized)) {
-      console.log(`🗑️ Feed was deleted remotely, marking for removal: ${localFeed.url}`)
+      debugLog(`🗑️ Feed was deleted remotely, marking for removal: ${localFeed.url}`)
       toRemove.push(localFeed)
     }
   }
@@ -420,7 +424,7 @@ export function mergeSubscriptionLists(
     const normalizedRemoteUrl = normalizeUrlForComparison(rssUrl)
     const exists = localRssUrls.has(normalizedRemoteUrl)
     
-    console.log(`🔍 RSS check: "${rssUrl}" -> normalized: "${normalizedRemoteUrl}" -> exists: ${exists}`)
+    debugLog(`🔍 RSS check: "${rssUrl}" -> normalized: "${normalizedRemoteUrl}" -> exists: ${exists}`)
     
     if (!exists) {
       toAdd.push({
@@ -437,7 +441,7 @@ export function mergeSubscriptionLists(
     const normalizedRemoteNpub = normalizeNpub(npub)
     const exists = localNpubs.has(normalizedRemoteNpub)
     
-    console.log(`🔍 Nostr check: "${npub}" -> normalized: "${normalizedRemoteNpub}" -> exists: ${exists}`)
+    debugLog(`🔍 Nostr check: "${npub}" -> normalized: "${normalizedRemoteNpub}" -> exists: ${exists}`)
     
     if (!exists) {
       toAdd.push({
@@ -469,7 +473,7 @@ export function mergeSubscriptionLists(
     return !inRemote && !inDeleted
   })
   
-  console.log(`🔍 Sync result: ${toAdd.length} to add, ${toRemove.length} to remove, ${localOnly.length} local-only`)
+  debugLog(`🔍 Sync result: ${toAdd.length} to add, ${toRemove.length} to remove, ${localOnly.length} local-only`)
   
   return { toAdd, toRemove, localOnly }
 }
@@ -521,7 +525,7 @@ export async function publishReadStatus(
     const publishPromises = pool.publish(relays, signedEvent)
     await Promise.race(publishPromises)
     
-    console.log('Published read status to Nostr:', signedEvent.id)
+    debugLog('Published read status to Nostr:', signedEvent.id)
     
     return { success: true, eventId: signedEvent.id }
   } catch (error) {
