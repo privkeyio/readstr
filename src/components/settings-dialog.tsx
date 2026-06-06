@@ -172,18 +172,20 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
   // Load relays from localStorage on mount
   useEffect(() => {
     const savedRelays = localStorage.getItem('nostr_relays')
+    let urls: string[] = DEFAULT_RELAYS
     if (savedRelays) {
       try {
-        const urls = JSON.parse(savedRelays)
-        setRelays(urls.map((url: string) => ({ url, status: 'disconnected' as const })))
+        urls = JSON.parse(savedRelays)
       } catch (e) {
         // Use defaults if parsing fails
-        setRelays(DEFAULT_RELAYS.map(url => ({ url, status: 'disconnected' as const })))
+        urls = DEFAULT_RELAYS
       }
-    } else {
-      setRelays(DEFAULT_RELAYS.map(url => ({ url, status: 'disconnected' as const })))
     }
-    
+    // Reading persisted relays from localStorage on mount; localStorage is
+    // unavailable during SSR so this must happen in an effect, not at render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRelays(urls.map((url: string) => ({ url, status: 'disconnected' as const })))
+
     // Load last sync time
     const lastSync = getLastSyncTime()
     if (lastSync) {

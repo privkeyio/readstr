@@ -34,8 +34,8 @@ function SubscribeContent() {
   const tags = searchParams.get('tags')?.split(',').filter(Boolean) || []
   const returnUrl = searchParams.get('return')
 
-  const [status, setStatus] = useState<'loading' | 'ready' | 'subscribing' | 'success' | 'error'>('loading')
-  const [errorMessage, setErrorMessage] = useState('')
+  const [status, setStatus] = useState<'loading' | 'ready' | 'subscribing' | 'success' | 'error'>(npub ? 'loading' : 'error')
+  const [errorMessage, setErrorMessage] = useState(npub ? '' : 'Missing npub parameter')
 
   // Fetch feed info from guide
   const { data: guideFeed, isLoading: feedLoading } = api.guide.getGuideFeed.useQuery(
@@ -47,11 +47,7 @@ function SubscribeContent() {
   const incrementSubscriberMutation = api.guide.incrementSubscriberCount.useMutation()
 
   useEffect(() => {
-    if (!npub) {
-      setStatus('error')
-      setErrorMessage('Missing npub parameter')
-      return
-    }
+    if (!npub) return
 
     if (!feedLoading) {
       setStatus('ready')
@@ -109,6 +105,9 @@ function SubscribeContent() {
       }, 500)
       return () => clearTimeout(timer)
     }
+    // handleSubscribe is recreated each render; the effect intentionally re-runs only
+    // on connection/status/npub changes, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected, status, npub])
 
   if (!npub) {
@@ -154,6 +153,7 @@ function SubscribeContent() {
             <div className="mb-6 rounded-xl border border-[#27ae60]/15 bg-white/[0.05] p-4">
               <div className="flex items-center gap-4">
                 {guideFeed.picture ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- remote feed avatar from arbitrary domains, not suited to next/image
                   <img
                     src={guideFeed.picture}
                     alt={guideFeed.displayName}

@@ -233,6 +233,9 @@ export function FeedReader() {
     }
     
     checkRemoteSync()
+    // 'feeds' is derived from feedsData each render (new reference); depending on
+    // feedsData here is the stable proxy and the check is guarded to run once per session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.npub, feedsData, isFeedsFetched, isFeedsLoading])
   
   const { data: userTags = [] } = api.feed.getUserTags.useQuery(undefined, {

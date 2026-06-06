@@ -48,6 +48,7 @@ export function VideoEmbed({
         {/* Thumbnail placeholder (shown before iframe loads) */}
         {!isLoaded && thumbnail && (
           <div className="absolute inset-0 flex items-center justify-center">
+            {/* eslint-disable-next-line @next/next/no-img-element -- remote video thumbnail from arbitrary domains, not suited to next/image */}
             <img
               src={thumbnail}
               alt={title}

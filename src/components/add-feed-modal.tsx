@@ -96,11 +96,14 @@ export function AddFeedModal({ isOpen, onClose, onAddFeed, isLoading = false, er
   // Load popular users when modal opens and Nostr is selected
   useEffect(() => {
     if (isOpen && feedType === 'NOSTR' && popularUsers.length === 0) {
-      getPopularUsersMutation.mutate({ 
+      getPopularUsersMutation.mutate({
         limit: 15,
         relays: getRelays()
       })
     }
+    // tRPC mutation object is unstable across renders; intentionally fetch only when
+    // the modal opens or feed type changes, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, feedType])
 
   // Debounced search
@@ -111,7 +114,7 @@ export function AddFeedModal({ isOpen, onClose, onAddFeed, isLoading = false, er
     }
 
     const timeoutId = setTimeout(() => {
-      searchProfilesMutation.mutate({ 
+      searchProfilesMutation.mutate({
         query: nostrSearch,
         limit: 10,
         relays: getRelays()
@@ -119,6 +122,9 @@ export function AddFeedModal({ isOpen, onClose, onAddFeed, isLoading = false, er
     }, 500)
 
     return () => clearTimeout(timeoutId)
+    // tRPC mutation object is unstable across renders; the search is intentionally
+    // debounced on the query string only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nostrSearch])
 
   const handleAddFeed = () => {
@@ -249,7 +255,7 @@ export function AddFeedModal({ isOpen, onClose, onAddFeed, isLoading = false, er
                 className="input-theme"
               />
               <p className="mt-2 text-xs text-theme-tertiary">
-                Enter a feed URL or website homepage - we'll find the feed for you
+                Enter a feed URL or website homepage - we&apos;ll find the feed for you
               </p>
             </div>
           )}
@@ -309,6 +315,7 @@ export function AddFeedModal({ isOpen, onClose, onAddFeed, isLoading = false, er
                           >
                             <div className="flex items-center gap-3">
                               {profile.picture && (
+                                // eslint-disable-next-line @next/next/no-img-element -- remote profile avatar from arbitrary domains, not suited to next/image
                                 <img
                                   src={profile.picture}
                                   alt={profile.name || 'User'}
@@ -350,6 +357,7 @@ export function AddFeedModal({ isOpen, onClose, onAddFeed, isLoading = false, er
                           >
                             <div className="flex items-center gap-3">
                               {profile.picture && (
+                                // eslint-disable-next-line @next/next/no-img-element -- remote profile avatar from arbitrary domains, not suited to next/image
                                 <img
                                   src={profile.picture}
                                   alt={profile.name || 'User'}
