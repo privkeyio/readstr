@@ -13,7 +13,7 @@ const ADMIN_HEX = decodedAdmin.data;
 
 const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
   if (ctx.nostrPubkey !== ADMIN_HEX) {
-    throw new TRPCError({ code: 'FORBIDDEN' });
+    throw new TRPCError({ code: 'FORBIDDEN', message: 'Admin access required' });
   }
   return next();
 });
