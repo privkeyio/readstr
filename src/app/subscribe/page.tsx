@@ -1,15 +1,33 @@
 'use client'
 
 import { useEffect, useState, Suspense } from 'react'
-import { useSearchParams, useRouter } from 'next/navigation'
+import { useSearchParams } from 'next/navigation'
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
 import { api } from '@/trpc/react'
 import Link from 'next/link'
 import { BrandHeader } from '@/components/brand-header'
 
+function safeReturnPath(value: string | null): string {
+  if (!value || value[0] !== '/' || value[1] === '/' || value[1] === '\\') {
+    return '/reader'
+  }
+  try {
+    const url = new URL(value, window.location.origin)
+    if (url.origin !== window.location.origin) {
+      return '/reader'
+    }
+    const path = url.pathname + url.search + url.hash
+    if (path[0] !== '/' || path[1] === '/' || path[1] === '\\') {
+      return '/reader'
+    }
+    return path
+  } catch {
+    return '/reader'
+  }
+}
+
 function SubscribeContent() {
   const searchParams = useSearchParams()
-  const router = useRouter()
   const { user, isConnected, connect } = useNostrAuth()
 
   const npub = searchParams.get('npub')
@@ -73,11 +91,7 @@ function SubscribeContent() {
 
       // Redirect after success
       setTimeout(() => {
-        if (returnUrl) {
-          window.location.href = returnUrl
-        } else {
-          router.push('/reader')
-        }
+        window.location.href = safeReturnPath(returnUrl)
       }, 2000)
 
     } catch (error: any) {
