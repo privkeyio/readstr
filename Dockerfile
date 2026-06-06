@@ -33,9 +33,7 @@ ENV NEXT_TELEMETRY_DISABLED 1
 
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
-# Install OpenSSL 1.1 for Prisma compatibility
-RUN apk add --no-cache openssl openssl-dev
-RUN apk add --no-cache libssl1.1 libcrypto1.1 --repository=http://dl-cdn.alpinelinux.org/alpine/v3.16/main/
+RUN apk add --no-cache openssl
 
 # Copy necessary files
 COPY --from=builder /app/public ./public
