@@ -73,15 +73,14 @@ export default function TestAuthPage() {
                   </button>
                   <button
                     onClick={() => {
-                      const npub = prompt('Enter your npub:')
-                      const password = prompt('Enter password:')
-                      if (npub && password) {
-                        connect('npub_password', { npub, password })
+                      const npub = prompt('Enter an npub to view (read-only):')
+                      if (npub) {
+                        connect('npub_readonly', { npub })
                       }
                     }}
                     className="block w-full rounded-xl border border-[#27ae60]/25 bg-white/10 px-4 py-2 font-semibold text-white transition-all duration-300 hover:-translate-y-0.5 hover:border-[#27ae60]/50 hover:bg-white/20"
                   >
-                    Connect with Npub + Password
+                    View a public npub (read-only)
                   </button>
                 </>
               ) : (

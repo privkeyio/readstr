@@ -22,7 +22,7 @@ async function sha256Hex(input: string): Promise<string> {
 
 // Current signer, kept in a module-scoped ref so the per-request fetch wrapper
 // (created once when the client is built) always sees the latest auth state.
-// `sign` is null when the user can't sign (e.g. npub+password read-only mode),
+// `sign` is null when the user can't sign (e.g. read-only npub view),
 // in which case no NIP-98 header is sent and the request goes out unauthenticated.
 let currentSign:
   | ((event: UnsignedEvent) => Promise<NostrEvent | null>)
@@ -122,7 +122,7 @@ export function TRPCReactProvider(props: {
                 )
                 headers.set('Authorization', token)
               } catch (err) {
-                // Read-only sessions (npub+password) or rejected signing fall
+                // Read-only npub sessions or rejected signing fall
                 // through unauthenticated; protected procedures will then fail.
                 console.warn('NIP-98 signing unavailable for request:', err)
               }

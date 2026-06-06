@@ -13,7 +13,7 @@ export function NostrFeed() {
   
   // Query for getting user's posts (only if authenticated)
   const { data: userPosts } = api.post.getUserPosts.useQuery(undefined, {
-    enabled: isConnected && authMethod !== 'npub_password',
+    enabled: isConnected && authMethod !== 'npub_readonly',
   })
 
   // Mutation for creating a new post
@@ -57,7 +57,7 @@ export function NostrFeed() {
           <p className="text-sm text-gray-300">
             <span className="font-medium">Method:</span> {
               authMethod === 'nip07' ? 'Browser Extension (Full Access)' :
-              authMethod === 'npub_password' ? 'npub + Password (Read Only)' :
+              authMethod === 'npub_readonly' ? 'Read-only npub view' :
               authMethod === 'bunker' ? 'Bunker Signer' :
               'Unknown'
             }
@@ -65,7 +65,7 @@ export function NostrFeed() {
           <p className="text-xs text-gray-400 break-all">
             <span className="font-medium">npub:</span> {user?.npub}
           </p>
-          {authMethod === 'npub_password' && (
+          {authMethod === 'npub_readonly' && (
             <p className="text-xs text-yellow-400">
               ℹ️ Read-only mode: Install a Nostr extension or use bunker signer to post events
             </p>
