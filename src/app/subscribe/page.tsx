@@ -212,7 +212,7 @@ function SubscribeContent() {
                 Successfully subscribed!
               </p>
               <p className="mt-1 text-sm text-[#B3B3B3]">
-                Redirecting to reader...
+                Redirecting...
               </p>
             </div>
           )}
