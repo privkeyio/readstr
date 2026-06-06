@@ -71,6 +71,21 @@ function getPubkeyHex(npubOrHex: string): string {
   return npubOrHex
 }
 
+// Verify a relay-returned event actually matches the requested author, kind, and d-tag.
+// nostr-tools validates the signature but does not enforce these against the filter,
+// so a malicious relay could return a validly-signed event from a different author.
+function isExpectedEvent(
+  event: Event,
+  pubkeyHex: string,
+  kind: number,
+  dTag: string
+): boolean {
+  if (event.pubkey.toLowerCase() !== pubkeyHex.toLowerCase()) return false
+  if (event.kind !== kind) return false
+  const eventDTag = event.tags.find(t => t[0] === 'd')?.[1]
+  return eventDTag === dTag
+}
+
 /**
  * Publish a subscription list to Nostr relays using kind 30404
  * This is a replaceable event (kind 30000-39999), so newer versions replace older ones
@@ -139,10 +154,10 @@ export async function fetchSubscriptionList(
       authors: [pubkeyHex],
       '#d': ['nostr-feedz-subscriptions'],
     })
-    
-    if (!event) {
-      return { 
-        success: true, 
+
+    if (!event || !isExpectedEvent(event, pubkeyHex, SUBSCRIPTION_LIST_KIND, 'nostr-feedz-subscriptions')) {
+      return {
+        success: true,
         data: { rss: [], nostr: [] }, // Return empty list if none found
       }
     }
@@ -187,10 +202,10 @@ export async function fetchSubscriptionListFromServer(
       authors: [pubkeyHex],
       '#d': ['nostr-feedz-subscriptions'],
     })
-    
-    if (!event) {
-      return { 
-        success: true, 
+
+    if (!event || !isExpectedEvent(event, pubkeyHex, SUBSCRIPTION_LIST_KIND, 'nostr-feedz-subscriptions')) {
+      return {
+        success: true,
         data: { rss: [], nostr: [] }, // Return empty list if none found
       }
     }
@@ -530,10 +545,10 @@ export async function fetchReadStatus(
       authors: [pubkeyHex],
       '#d': ['nostr-feedz-read-status'],
     })
-    
-    if (!event) {
-      return { 
-        success: true, 
+
+    if (!event || !isExpectedEvent(event, pubkeyHex, READ_STATUS_KIND, 'nostr-feedz-read-status')) {
+      return {
+        success: true,
         data: { itemGuids: [] },
       }
     }
