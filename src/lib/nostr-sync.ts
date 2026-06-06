@@ -496,6 +496,37 @@ export function setLastSyncTime(timestamp: number): void {
   }
 }
 
+const APPLIED_CREATEDAT_PREFIX = 'nostr_feedz_applied_createdat:'
+
+/**
+ * Get the created_at of the last applied sync event for a given d-tag.
+ * This is a per-d-tag freshness watermark, separate from the rate-limit timestamp.
+ */
+export function getLastAppliedSyncCreatedAt(dTag: string): number | null {
+  if (typeof window === 'undefined') return null
+  const stored = localStorage.getItem(APPLIED_CREATEDAT_PREFIX + dTag)
+  return stored ? parseInt(stored, 10) : null
+}
+
+/**
+ * Persist the created_at of the last applied sync event for a given d-tag.
+ */
+export function setLastAppliedSyncCreatedAt(dTag: string, createdAt: number): void {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(APPLIED_CREATEDAT_PREFIX + dTag, createdAt.toString())
+  }
+}
+
+/**
+ * Determine whether a fetched sync event is newer than the last applied one.
+ * Equal-or-older events are stale and must be ignored to prevent rollback.
+ */
+export function isSyncEventFresh(dTag: string, fetchedCreatedAt?: number): boolean {
+  if (fetchedCreatedAt == null) return false
+  const stored = getLastAppliedSyncCreatedAt(dTag)
+  return stored == null || fetchedCreatedAt > stored
+}
+
 /**
  * Publish read status to Nostr relays using kind 30405
  */
@@ -544,7 +575,7 @@ export async function publishReadStatus(
  */
 export async function fetchReadStatus(
   userPubkey: string
-): Promise<{ success: boolean; data?: ReadStatusList; error?: string }> {
+): Promise<{ success: boolean; data?: ReadStatusList; createdAt?: number; error?: string }> {
   const pool = new SimplePool()
   const relays = getSyncRelays()
   
@@ -565,10 +596,11 @@ export async function fetchReadStatus(
     }
     
     const content = JSON.parse(event.content) as ReadStatusList
-    
+
     return {
       success: true,
       data: content,
+      createdAt: event.created_at,
     }
   } catch (error) {
     console.error('Failed to fetch read status:', error)

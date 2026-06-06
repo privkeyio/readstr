@@ -259,6 +259,13 @@ export const feedRouter = createTRPCRouter({
             // Use default relays for sync
             const remoteResult = await fetchSubscriptionListFromServer(ctx.nostrPubkey)
 
+            // Ignore stale events: a relay must not roll back state with an
+            // equal-or-older subscription list than the one we last applied.
+            const remoteIsFresh =
+              remoteResult.createdAt != null &&
+              (prefs?.lastSubscriptionSyncCreatedAt == null ||
+                remoteResult.createdAt > prefs.lastSubscriptionSyncCreatedAt)
+
             if (remoteResult.success && remoteResult.data) {
               const remoteList = remoteResult.data
 
@@ -305,7 +312,7 @@ export const feedRouter = createTRPCRouter({
                 }
               }
 
-              if (feedsToAdd.length > 0) {
+              if (remoteIsFresh && feedsToAdd.length > 0) {
                 for (const feed of feedsToAdd) {
                   try {
                     // Handle category if present
@@ -397,11 +404,19 @@ export const feedRouter = createTRPCRouter({
                 }
               }
 
-              // Update updatedAt manually to track last sync even if no feeds were added
+              // Update updatedAt manually to track last sync even if no feeds were added.
+              // Advance the freshness watermark only for fresh events so older
+              // events are rejected later and cannot roll back state.
               await ctx.db.userPreference.upsert({
                 where: { userPubkey: ctx.nostrPubkey },
-                create: { userPubkey: ctx.nostrPubkey },
-                update: { updatedAt: new Date() },
+                create: {
+                  userPubkey: ctx.nostrPubkey,
+                  ...(remoteIsFresh ? { lastSubscriptionSyncCreatedAt: remoteResult.createdAt } : {}),
+                },
+                update: {
+                  updatedAt: new Date(),
+                  ...(remoteIsFresh ? { lastSubscriptionSyncCreatedAt: remoteResult.createdAt } : {}),
+                },
               })
 
               // Also trigger a refresh of feed contents if forced or on sync
