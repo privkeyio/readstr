@@ -47,8 +47,6 @@
     },
     {
       "matches": [
-        "*://nostrfeedz.com/*",
-        "*://*.nostrfeedz.com/*",
         "*://readstr.privkey.io/*",
         "*://*.readstr.privkey.io/*",
         "*://localhost/*"

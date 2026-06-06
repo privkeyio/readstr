@@ -113,8 +113,6 @@ async function warnNip07Unauthenticated(): Promise<void> {
 // tab/signer is available or the user declines.
 // Keep in sync with the page-signer content_scripts match list in manifest.json.
 const NOSTR_TAB_URLS = [
-  '*://nostrfeedz.com/*',
-  '*://*.nostrfeedz.com/*',
   '*://readstr.privkey.io/*',
   '*://*.readstr.privkey.io/*',
   '*://localhost/*',

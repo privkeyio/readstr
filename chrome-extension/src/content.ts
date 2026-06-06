@@ -18,8 +18,6 @@ const ALLOWED_PROTOCOLS = ['https:', 'http:'];
 
 function isTrustedHost(hostname: string): boolean {
   return (
-    hostname === 'nostrfeedz.com' ||
-    hostname.endsWith('.nostrfeedz.com') ||
     hostname === 'readstr.privkey.io' ||
     hostname.endsWith('.readstr.privkey.io') ||
     hostname === 'localhost'
@@ -347,7 +345,7 @@ async function syncWithAccount(feed: LocalFeed): Promise<void> {
   }
 }
 
-// Check if we're on nostrfeedz.com and sync auth with extension
+// Check if we're on readstr.privkey.io and sync auth with extension
 async function syncAuthFromWebApp(): Promise<void> {
   const hostname = window.location.hostname;
   if (!isTrustedHost(hostname)) {
@@ -397,7 +395,7 @@ function watchAuthChanges(): void {
 function init(): void {
   if (document.getElementById(CONTAINER_ID)) return;
 
-  // Sync auth from web app if on nostrfeedz.com
+  // Sync auth from web app if on readstr.privkey.io
   void syncAuthFromWebApp();
   watchAuthChanges();
 
