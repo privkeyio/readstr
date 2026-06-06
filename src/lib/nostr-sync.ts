@@ -1,6 +1,13 @@
 import { SimplePool, Event, nip19 } from 'nostr-tools'
 import type { UnsignedEvent } from 'nostr-tools'
 
+// Privacy note: sync events (kinds 30404 and 30405) are published to public
+// relays in cleartext by design. The subscription list must stay readable by
+// the server-side sync path (fetchSubscriptionListFromServer), which holds no
+// private key under the keyless NIP-07 model and therefore cannot decrypt it.
+// Do not put anything in these events that should not be public, and treat a
+// user's pubkey as permanently linkable to their subscriptions and read status.
+
 // Kind 30404 for subscription list sync
 const SUBSCRIPTION_LIST_KIND = 30404
 // Kind 30405 for read status sync
