@@ -3,6 +3,10 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react'
 import { Event, nip19, UnsignedEvent } from 'nostr-tools'
 
+const debugLog = (...args: unknown[]) => {
+  if (process.env.NODE_ENV === 'development') console.log(...args)
+}
+
 export type NostrAuthMethod = 'nip07' | 'npub_readonly' | null
 
 export interface NostrUser {
@@ -63,14 +67,14 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
               setUser({ pubkey, npub })
               setAuthMethod('nip07')
               setIsConnected(true)
-              console.log('Restored NIP-07 session')
+              debugLog('Restored NIP-07 session')
               return
             } catch (error) {
-              console.log('NIP-07 extension not available, clearing session')
+              debugLog('NIP-07 extension not available, clearing session')
               localStorage.removeItem('nostr_session')
             }
           } else {
-            console.log('NIP-07 extension not found, clearing session')
+            debugLog('NIP-07 extension not found, clearing session')
             localStorage.removeItem('nostr_session')
           }
         } else if (sessionData.method === 'npub_readonly' && sessionData.pubkey) {
@@ -81,7 +85,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
           })
           setAuthMethod('npub_readonly')
           setIsConnected(true)
-          console.log('Restored read-only npub session')
+          debugLog('Restored read-only npub session')
           return
         } else {
           // Unknown or legacy session method, clear it
@@ -95,7 +99,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
     
     // If no stored session, try to detect NIP-07 extension
     if (typeof window !== 'undefined' && window.nostr) {
-      console.log('NIP-07 extension detected but no stored session')
+      debugLog('NIP-07 extension detected but no stored session')
     }
   }
 
@@ -174,7 +178,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
       setAuthMethod('npub_readonly')
       setIsConnected(true)
 
-      console.log('Connected with read-only npub view')
+      debugLog('Connected with read-only npub view')
     } catch (error) {
       throw new Error('Invalid npub provided or connection failed')
     }
