@@ -577,9 +577,10 @@ export const feedRouter = createTRPCRouter({
               },
             },
           },
-          orderBy: {
-            publishedAt: 'desc',
-          },
+          orderBy: [
+            { publishedAt: 'desc' },
+            { id: 'desc' },
+          ],
           take: input.limit + 1,
           cursor: input.cursor ? { id: input.cursor } : undefined,
         })

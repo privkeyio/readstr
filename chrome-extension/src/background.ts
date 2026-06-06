@@ -111,11 +111,13 @@ async function warnNip07Unauthenticated(): Promise<void> {
 // unsigned NIP-98 event to an open readstr tab, where content.ts hands it to the
 // page-world signer and returns the signed event. Returns null when no eligible
 // tab/signer is available or the user declines.
+// Keep in sync with the page-signer content_scripts match list in manifest.json.
 const NOSTR_TAB_URLS = [
-  '*://*.nostrfeedz.com/*',
   '*://nostrfeedz.com/*',
+  '*://*.nostrfeedz.com/*',
   '*://readstr.privkey.io/*',
-  '*://localhost:*',
+  '*://*.readstr.privkey.io/*',
+  '*://localhost/*',
 ];
 
 // Serialize nip07 page-context signing. refreshFeeds fires getFeeds and
@@ -286,6 +288,12 @@ async function fetchNewItems(
     collected.push(...data.items);
     if (!data.nextCursor) break;
     cursor = data.nextCursor;
+
+    if (page === MAX_PAGES - 1) {
+      console.warn(
+        `fetchNewItems: hit MAX_PAGES (${MAX_PAGES}) cap with more unread items remaining; list truncated to ${collected.length}.`
+      );
+    }
   }
 
   return collected;
@@ -522,9 +530,7 @@ async function tryRestoreAuthFromOpenTabs(): Promise<boolean> {
   }
 
   try {
-    const tabs = await chrome.tabs.query({
-      url: ['*://*.nostrfeedz.com/*', '*://nostrfeedz.com/*', '*://readstr.privkey.io/*', '*://localhost:*'],
-    });
+    const tabs = await chrome.tabs.query({ url: NOSTR_TAB_URLS });
 
     for (const tab of tabs) {
       if (!tab.id) continue;

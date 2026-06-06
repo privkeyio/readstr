@@ -10,6 +10,7 @@ import type { NostrEvent } from './nostr';
 // messages and only ever returns a freshly signed event; nothing is persisted.
 window.addEventListener('message', (event: MessageEvent) => {
   if (event.source !== window) return;
+  if (event.origin !== window.location.origin) return;
 
   const data = event.data as Partial<Nip98SignRequest> | null;
   if (
