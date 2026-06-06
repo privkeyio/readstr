@@ -175,7 +175,8 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
     let urls: string[] = DEFAULT_RELAYS
     if (savedRelays) {
       try {
-        urls = JSON.parse(savedRelays)
+        const parsed = JSON.parse(savedRelays)
+        urls = Array.isArray(parsed) ? parsed : DEFAULT_RELAYS
       } catch (e) {
         // Use defaults if parsing fails
         urls = DEFAULT_RELAYS
