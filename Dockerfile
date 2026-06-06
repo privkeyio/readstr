@@ -47,7 +47,7 @@ COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 # resolves locally (no boot-time download, works as the non-root nextjs user).
 RUN npm install --no-save prisma@5.22.0
 
-COPY --chmod=755 docker-entrypoint.sh ./docker-entrypoint.sh
+COPY docker-entrypoint.sh ./docker-entrypoint.sh
 
 USER nextjs
 
