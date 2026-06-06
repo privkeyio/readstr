@@ -2,8 +2,9 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { createTRPCRouter, protectedProcedure } from "@/server/api/trpc";
 import { nip19 } from 'nostr-tools';
+import { env } from "@/env.mjs";
 
-const ADMIN_NPUB = 'npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7';
+const ADMIN_NPUB = env.NEXT_PUBLIC_ADMIN_NPUB;
 
 const decodedAdmin = nip19.decode(ADMIN_NPUB);
 if (decodedAdmin.type !== 'npub' || !/^[0-9a-f]{64}$/.test(decodedAdmin.data)) {

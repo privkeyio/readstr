@@ -6,6 +6,7 @@ import { ThemeSelector, ThemeToggleButton } from './theme-selector'
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { api } from '@/trpc/react'
+import { env } from '@/env.mjs'
 import { AddFeedModal } from './add-feed-modal'
 import { SettingsDialog, MarkReadBehavior, OrganizationMode } from './settings-dialog'
 import { FormattedContent } from './formatted-content'
@@ -1591,7 +1592,7 @@ export function FeedReader() {
 
         {/* Footer */}
         <div className="p-4 border-t border-theme-primary flex-shrink-0 space-y-2">
-          {user?.npub === 'npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7' && (
+          {user?.npub === env.NEXT_PUBLIC_ADMIN_NPUB && (
             <button
               onClick={() => router.push('/admin')}
               className="w-full flex items-center gap-2 text-sm text-theme-secondary hover:text-theme-primary transition-colors"

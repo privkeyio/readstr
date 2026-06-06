@@ -5,8 +5,9 @@ import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { api } from '@/trpc/react'
 import { BrandHeader } from '@/components/brand-header'
+import { env } from '@/env.mjs'
 
-const ADMIN_NPUB = 'npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7'
+const ADMIN_NPUB = env.NEXT_PUBLIC_ADMIN_NPUB
 
 export default function AdminPage() {
   const { user, isConnected } = useNostrAuth()
