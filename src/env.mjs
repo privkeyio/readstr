@@ -14,7 +14,7 @@ const server = z.object({
 })
 
 const client = z.object({
-  // No client-side env vars needed for now
+  NEXT_PUBLIC_ADMIN_NPUB: z.string().default('npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7'),
 })
 
 // The escape-hatch flag is a full auth-bypass foot-gun. Refuse to boot if it
@@ -37,10 +37,12 @@ const processEnv = {
   NOSTR_BUNKER_URL: process.env.NOSTR_BUNKER_URL,
   FLASH_SUBSCRIPTION_KEY: process.env.FLASH_SUBSCRIPTION_KEY,
   ALLOW_FLASH_BODY_IDENTITY: process.env.ALLOW_FLASH_BODY_IDENTITY,
+  NEXT_PUBLIC_ADMIN_NPUB: process.env.NEXT_PUBLIC_ADMIN_NPUB,
 }
 
 const merged = server.merge(client).superRefine(refineInsecureFlags)
 
+/** @type {z.infer<typeof merged>} */
 let env = {}
 
 if (!!process.env.SKIP_ENV_VALIDATION === false) {
