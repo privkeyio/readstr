@@ -2,9 +2,14 @@
 
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
 import { useEffect } from 'react'
+import { notFound } from 'next/navigation'
 import { BrandHeader } from '@/components/brand-header'
 
 export default function TestAuthPage() {
+  if (process.env.NODE_ENV !== 'development') {
+    notFound()
+  }
+
   const { user, isConnected, connect, disconnect } = useNostrAuth()
 
   useEffect(() => {
