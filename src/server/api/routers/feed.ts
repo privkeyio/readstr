@@ -264,7 +264,7 @@ export const feedRouter = createTRPCRouter({
             const remoteIsFresh =
               remoteResult.createdAt != null &&
               (prefs?.lastSubscriptionSyncCreatedAt == null ||
-                remoteResult.createdAt > prefs.lastSubscriptionSyncCreatedAt)
+                remoteResult.createdAt > Number(prefs.lastSubscriptionSyncCreatedAt))
 
             if (remoteResult.success && remoteResult.data) {
               const remoteList = remoteResult.data
@@ -411,11 +411,11 @@ export const feedRouter = createTRPCRouter({
                 where: { userPubkey: ctx.nostrPubkey },
                 create: {
                   userPubkey: ctx.nostrPubkey,
-                  ...(remoteIsFresh ? { lastSubscriptionSyncCreatedAt: remoteResult.createdAt } : {}),
+                  ...(remoteIsFresh ? { lastSubscriptionSyncCreatedAt: BigInt(remoteResult.createdAt!) } : {}),
                 },
                 update: {
                   updatedAt: new Date(),
-                  ...(remoteIsFresh ? { lastSubscriptionSyncCreatedAt: remoteResult.createdAt } : {}),
+                  ...(remoteIsFresh ? { lastSubscriptionSyncCreatedAt: BigInt(remoteResult.createdAt!) } : {}),
                 },
               })
 
