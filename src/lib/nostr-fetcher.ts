@@ -412,7 +412,7 @@ export class NostrFeedFetcher {
       if (!nip05.includes('@')) return false
       
       const [name, domain] = nip05.split('@')
-      const url = `https://${domain}/.well-known/nostr.json?name=${name}`
+      const url = `https://${domain}/.well-known/nostr.json?name=${encodeURIComponent(name)}`
       
       const response = await safeFetch(url, {
         headers: { 'Accept': 'application/json' },
