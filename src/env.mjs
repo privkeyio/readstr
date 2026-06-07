@@ -8,8 +8,8 @@ const server = z.object({
   // Comma-separated list of bare hostnames the NIP-98 `u` tag is allowed to
   // point at (entries with a scheme/port are normalized to the hostname).
   // Rejects foreign-origin tokens replayed against this server. Compared against
-  // the signed `u` host only — never the proxied request Host header. In
-  // when unset, a default is used: localhost in development, the canonical host
+  // the signed `u` host only — never the proxied request Host header. When
+  // unset, a default is used: localhost in development, the canonical host
   // (readstr.privkey.io) in production.
   //
   // Deployment: set this to your own host(s) when the production host differs
