@@ -27,7 +27,10 @@ export async function discoverYouTubeChannelId(channelUrl: string): Promise<stri
                           html.match(/<link[^>]+href="https:\/\/www\.youtube\.com\/feeds\/videos\.xml\?channel_id=([^"]+)"/)
 
     if (channelIdMatch) {
-      return channelIdMatch[1]
+      const channelId = channelIdMatch[1].trim()
+      if (/^UC[a-zA-Z0-9_-]{22}$/.test(channelId)) {
+        return channelId
+      }
     }
 
     return null

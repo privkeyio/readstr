@@ -409,9 +409,12 @@ export class NostrFeedFetcher {
   // Verify NIP-05 address
   async verifyNip05(nip05: string, pubkey: string): Promise<boolean> {
     try {
-      if (!nip05.includes('@')) return false
-      
-      const [name, domain] = nip05.split('@')
+      const parts = nip05.split('@')
+      if (parts.length !== 2) return false
+
+      const [name, domain] = parts
+      if (!name || !domain) return false
+
       const url = `https://${domain}/.well-known/nostr.json?name=${encodeURIComponent(name)}`
       
       const response = await safeFetch(url, {
