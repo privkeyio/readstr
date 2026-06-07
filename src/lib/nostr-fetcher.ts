@@ -1,4 +1,5 @@
 import { SimplePool, Event, Filter, nip19 } from 'nostr-tools'
+import { safeFetch } from './safe-fetch'
 
 export interface NostrLongFormPost {
   id: string // event id
@@ -413,14 +414,14 @@ export class NostrFeedFetcher {
       const [name, domain] = nip05.split('@')
       const url = `https://${domain}/.well-known/nostr.json?name=${name}`
       
-      const response = await fetch(url, {
+      const response = await safeFetch(url, {
         headers: { 'Accept': 'application/json' },
         signal: AbortSignal.timeout(5000), // 5 second timeout
       })
-      
+
       if (!response.ok) return false
-      
-      const data = await response.json()
+
+      const data = JSON.parse(await response.text())
       return data.names?.[name] === pubkey
     } catch (error) {
       return false
