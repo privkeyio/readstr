@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
-// Simple middleware that allows all requests for now
-// When you configure Clerk, you can uncomment and update the Clerk middleware
+// Pass-through middleware; route protection is handled in-app via Nostr auth
 export function middleware(request: NextRequest) {
   return NextResponse.next()
 }
