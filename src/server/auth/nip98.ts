@@ -91,14 +91,40 @@ function getAllowedHosts(): Set<string> {
  * `payload` tag (see verifyNip98Header) closes that gap by binding sha256(body)
  * into the signature.
  */
+/**
+ * Does `u` carry its own authority/host, or does it inherit the host from the
+ * base it is resolved against?
+ *
+ * We must NOT use "is it an absolute (scheme-bearing) URL" for this: scheme-less
+ * authority forms (`//evil.com/x`, `\\evil.com/x`, `/\evil.com/x`, plus leading
+ * whitespace / embedded-tab variants) carry a foreign host yet fail a bare
+ * `new URL(u)` parse — that gap reopened a cross-origin token-minting bypass.
+ *
+ * Instead we resolve `u` against two distinct dummy bases with different hosts.
+ * If the resolved hostname differs between them, `u` inherited the host (it is
+ * genuinely host-less / same-origin). If the hostname is identical across both
+ * bases, `u` supplies its own host and must be validated against the allow-list.
+ */
+function carriesOwnHost(url: string): { ownHost: boolean; hostname: string } {
+  const a = new URL(url, 'http://base-a.invalid')
+  const b = new URL(url, 'http://base-b.invalid')
+  return { ownHost: a.hostname === b.hostname, hostname: a.hostname }
+}
+
 function urlTagMatches(signedUrl: string, requestUrl: string): boolean {
   try {
-    // Dummy base so a host-less `u` parses; in production it resolves to
-    // localhost, which is not in the allow-list and is therefore rejected below.
+    // Dummy base so a host-less `u` parses for path/query comparison.
     const a = new URL(signedUrl, 'http://localhost')
     const b = new URL(requestUrl, 'http://localhost')
 
-    if (!getAllowedHosts().has(a.hostname)) return false
+    // A `u` that supplies its own authority/host (absolute OR scheme-less
+    // `//host`, `\\host`, etc.) must be validated against the trusted allow-list
+    // so a foreign-origin token cannot be replayed here. A genuinely host-less
+    // (same-origin) `u` inherits the dummy base host and is exempt.
+    const carries = carriesOwnHost(signedUrl)
+    if (carries.ownHost && !getAllowedHosts().has(carries.hostname)) {
+      return false
+    }
 
     if (a.pathname !== b.pathname) return false
 
