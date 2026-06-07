@@ -18,6 +18,33 @@ const NIP98_KIND = 27235
 const TIMESTAMP_TOLERANCE_SECONDS = 60
 
 /**
+ * Hostnames the signed `u` tag is allowed to target.
+ *
+ * Sourced from trusted config (NIP98_ALLOWED_HOSTS, comma-separated) — never
+ * from the proxied request Host header, which an attacker controls. The
+ * canonical production host is always allowed; localhost is allowed only outside
+ * production so dev keeps working without rejecting an attacker-minted
+ * localhost-origin token replayed against the real API.
+ */
+function getAllowedHosts(): Set<string> {
+  const hosts = new Set<string>()
+  const configured = process.env.NIP98_ALLOWED_HOSTS
+  if (configured) {
+    for (const h of configured.split(',')) {
+      const trimmed = h.trim().toLowerCase()
+      if (trimmed) hosts.add(trimmed)
+    }
+  }
+  if (process.env.NODE_ENV === 'production') {
+    hosts.add('readstr.privkey.io')
+  } else {
+    hosts.add('localhost')
+    hosts.add('127.0.0.1')
+  }
+  return hosts
+}
+
+/**
  * Compare two URLs for NIP-98 `u`-tag matching.
  *
  * We do NOT require a byte-for-byte string match. tRPC v10 GET requests batch
@@ -25,23 +52,28 @@ const TIMESTAMP_TOLERANCE_SECONDS = 60
  * string (e.g. `/api/trpc/feed.getFeeds,feed.getStatus?batch=1&input=...`).
  * The client signs the exact fetch URL, but we want to be robust to:
  *   - http vs https (reconstructed from x-forwarded-proto behind Caddy),
- *   - host/port differences introduced by the reverse proxy,
+ *   - port differences introduced by the reverse proxy,
  *   - query-parameter ordering.
  *
  * Tradeoff: we match on pathname + the *sorted* set of query parameters, and we
- * ignore scheme/host. This is slightly looser than a full-URL match but is the
- * tightest comparison that survives a reverse proxy reliably. The signature
- * binds the event to this exact path + query input. For GET requests the input
- * lives in the query string, so it is covered by the `u` tag. For mutations the
- * body is NOT in the URL, so a captured header could otherwise be replayed with
- * a different body within the clock-skew window — the `payload` tag (see
- * verifyNip98Header) closes that gap by binding sha256(body) into the signature.
+ * ignore scheme/port. The signed host, however, IS validated against a trusted
+ * allow-list (getAllowedHosts) so a token whose `u` points at a foreign or
+ * localhost origin cannot be replayed against this server. We deliberately do
+ * not compare the request URL's host here — that comes from the proxy and is not
+ * trustworthy. The signature binds the event to this exact path + query input.
+ * For GET requests the input lives in the query string, so it is covered by the
+ * `u` tag. For mutations the body is NOT in the URL, so a captured header could
+ * otherwise be replayed with a different body within the clock-skew window — the
+ * `payload` tag (see verifyNip98Header) closes that gap by binding sha256(body)
+ * into the signature.
  */
 function urlTagMatches(signedUrl: string, requestUrl: string): boolean {
   try {
     // Use a dummy base so relative URLs (just in case) still parse.
     const a = new URL(signedUrl, 'http://localhost')
     const b = new URL(requestUrl, 'http://localhost')
+
+    if (!getAllowedHosts().has(a.hostname.toLowerCase())) return false
 
     if (a.pathname !== b.pathname) return false
 

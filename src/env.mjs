@@ -5,6 +5,12 @@ const server = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   DEFAULT_RELAYS: z.string().optional(),
   NOSTR_BUNKER_URL: z.string().optional(),
+  // Comma-separated list of hostnames the NIP-98 `u` tag is allowed to point at.
+  // Used to reject cross-origin token minting (a token signed for a foreign
+  // origin replayed against this server). Compared against the signed `u` host
+  // only — never the proxied request Host header. In development localhost is
+  // permitted by default; in production the canonical host is always allowed.
+  NIP98_ALLOWED_HOSTS: z.string().optional(),
   FLASH_SUBSCRIPTION_KEY: z.string().optional(),
   // Temporary fallback escape hatch. When 'true', the Flash webhook verifier
   // falls back to the unsigned request body identity when the verified JWT
@@ -35,6 +41,7 @@ const processEnv = {
   NODE_ENV: process.env.NODE_ENV,
   DEFAULT_RELAYS: process.env.DEFAULT_RELAYS,
   NOSTR_BUNKER_URL: process.env.NOSTR_BUNKER_URL,
+  NIP98_ALLOWED_HOSTS: process.env.NIP98_ALLOWED_HOSTS,
   FLASH_SUBSCRIPTION_KEY: process.env.FLASH_SUBSCRIPTION_KEY,
   ALLOW_FLASH_BODY_IDENTITY: process.env.ALLOW_FLASH_BODY_IDENTITY,
   NEXT_PUBLIC_ADMIN_NPUB: process.env.NEXT_PUBLIC_ADMIN_NPUB,
