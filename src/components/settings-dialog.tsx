@@ -257,7 +257,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
 
       // Ignore stale events: a relay must not roll back state with an
       // equal-or-older subscription list than the one we last applied.
-      if (result.data && !isSyncEventFresh('nostr-feedz-subscriptions', result.createdAt)) {
+      if (result.data && !isSyncEventFresh('readstr-subscriptions', result.createdAt)) {
         setSyncState({ status: 'success', lastSync: syncState.lastSync })
         alert('Remote subscriptions are not newer than your last sync. Nothing to import.')
         setTimeout(() => setSyncState(prev => ({ ...prev, status: 'idle' })), 3000)
@@ -266,7 +266,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
 
       // Accept this event as the new freshness basis now that we're using its data.
       if (result.createdAt != null) {
-        setLastAppliedSyncCreatedAt('nostr-feedz-subscriptions', result.createdAt)
+        setLastAppliedSyncCreatedAt('readstr-subscriptions', result.createdAt)
       }
 
       if (!result.data || (result.data.rss.length === 0 && result.data.nostr.length === 0)) {

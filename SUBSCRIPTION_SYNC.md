@@ -1,8 +1,8 @@
-# Nostr Feedz Subscription Sync
+# Readstr Subscription Sync
 
 ## Overview
 
-Nostr Feedz uses **Nostr events** to sync RSS and Nostr long-form content subscriptions across devices. This enables users to maintain a single subscription list that works on mobile, desktop, and web - all tied to their Nostr identity.
+Readstr uses **Nostr events** to sync RSS and Nostr long-form content subscriptions across devices. This enables users to maintain a single subscription list that works on mobile, desktop, and web - all tied to their Nostr identity.
 
 **New in v2:** The sync system now tracks **deleted subscriptions** and **read status** across devices for a seamless experience.
 
@@ -31,8 +31,8 @@ Read status for feed items is synced using kind `30405`:
   "pubkey": "<user's hex pubkey>",
   "created_at": 1732645747,
   "tags": [
-    ["d", "nostr-feedz-subscriptions"],
-    ["client", "nostr-feedz"]
+    ["d", "readstr-subscriptions"],
+    ["client", "readstr"]
   ],
   "content": "{\"rss\":[...],\"nostr\":[...],\"deleted\":[...],\"tags\":{...},\"lastUpdated\":1732645747}",
   "id": "<event id>",
@@ -48,8 +48,8 @@ Read status for feed items is synced using kind `30405`:
   "pubkey": "<user's hex pubkey>",
   "created_at": 1732645747,
   "tags": [
-    ["d", "nostr-feedz-read-status"],
-    ["client", "nostr-feedz"]
+    ["d", "readstr-read-status"],
+    ["client", "readstr"]
   ],
   "content": "{\"itemGuids\":[...],\"lastUpdated\":1732645747}",
   "id": "<event id>",
@@ -167,7 +167,7 @@ async function publishSubscriptionList(
     pubkey,
     created_at: Math.floor(Date.now() / 1000),
     tags: [
-      ['d', 'nostr-feedz-subscriptions'],
+      ['d', 'readstr-subscriptions'],
       ['client', 'your-app-name'],  // Identify your app
     ],
     content: JSON.stringify({
@@ -211,7 +211,7 @@ async function fetchSubscriptionList(
   const event = await pool.get(relays, {
     kinds: [SUBSCRIPTION_LIST_KIND],
     authors: [pubkeyHex],
-    '#d': ['nostr-feedz-subscriptions'],
+    '#d': ['readstr-subscriptions'],
   })
   
   pool.close(relays)
@@ -425,7 +425,7 @@ ndk.signer = signer
 
 const event = new NDKEvent(ndk)
 event.kind = 30404
-event.tags = [['d', 'nostr-feedz-subscriptions']]
+event.tags = [['d', 'readstr-subscriptions']]
 event.content = JSON.stringify(subscriptionList)
 await event.publish()
 ```
@@ -443,7 +443,7 @@ func publishSubscriptions(_ list: SubscriptionList) async throws {
     let event = Event(
         kind: 30404,
         tags: [
-            ["d", "nostr-feedz-subscriptions"],
+            ["d", "readstr-subscriptions"],
             ["client", "my-ios-app"]
         ],
         content: String(data: content, encoding: .utf8)!
@@ -471,7 +471,7 @@ fun publishSubscriptions(list: SubscriptionList) {
     val event = Event.Builder()
         .kind(30404)
         .tags(listOf(
-            listOf("d", "nostr-feedz-subscriptions"),
+            listOf("d", "readstr-subscriptions"),
             listOf("client", "my-android-app")
         ))
         .content(content)
@@ -492,7 +492,7 @@ Any app that follows this specification can read and write subscription lists. T
 | Field | Value | Purpose |
 |-------|-------|---------|
 | `kind` | `30404` | Event type for subscription lists |
-| `d` tag | `nostr-feedz-subscriptions` | Identifies this specific list type |
+| `d` tag | `readstr-subscriptions` | Identifies this specific list type |
 | `client` tag | Your app name | Optional, for analytics/debugging |
 
 ### Reading Lists from Other Apps
@@ -503,7 +503,7 @@ When fetching, check for any `30404` events with the `d` tag:
 const events = await pool.querySync(relays, {
   kinds: [30404],
   authors: [pubkeyHex],
-  '#d': ['nostr-feedz-subscriptions'],
+  '#d': ['readstr-subscriptions'],
 })
 
 // Get the most recent one
@@ -540,7 +540,7 @@ const relays = ['wss://relay.damus.io', 'wss://nos.lol'];
 async function check() {
   const events = await pool.querySync(relays, {
     kinds: [30404],
-    '#d': ['nostr-feedz-subscriptions'],
+    '#d': ['readstr-subscriptions'],
     limit: 10,
   });
   
@@ -575,11 +575,11 @@ Use [nostr.band](https://nostr.band) or [njump.me](https://njump.me) to search f
 
 ## Summary
 
-Nostr Feedz subscription sync enables cross-device, cross-app subscription management using standard Nostr events. By following this specification, your app can:
+Readstr subscription sync enables cross-device, cross-app subscription management using standard Nostr events. By following this specification, your app can:
 
 - **Export** user subscriptions to Nostr relays
 - **Import** subscriptions from other devices/apps
 - **Merge** local and remote subscription lists
-- **Interoperate** with Nostr Feedz and other compatible apps
+- **Interoperate** with Readstr and other compatible apps
 
 The user's Nostr identity becomes their universal subscription identity.

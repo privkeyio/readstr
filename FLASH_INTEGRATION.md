@@ -9,7 +9,7 @@ Readstr uses [PayWithFlash](https://paywithflash.com) for Bitcoin Lightning subs
 1. Go to [Flash Dashboard](https://app.paywithflash.com)
 2. Navigate to **New Subs > Create a Subscription Plan**
 3. Configure your plan:
-   - **Name**: Nostr Feedz Reader
+   - **Name**: Readstr Reader
    - **Price**: 1750 sats
    - **Billing Period**: Monthly
    - **Trial Period**: 7 days

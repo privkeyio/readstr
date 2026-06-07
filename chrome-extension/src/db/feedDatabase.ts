@@ -1,6 +1,6 @@
 import type { Feed, FeedItem, Folder } from '../types';
 
-const DB_NAME = 'nostr-feedz-cache';
+const DB_NAME = 'readstr-cache';
 const DB_VERSION = 2;
 
 interface CachedItem extends FeedItem {

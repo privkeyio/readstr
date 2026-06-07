@@ -1,8 +1,8 @@
-# Nostr Feedz Guide API Implementation
+# Readstr Guide API Implementation
 
 ## Overview
 
-Create a REST API that exposes the Nostr Feedz guide (curated list of RSS and Nostr long-form content feeds) to native mobile apps and external integrations. The API should enable:
+Create a REST API that exposes the Readstr guide (curated list of RSS and Nostr long-form content feeds) to native mobile apps and external integrations. The API should enable:
 
 1. **Feed Discovery** - List all curated feeds with filtering/search
 2. **Feed Details** - Get individual feed info with recent posts
@@ -202,7 +202,7 @@ const headers = {
 │  Native App                                      │
 │  ┌─────────────────────────────────────────────┐│
 │  │ Feed: Bitcoin Magazine                      ││
-│  │ [Subscribe on Nostr Feedz]  ← Opens browser ││
+│  │ [Subscribe on Readstr]  ← Opens browser ││
 │  └─────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────┘
                       │

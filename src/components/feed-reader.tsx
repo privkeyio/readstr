@@ -218,12 +218,12 @@ export function FeedReader() {
 
         // Ignore stale events: a relay must not roll back state with an
         // equal-or-older subscription list than the one we last applied.
-        if (!isSyncEventFresh('nostr-feedz-subscriptions', result.createdAt)) return
+        if (!isSyncEventFresh('readstr-subscriptions', result.createdAt)) return
 
         // Nothing remote to import: local already reflects this event, so accept
         // it as the new freshness basis to avoid re-evaluating it forever.
         if (result.data.rss.length === 0 && result.data.nostr.length === 0) {
-          setLastAppliedSyncCreatedAt('nostr-feedz-subscriptions', result.createdAt!)
+          setLastAppliedSyncCreatedAt('readstr-subscriptions', result.createdAt!)
           return
         }
 
@@ -243,7 +243,7 @@ export function FeedReader() {
           setShowSyncPrompt(true)
         } else {
           // Everything remote is already subscribed locally; safe to advance.
-          setLastAppliedSyncCreatedAt('nostr-feedz-subscriptions', result.createdAt!)
+          setLastAppliedSyncCreatedAt('readstr-subscriptions', result.createdAt!)
         }
       } catch (error) {
         console.error('Auto-sync check failed:', error)
@@ -2045,8 +2045,8 @@ export function FeedReader() {
                   await handleImportFeeds(pendingSyncImport)
                   // Re-check freshness: another sync path may have advanced the
                   // watermark while this prompt was open, so keep it monotonic.
-                  if (pendingSyncCreatedAt !== null && isSyncEventFresh('nostr-feedz-subscriptions', pendingSyncCreatedAt)) {
-                    setLastAppliedSyncCreatedAt('nostr-feedz-subscriptions', pendingSyncCreatedAt)
+                  if (pendingSyncCreatedAt !== null && isSyncEventFresh('readstr-subscriptions', pendingSyncCreatedAt)) {
+                    setLastAppliedSyncCreatedAt('readstr-subscriptions', pendingSyncCreatedAt)
                   }
                   setShowSyncPrompt(false)
                   setPendingSyncImport(null)
