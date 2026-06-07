@@ -211,6 +211,7 @@ function App() {
           setDetectedSource(pending.sourceTitle || pending.sourceUrl || '');
           setSelectedDetected(new Set(pending.feeds.map((f) => f.url)));
         }
+        await chrome.storage.session.remove('pendingDetectedFeeds');
       } catch (err) {
         console.error('Failed to load detected feeds:', err);
       }
@@ -473,21 +474,16 @@ function App() {
     });
   };
 
-  const closeDetected = async () => {
+  const closeDetected = () => {
     setDetectedFeeds([]);
     setSelectedDetected(new Set());
     setDetectedSource('');
-    try {
-      await chrome.storage.session.remove('pendingDetectedFeeds');
-    } catch (err) {
-      console.error('Failed to clear detected feeds:', err);
-    }
   };
 
   const handleSubscribeSelected = async () => {
     const chosen = detectedFeeds.filter((f) => selectedDetected.has(f.url));
     if (chosen.length === 0) {
-      await closeDetected();
+      closeDetected();
       return;
     }
     setSubscribingDetected(true);
@@ -497,11 +493,11 @@ function App() {
         feeds: chosen.map((f) => ({ url: f.url, title: f.title })),
       });
       await loadData();
+      closeDetected();
     } catch (err) {
       console.error('Failed to subscribe selected feeds:', err);
     } finally {
       setSubscribingDetected(false);
-      await closeDetected();
     }
   };
 
@@ -568,7 +564,7 @@ function App() {
           <div className="stats-modal">
             <div className="stats-header">
               <h3>Choose feeds to subscribe</h3>
-              <button className="stats-close" onClick={() => void closeDetected()} aria-label="Cancel">
+              <button className="stats-close" onClick={() => closeDetected()} aria-label="Cancel">
                 ✕
               </button>
             </div>
@@ -590,7 +586,7 @@ function App() {
               ))}
             </div>
             <div className="actions">
-              <button className="btn btn-secondary" onClick={() => void closeDetected()} disabled={subscribingDetected}>
+              <button className="btn btn-secondary" onClick={() => closeDetected()} disabled={subscribingDetected}>
                 Cancel
               </button>
               <button

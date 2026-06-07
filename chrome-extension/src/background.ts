@@ -956,7 +956,15 @@ async function handleMessage(
           added += 1;
         }
       }
-      await chrome.storage.session.remove('pendingDetectedFeeds');
+      await chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: added > 0 ? 'Feeds Subscribed' : 'No New Feeds',
+        message:
+          added > 0
+            ? `Subscribed to ${added} of ${feeds.length} feed${feeds.length === 1 ? '' : 's'}`
+            : `All ${feeds.length} feed${feeds.length === 1 ? '' : 's'} were already added or invalid`,
+      });
       return { success: true, data: { added, total: feeds.length } };
     }
 
