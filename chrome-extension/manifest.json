@@ -8,13 +8,16 @@
   },
   "permissions": [
     "activeTab",
+    "scripting",
     "storage",
     "notifications",
     "alarms",
     "contextMenus"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "*://readstr.privkey.io/*",
+    "*://*.readstr.privkey.io/*",
+    "*://localhost/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -40,9 +43,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "*://readstr.privkey.io/*",
+        "*://*.readstr.privkey.io/*",
+        "*://localhost/*"
+      ],
       "js": ["content.js"],
-      "css": ["content.css"],
       "run_at": "document_idle"
     },
     {
