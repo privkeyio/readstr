@@ -21,10 +21,11 @@ const TIMESTAMP_TOLERANCE_SECONDS = 60
  * Hostnames the signed `u` tag is allowed to target.
  *
  * Sourced from trusted config (NIP98_ALLOWED_HOSTS, comma-separated) — never
- * from the proxied request Host header, which an attacker controls. The
- * canonical production host is always allowed; localhost is allowed only outside
- * production so dev keeps working without rejecting an attacker-minted
- * localhost-origin token replayed against the real API.
+ * from the proxied request Host header, which an attacker controls. When
+ * NIP98_ALLOWED_HOSTS is set, only those hosts are honored. When it is unset, a
+ * default is used: the canonical production host in production, or localhost +
+ * 127.0.0.1 outside production so dev keeps working without accepting an
+ * attacker-minted localhost-origin token replayed against the real API.
  *
  * Scope: this rejects tokens whose signed `u` host is not in the trusted
  * allow-list (e.g. a foreign-origin token replayed here). It does NOT prevent a
@@ -55,11 +56,13 @@ function getAllowedHosts(): Set<string> {
       if (trimmed) hosts.add(normalizeHost(trimmed))
     }
   }
-  if (process.env.NODE_ENV === 'production') {
-    hosts.add('readstr.privkey.io')
-  } else {
-    hosts.add('localhost')
-    hosts.add('127.0.0.1')
+  if (hosts.size === 0) {
+    if (process.env.NODE_ENV === 'production') {
+      hosts.add('readstr.privkey.io')
+    } else {
+      hosts.add('localhost')
+      hosts.add('127.0.0.1')
+    }
   }
   allowedHosts = hosts
   return hosts

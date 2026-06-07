@@ -9,13 +9,14 @@ const server = z.object({
   // point at (entries with a scheme/port are normalized to the hostname).
   // Rejects foreign-origin tokens replayed against this server. Compared against
   // the signed `u` host only — never the proxied request Host header. In
-  // development localhost is permitted by default; in production the canonical
-  // host is always allowed.
+  // when unset, a default is used: localhost in development, the canonical host
+  // (readstr.privkey.io) in production.
   //
-  // Deployment: set this when the production host differs from
-  // readstr.privkey.io. Every entry must be mutually trust-equivalent — the
-  // check only confirms the signed host is in the set, not that it matches the
-  // host actually serving the request.
+  // Deployment: set this to your own host(s) when the production host differs
+  // from readstr.privkey.io. When set, ONLY the listed hosts are honored — the
+  // readstr.privkey.io default is not added. Every entry must be mutually
+  // trust-equivalent — the check only confirms the signed host is in the set,
+  // not that it matches the host actually serving the request.
   NIP98_ALLOWED_HOSTS: z.string().optional(),
   FLASH_SUBSCRIPTION_KEY: z.string().optional(),
   // Temporary fallback escape hatch. When 'true', the Flash webhook verifier
