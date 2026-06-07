@@ -17,14 +17,14 @@ const sanitizeSchema: SanitizeSchema = {
   },
 };
 
+const htmlProcessor = unified()
+  .use(rehypeParse, { fragment: true })
+  .use(rehypeSanitize, sanitizeSchema)
+  .use(rehypeStringify)
+  .freeze();
+
 async function sanitizeHtml(html: string): Promise<string> {
-  return String(
-    await unified()
-      .use(rehypeParse, { fragment: true })
-      .use(rehypeSanitize, sanitizeSchema)
-      .use(rehypeStringify)
-      .process(html)
-  );
+  return String(await htmlProcessor.process(html));
 }
 
 // Plain-text RSS fields (titles, descriptions, author) carry untrusted Nostr data.
@@ -43,9 +43,13 @@ function hastToText(node: any): string {
   return '';
 }
 
+const stripProcessor = unified()
+  .use(rehypeParse, { fragment: true })
+  .use(rehypeSanitize, stripSchema)
+  .freeze();
+
 async function stripHtml(input: string): Promise<string> {
-  const processor = unified().use(rehypeParse, { fragment: true }).use(rehypeSanitize, stripSchema);
-  const tree = await processor.run(processor.parse(String(input)));
+  const tree = await stripProcessor.run(stripProcessor.parse(String(input)));
   return hastToText(tree).replace(/[<>]/g, '');
 }
 
@@ -227,51 +231,56 @@ export async function GET(request: NextRequest) {
     });
 
     for (const event of events) {
-      const rawTitle = event.tags.find((t: string[]) => t[0] === 'title')?.[1] || 'Untitled';
-      const published = event.tags.find((t: string[]) => t[0] === 'published_at')?.[1];
-      const summary = event.tags.find((t: string[]) => t[0] === 'summary')?.[1];
-      const dTag = event.tags.find((t: string[]) => t[0] === 'd')?.[1];
-      const image = event.tags.find((t: string[]) => t[0] === 'image')?.[1];
-      
-      // The full article content is in event.content (usually Markdown)
-      const fullContent = event.content || '';
-      
-      // Convert Markdown to simple HTML for RSS readers
-      // Basic conversion: paragraphs, headers, links, bold, italic, code, images
-      const htmlContent = await sanitizeHtml(convertMarkdownToHtml(fullContent, image));
-      
-      // Build a proper naddr URL for long-form articles using Habla.news
-      // naddr includes: kind, pubkey, d-tag identifier
-      let articleUrl: string;
-      if (dTag) {
-        const naddr = nip19.naddrEncode({
-          kind: 30023,
-          pubkey: pubkey,
-          identifier: dTag,
+      try {
+        const rawTitle = event.tags.find((t: string[]) => t[0] === 'title')?.[1] || 'Untitled';
+        const published = event.tags.find((t: string[]) => t[0] === 'published_at')?.[1];
+        const summary = event.tags.find((t: string[]) => t[0] === 'summary')?.[1];
+        const dTag = event.tags.find((t: string[]) => t[0] === 'd')?.[1];
+        const image = event.tags.find((t: string[]) => t[0] === 'image')?.[1];
+
+        // The full article content is in event.content (usually Markdown)
+        const fullContent = event.content || '';
+
+        // Convert Markdown to simple HTML for RSS readers
+        // Basic conversion: paragraphs, headers, links, bold, italic, code, images
+        const htmlContent = await sanitizeHtml(convertMarkdownToHtml(fullContent, image));
+
+        // Build a proper naddr URL for long-form articles using Habla.news
+        // naddr includes: kind, pubkey, d-tag identifier
+        let articleUrl: string;
+        if (dTag) {
+          const naddr = nip19.naddrEncode({
+            kind: 30023,
+            pubkey: pubkey,
+            identifier: dTag,
+          });
+          articleUrl = `${NOSTR_ARTICLE_VIEWER_URL}/a/${naddr}`;
+        } else {
+          // Fallback to njump.me with nevent if no d-tag
+          const nevent = nip19.neventEncode({ id: event.id, relays: DEFAULT_RELAYS.slice(0, 2) });
+          articleUrl = `https://njump.me/${nevent}`;
+        }
+
+        const title = await stripHtml(rawTitle);
+        const description = summary
+          ? await stripHtml(summary)
+          : (await stripHtml(fullContent.slice(0, 1000))).slice(0, 300) + '...';
+
+        feed.item({
+          title: title,
+          description: description,
+          url: articleUrl,
+          guid: event.id,
+          author: authorName,
+          date: published ? new Date(parseInt(published) * 1000) : new Date(event.created_at * 1000),
+          custom_elements: [
+            { 'content:encoded': { _cdata: htmlContent } },
+          ],
         });
-        articleUrl = `${NOSTR_ARTICLE_VIEWER_URL}/a/${naddr}`;
-      } else {
-        // Fallback to njump.me with nevent if no d-tag
-        const nevent = nip19.neventEncode({ id: event.id, relays: DEFAULT_RELAYS.slice(0, 2) });
-        articleUrl = `https://njump.me/${nevent}`;
+      } catch (error) {
+        console.error('Failed to process Nostr event for RSS feed, skipping:', error);
+        continue;
       }
-
-      const title = await stripHtml(rawTitle);
-      const description = summary
-        ? await stripHtml(summary)
-        : (await stripHtml(fullContent.slice(0, 1000))).slice(0, 300) + '...';
-
-      feed.item({
-        title: title,
-        description: description,
-        url: articleUrl,
-        guid: event.id,
-        author: authorName,
-        date: published ? new Date(parseInt(published) * 1000) : new Date(event.created_at * 1000),
-        custom_elements: [
-          { 'content:encoded': { _cdata: htmlContent } },
-        ],
-      });
     }
 
     pool.close(DEFAULT_RELAYS);
