@@ -39,9 +39,9 @@ Build a **command-line interface (CLI) client** for Readstr using **Go** and **C
 ## Architecture
 
 ```
-nostrfeedz-cli/
+readstr-cli/
 ├── cmd/
-│   └── nostrfeedz/
+│   └── readstr/
 │       └── main.go              # Entry point
 ├── internal/
 │   ├── app/
@@ -175,7 +175,7 @@ Use Nostr **replaceable events** (kind 30404) to sync subscriptions across devic
   "created_at": 1732645747,
   "tags": [
     ["d", "readstr-subscriptions"],
-    ["client", "nostrfeedz-cli"]
+    ["client", "readstr-cli"]
   ],
   "content": "{\"rss\":[...],\"nostr\":[...],\"tags\":{...},\"deleted\":[...],\"lastUpdated\":1732645747}"
 }
@@ -224,7 +224,7 @@ func (c *SyncClient) PublishSubscriptions(list SubscriptionList) error {
         CreatedAt: nostr.Now(),
         Tags: nostr.Tags{
             {"d", SubscriptionDTag},
-            {"client", "nostrfeedz-cli"},
+            {"client", "readstr-cli"},
         },
         Content: string(content),
     }
@@ -282,7 +282,7 @@ Use Nostr **replaceable events** (kind 30405) to sync which articles have been r
   "created_at": 1732645747,
   "tags": [
     ["d", "readstr-read-status"],
-    ["client", "nostrfeedz-cli"]
+    ["client", "readstr-cli"]
   ],
   "content": "{\"itemGuids\":[\"guid1\",\"guid2\",\"guid3\",...],\"lastUpdated\":1732645747}"
 }
@@ -307,7 +307,7 @@ func (c *SyncClient) PublishReadStatus(readStatus ReadStatusList) error {
         CreatedAt: nostr.Now(),
         Tags: nostr.Tags{
             {"d", ReadStatusDTag},
-            {"client", "nostrfeedz-cli"},
+            {"client", "readstr-cli"},
         },
         Content: string(content),
     }
@@ -413,7 +413,7 @@ func (c *NostrFetcher) FetchUserArticles(npub string, since time.Time) ([]*FeedI
 
 ### Guide API (Public Feed Directory)
 
-**Base URL:** `https://nostrfeedz.com/api/guide`
+**Base URL:** `https://readstr.privkey.io/api/guide`
 
 #### List Feeds
 ```go
@@ -652,7 +652,7 @@ var (
 - ✅ Search across articles
 - ✅ Video feed support (YouTube, Rumble)
 - ✅ Markdown rendering with syntax highlighting
-- ✅ Configuration file (~/.config/nostrfeedz/config.yaml)
+- ✅ Configuration file (~/.config/readstr/config.yaml)
 - ✅ Color themes
 - ✅ Guide directory integration
 
@@ -660,7 +660,7 @@ var (
 
 ## Configuration File
 
-**Location:** `~/.config/nostrfeedz/config.yaml`
+**Location:** `~/.config/readstr/config.yaml`
 
 ```yaml
 # User Identity
@@ -690,7 +690,7 @@ display:
 
 # Database
 database:
-  path: "~/.local/share/nostrfeedz/feeds.db"
+  path: "~/.local/share/readstr/feeds.db"
 ```
 
 ---
@@ -747,42 +747,42 @@ database:
 
 ```bash
 # Basic usage
-nostrfeedz                      # Launch TUI
+readstr                      # Launch TUI
 
 # Feed management
-nostrfeedz add <url>            # Add RSS feed
-nostrfeedz add -n <npub>        # Add Nostr feed
-nostrfeedz list                 # List all feeds
-nostrfeedz remove <id>          # Remove feed
-nostrfeedz refresh              # Refresh all feeds
-nostrfeedz refresh <id>         # Refresh specific feed
+readstr add <url>            # Add RSS feed
+readstr add -n <npub>        # Add Nostr feed
+readstr list                 # List all feeds
+readstr remove <id>          # Remove feed
+readstr refresh              # Refresh all feeds
+readstr refresh <id>         # Refresh specific feed
 
 # Sync
-nostrfeedz sync export          # Export subscriptions to Nostr
-nostrfeedz sync import          # Import subscriptions from Nostr
-nostrfeedz sync status          # Show sync status
+readstr sync export          # Export subscriptions to Nostr
+readstr sync import          # Import subscriptions from Nostr
+readstr sync status          # Show sync status
 
 # Articles
-nostrfeedz articles             # List recent articles
-nostrfeedz read <id>            # Read article in terminal
-nostrfeedz mark-read <id>       # Mark article as read
-nostrfeedz favorite <id>        # Add to favorites
-nostrfeedz search <query>       # Search articles
+readstr articles             # List recent articles
+readstr read <id>            # Read article in terminal
+readstr mark-read <id>       # Mark article as read
+readstr favorite <id>        # Add to favorites
+readstr search <query>       # Search articles
 
 # Organization
-nostrfeedz tags                 # List all tags
-nostrfeedz categories           # List all categories
-nostrfeedz tag <feed-id> <tag>  # Add tag to feed
+readstr tags                 # List all tags
+readstr categories           # List all categories
+readstr tag <feed-id> <tag>  # Add tag to feed
 
 # Guide
-nostrfeedz guide list           # Browse guide directory
-nostrfeedz guide search <query> # Search guide
-nostrfeedz guide add <id>       # Subscribe to guide feed
+readstr guide list           # Browse guide directory
+readstr guide search <query> # Search guide
+readstr guide add <id>       # Subscribe to guide feed
 
 # Config
-nostrfeedz config init          # Create config file
-nostrfeedz config show          # Show current config
-nostrfeedz config set <key> <value>
+readstr config init          # Create config file
+readstr config show          # Show current config
+readstr config set <key> <value>
 ```
 
 ---
@@ -842,7 +842,7 @@ nostrfeedz config set <key> <value>
 - **NIP-33** (Replaceable Events): https://github.com/nostr-protocol/nips/blob/master/33.md
 
 ### API Documentation
-- **Guide API**: https://nostrfeedz.com/api/guide/docs
+- **Guide API**: https://readstr.privkey.io/api/guide/docs
 - **Subscription Sync**: See `SUBSCRIPTION_SYNC.md` in web repo
 
 ---
@@ -908,7 +908,7 @@ func (f *Fetcher) fetchNostr(feed *Feed) ([]*FeedItem, error) {
 
 1. **Initialize Go Module**
    ```bash
-   go mod init github.com/yourusername/nostrfeedz-cli
+   go mod init github.com/yourusername/readstr-cli
    go get github.com/charmbracelet/bubbletea
    go get github.com/charmbracelet/lipgloss
    go get github.com/charmbracelet/bubbles
@@ -947,7 +947,7 @@ func (f *Fetcher) fetchNostr(feed *Feed) ([]*FeedItem, error) {
 ## Contact
 
 For questions or collaboration:
-- **Web App**: https://nostrfeedz.com
+- **Web App**: https://readstr.privkey.io
 - **GitHub**: https://github.com/privkeyio/readstr
 - **Nostr**: npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7
 

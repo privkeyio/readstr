@@ -27,7 +27,7 @@ echo "🗄️  Running database migrations..."
 docker compose exec app npx prisma@5.8.1 migrate deploy
 
 echo "✅ Deployment complete!"
-echo "🌐 Your app should be available at https://nostrfeedz.com"
+echo "🌐 Your app should be available at https://readstr.privkey.io"
 echo ""
 echo "📊 Check status with:"
 echo "  docker compose ps"
