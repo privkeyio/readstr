@@ -148,7 +148,7 @@ This is a **web page** (not JSON API) for handling deep-link subscriptions from 
 - Use Next.js page component at `src/app/subscribe/page.tsx`
 - Check auth state via `useNostrAuth()` context
 - Call `api.feed.subscribeFeed.useMutation()` for subscription
-- Support both NIP-07 browser extension and npub+password login
+- Authenticate via NIP-07 browser extension (`connect('nip07')`)
 
 ### 4. `GET /api/guide/docs` - API Documentation
 
@@ -208,15 +208,12 @@ const headers = {
                       │
                       ▼
 ┌─────────────────────────────────────────────────┐
-│  Browser: readstr.privkey.io/subscribe?npub=...     │
+│  Browser: readstr.privkey.io/subscribe?npub=... │
 │  ┌─────────────────────────────────────────────┐│
 │  │       Subscribe to Bitcoin Magazine          ││
 │  │                                              ││
 │  │  ┌────────────────────────────────────────┐ ││
 │  │  │ 🔐 Sign in with Nostr Extension       │ ││
-│  │  └────────────────────────────────────────┘ ││
-│  │  ┌────────────────────────────────────────┐ ││
-│  │  │ 🔑 Sign in with npub + password       │ ││
 │  │  └────────────────────────────────────────┘ ││
 │  └─────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────┘
@@ -305,4 +302,4 @@ This API design enables native Nostr apps to:
 - **Display** feed previews with recent posts
 - **Subscribe** seamlessly via web handoff with Nostr authentication
 
-The one-click subscribe flow leverages the user's existing Nostr identity (via browser extension or npub+password) without requiring native apps to implement their own authentication.
+The one-click subscribe flow leverages the user's existing Nostr identity (via NIP-07 browser extension) without requiring native apps to implement their own authentication.
