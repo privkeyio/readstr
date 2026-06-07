@@ -1,6 +1,7 @@
 import { parseString } from 'xml2js'
 import { promisify } from 'util'
 import { getVideoMetadata } from './video-parser'
+import { safeFetch } from './safe-fetch'
 
 const parseXML = promisify(parseString)
 
@@ -167,10 +168,7 @@ export async function parseFeed(xmlContent: string): Promise<ParsedFeed> {
 
 export async function fetchAndParseFeed(url: string): Promise<ParsedFeed> {
   try {
-    // Validate URL
-    new URL(url) // This will throw if invalid
-    
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       headers: {
         'User-Agent': 'Readstr/1.0 Feed Reader',
         'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml',
@@ -206,7 +204,7 @@ export async function fetchAndParseFeed(url: string): Promise<ParsedFeed> {
 // Helper to discover feed URLs from a webpage
 export async function discoverFeedUrl(url: string): Promise<string[]> {
   try {
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       headers: {
         'User-Agent': 'Readstr/1.0 Feed Reader',
       },
