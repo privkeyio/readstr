@@ -75,7 +75,7 @@ model GuideFeedPost {
       "tags": ["bitcoin", "lightning"],
       "imageUrl": "https://...",
       "featured": true,
-      "subscribeUrl": "https://nostrfeedz.com/guide/subscribe?npub=npub1abc..."
+      "subscribeUrl": "https://readstr.privkey.io/guide/subscribe?npub=npub1abc..."
     }
   ],
   "total": 42,
@@ -110,7 +110,7 @@ model GuideFeedPost {
     "category": "Bitcoin",
     "tags": ["bitcoin"],
     "imageUrl": "https://...",
-    "subscribeUrl": "https://nostrfeedz.com/guide/subscribe?npub=npub1abc...",
+    "subscribeUrl": "https://readstr.privkey.io/guide/subscribe?npub=npub1abc...",
     "posts": [
       {
         "id": "post123",
@@ -208,7 +208,7 @@ const headers = {
                       │
                       ▼
 ┌─────────────────────────────────────────────────┐
-│  Browser: nostrfeedz.com/guide/subscribe?url=...│
+│  Browser: readstr.privkey.io/guide/subscribe?url=...│
 │  ┌─────────────────────────────────────────────┐│
 │  │       Subscribe to Bitcoin Magazine          ││
 │  │                                              ││
@@ -233,7 +233,7 @@ const headers = {
 
 ```swift
 func subscribeToFeed(npub: String) {
-    let subscribeUrl = "https://nostrfeedz.com/guide/subscribe?npub=\(npub)&callback=myapp://subscribed"
+    let subscribeUrl = "https://readstr.privkey.io/guide/subscribe?npub=\(npub)&callback=myapp://subscribed"
     UIApplication.shared.open(URL(string: subscribeUrl)!)
 }
 
@@ -251,7 +251,7 @@ func application(_ app: UIApplication, open url: URL, options: ...) -> Bool {
 ```kotlin
 fun subscribeToFeed(npub: String) {
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(
-        "https://nostrfeedz.com/guide/subscribe?npub=$npub&callback=myapp://subscribed"
+        "https://readstr.privkey.io/guide/subscribe?npub=$npub&callback=myapp://subscribed"
     ))
     startActivity(intent)
 }
@@ -263,7 +263,7 @@ fun subscribeToFeed(npub: String) {
 import { Linking } from 'react-native';
 
 const subscribeToFeed = (npub) => {
-  const url = `https://nostrfeedz.com/guide/subscribe?npub=${npub}&callback=myapp://subscribed`;
+  const url = `https://readstr.privkey.io/guide/subscribe?npub=${npub}&callback=myapp://subscribed`;
   Linking.openURL(url);
 };
 
@@ -281,7 +281,7 @@ Linking.addEventListener('url', ({ url }) => {
 import 'package:url_launcher/url_launcher.dart';
 
 void subscribeToFeed(String npub) async {
-  final url = 'https://nostrfeedz.com/guide/subscribe?npub=$npub&callback=myapp://subscribed';
+  final url = 'https://readstr.privkey.io/guide/subscribe?npub=$npub&callback=myapp://subscribed';
   if (await canLaunch(url)) {
     await launch(url);
   }
@@ -292,22 +292,22 @@ void subscribeToFeed(String npub) async {
 
 ```bash
 # List all feeds
-curl "https://nostrfeedz.com/api/guide"
+curl "https://readstr.privkey.io/api/guide"
 
 # Filter by category
-curl "https://nostrfeedz.com/api/guide?category=Bitcoin&featured=true"
+curl "https://readstr.privkey.io/api/guide?category=Bitcoin&featured=true"
 
 # Search feeds
-curl "https://nostrfeedz.com/api/guide?search=bitcoin&limit=10"
+curl "https://readstr.privkey.io/api/guide?search=bitcoin&limit=10"
 
 # Get single feed with posts
-curl "https://nostrfeedz.com/api/guide/npub1abc...?includePosts=true&postLimit=5"
+curl "https://readstr.privkey.io/api/guide/npub1abc...?includePosts=true&postLimit=5"
 
 # Get API documentation
-curl "https://nostrfeedz.com/api/guide/docs"
+curl "https://readstr.privkey.io/api/guide/docs"
 
 # Test subscribe page in browser
-open "https://nostrfeedz.com/guide/subscribe?npub=npub1abc..."
+open "https://readstr.privkey.io/guide/subscribe?npub=npub1abc..."
 ```
 
 ## Summary

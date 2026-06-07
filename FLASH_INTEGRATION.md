@@ -17,7 +17,7 @@ Readstr uses [PayWithFlash](https://paywithflash.com) for Bitcoin Lightning subs
 ### 2. Configure Webhook
 
 1. Click **"Use Advanced Webhook Features"** checkbox
-2. Set **Webhook URL**: `https://nostrfeedz.com/api/webhooks/flash`
+2. Set **Webhook URL**: `https://readstr.privkey.io/api/webhooks/flash`
 3. Save and copy your **Subscription Key** (you'll need this for JWT verification)
 4. Copy your **Checkout Page URL**
 
@@ -93,7 +93,7 @@ Flash sends the following events:
 
 ```bash
 # Get a valid JWT token from Flash (check their test tools)
-curl -X POST https://nostrfeedz.com/api/webhooks/flash \
+curl -X POST https://readstr.privkey.io/api/webhooks/flash \
   -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
