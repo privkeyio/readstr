@@ -125,7 +125,7 @@ model GuideFeedPost {
 }
 ```
 
-### 3. `GET /api/guide/subscribe` - Subscribe Redirect Page
+### 3. `GET /subscribe` - Subscribe Redirect Page
 
 This is a **web page** (not JSON API) for handling deep-link subscriptions from native apps.
 
@@ -145,7 +145,7 @@ This is a **web page** (not JSON API) for handling deep-link subscriptions from 
 
 **Implementation Notes:**
 
-- Use Next.js page component at `/app/guide/subscribe/page.tsx`
+- Use Next.js page component at `src/app/subscribe/page.tsx`
 - Check auth state via `useNostrAuth()` context
 - Call `api.feed.subscribeFeed.useMutation()` for subscription
 - Support both NIP-07 browser extension and npub+password login
@@ -208,7 +208,7 @@ const headers = {
                       │
                       ▼
 ┌─────────────────────────────────────────────────┐
-│  Browser: readstr.privkey.io/guide/subscribe?url=...│
+│  Browser: readstr.privkey.io/subscribe?url=...      │
 │  ┌─────────────────────────────────────────────┐│
 │  │       Subscribe to Bitcoin Magazine          ││
 │  │                                              ││
@@ -233,7 +233,7 @@ const headers = {
 
 ```swift
 func subscribeToFeed(npub: String) {
-    let subscribeUrl = "https://readstr.privkey.io/guide/subscribe?npub=\(npub)&callback=myapp://subscribed"
+    let subscribeUrl = "https://readstr.privkey.io/subscribe?npub=\(npub)&callback=myapp://subscribed"
     UIApplication.shared.open(URL(string: subscribeUrl)!)
 }
 
@@ -251,7 +251,7 @@ func application(_ app: UIApplication, open url: URL, options: ...) -> Bool {
 ```kotlin
 fun subscribeToFeed(npub: String) {
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(
-        "https://readstr.privkey.io/guide/subscribe?npub=$npub&callback=myapp://subscribed"
+        "https://readstr.privkey.io/subscribe?npub=$npub&callback=myapp://subscribed"
     ))
     startActivity(intent)
 }
@@ -263,7 +263,7 @@ fun subscribeToFeed(npub: String) {
 import { Linking } from 'react-native';
 
 const subscribeToFeed = (npub) => {
-  const url = `https://readstr.privkey.io/guide/subscribe?npub=${npub}&callback=myapp://subscribed`;
+  const url = `https://readstr.privkey.io/subscribe?npub=${npub}&callback=myapp://subscribed`;
   Linking.openURL(url);
 };
 
@@ -281,7 +281,7 @@ Linking.addEventListener('url', ({ url }) => {
 import 'package:url_launcher/url_launcher.dart';
 
 void subscribeToFeed(String npub) async {
-  final url = 'https://readstr.privkey.io/guide/subscribe?npub=$npub&callback=myapp://subscribed';
+  final url = 'https://readstr.privkey.io/subscribe?npub=$npub&callback=myapp://subscribed';
   if (await canLaunch(url)) {
     await launch(url);
   }
@@ -307,7 +307,7 @@ curl "https://readstr.privkey.io/api/guide/npub1abc...?includePosts=true&postLim
 curl "https://readstr.privkey.io/api/guide/docs"
 
 # Test subscribe page in browser
-open "https://readstr.privkey.io/guide/subscribe?npub=npub1abc..."
+open "https://readstr.privkey.io/subscribe?npub=npub1abc..."
 ```
 
 ## Summary
