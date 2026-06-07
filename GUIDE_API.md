@@ -75,7 +75,7 @@ model GuideFeedPost {
       "tags": ["bitcoin", "lightning"],
       "imageUrl": "https://...",
       "featured": true,
-      "subscribeUrl": "https://readstr.privkey.io/guide/subscribe?npub=npub1abc..."
+      "subscribeUrl": "https://readstr.privkey.io/subscribe?npub=npub1abc..."
     }
   ],
   "total": 42,
@@ -110,7 +110,7 @@ model GuideFeedPost {
     "category": "Bitcoin",
     "tags": ["bitcoin"],
     "imageUrl": "https://...",
-    "subscribeUrl": "https://readstr.privkey.io/guide/subscribe?npub=npub1abc...",
+    "subscribeUrl": "https://readstr.privkey.io/subscribe?npub=npub1abc...",
     "posts": [
       {
         "id": "post123",
