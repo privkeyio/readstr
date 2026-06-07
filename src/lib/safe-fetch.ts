@@ -1,5 +1,7 @@
 import { lookup } from 'dns/promises'
+import { lookup as lookupCb } from 'dns'
 import { isIP } from 'net'
+import { Agent } from 'undici'
 
 const MAX_BODY_BYTES = 5 * 1024 * 1024 // 5 MB
 const MAX_REDIRECTS = 5
@@ -9,14 +11,14 @@ function ipv4ToBlocked(ip: string): boolean {
   if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
     return true
   }
-  const [a, b] = parts
+  const [a, b, c] = parts
   if (a === 0) return true // 0.0.0.0/8
   if (a === 10) return true // 10.0.0.0/8
   if (a === 127) return true // loopback
   if (a === 100 && b >= 64 && b <= 127) return true // CGNAT 100.64.0.0/10
   if (a === 169 && b === 254) return true // link-local
   if (a === 172 && b >= 16 && b <= 31) return true // 172.16.0.0/12
-  if (a === 192 && b === 0) return true // 192.0.0.0/24 (and 192.0.2.0/24 test)
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return true // 192.0.0.0/24, 192.0.2.0/24 (TEST-NET-1)
   if (a === 192 && b === 168) return true // 192.168.0.0/16
   if (a === 198 && (b === 18 || b === 19)) return true // benchmarking
   if (a >= 224) return true // multicast + reserved 224.0.0.0/3
@@ -55,6 +57,32 @@ function isBlockedAddress(ip: string): boolean {
   if (family === 6) return ipv6ToBlocked(ip)
   return true
 }
+
+// Validate at the resolution undici actually connects to, closing the
+// TOCTOU/DNS-rebinding gap where a separate pre-flight lookup could differ
+// from the address the request ultimately connects to.
+const safeDispatcher = new Agent({
+  connect: {
+    lookup(hostname, options, callback) {
+      lookupCb(hostname, { ...options, all: true }, (err, addresses) => {
+        if (err) {
+          callback(err, '', 0)
+          return
+        }
+        const list = addresses as unknown as { address: string; family: number }[]
+        if (list.length === 0 || list.some((a) => isBlockedAddress(a.address))) {
+          callback(new Error('URL resolves to a disallowed address'), '', 0)
+          return
+        }
+        if (options && (options as { all?: boolean }).all) {
+          callback(null, list as never)
+        } else {
+          callback(null, list[0].address, list[0].family)
+        }
+      })
+    },
+  },
+})
 
 export async function assertSafeUrl(rawUrl: string): Promise<URL> {
   let parsed: URL
@@ -97,17 +125,21 @@ async function readCappedText(response: Response): Promise<string> {
 
   const chunks: Uint8Array[] = []
   let total = 0
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    if (value) {
-      total += value.length
-      if (total > MAX_BODY_BYTES) {
-        await reader.cancel()
-        throw new Error('Response body too large')
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) {
+        total += value.length
+        if (total > MAX_BODY_BYTES) {
+          throw new Error('Response body too large')
+        }
+        chunks.push(value)
       }
-      chunks.push(value)
     }
+  } catch (err) {
+    await reader.cancel().catch(() => {})
+    throw err
   }
 
   const merged = new Uint8Array(total)
@@ -133,13 +165,24 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
     await assertSafeUrl(currentUrl)
 
-    const response = await fetch(currentUrl, { ...init, redirect: 'manual' })
+    const response = await fetch(currentUrl, { ...init, redirect: 'manual', dispatcher: safeDispatcher } as RequestInit)
 
     if (response.status >= 300 && response.status < 400 && response.headers.has('location')) {
       const location = response.headers.get('location') as string
       await response.body?.cancel()
       currentUrl = new URL(location, currentUrl).href
       continue
+    }
+
+    if (!response.ok) {
+      await response.body?.cancel()
+      return {
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+        text: async () => '',
+      }
     }
 
     return {
