@@ -5,11 +5,17 @@ const server = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   DEFAULT_RELAYS: z.string().optional(),
   NOSTR_BUNKER_URL: z.string().optional(),
-  // Comma-separated list of hostnames the NIP-98 `u` tag is allowed to point at.
-  // Used to reject cross-origin token minting (a token signed for a foreign
-  // origin replayed against this server). Compared against the signed `u` host
-  // only — never the proxied request Host header. In development localhost is
-  // permitted by default; in production the canonical host is always allowed.
+  // Comma-separated list of bare hostnames the NIP-98 `u` tag is allowed to
+  // point at (entries with a scheme/port are normalized to the hostname).
+  // Rejects foreign-origin tokens replayed against this server. Compared against
+  // the signed `u` host only — never the proxied request Host header. In
+  // development localhost is permitted by default; in production the canonical
+  // host is always allowed.
+  //
+  // Deployment: set this when the production host differs from
+  // readstr.privkey.io. Every entry must be mutually trust-equivalent — the
+  // check only confirms the signed host is in the set, not that it matches the
+  // host actually serving the request.
   NIP98_ALLOWED_HOSTS: z.string().optional(),
   FLASH_SUBSCRIPTION_KEY: z.string().optional(),
   // Temporary fallback escape hatch. When 'true', the Flash webhook verifier

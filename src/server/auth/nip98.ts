@@ -25,14 +25,34 @@ const TIMESTAMP_TOLERANCE_SECONDS = 60
  * canonical production host is always allowed; localhost is allowed only outside
  * production so dev keeps working without rejecting an attacker-minted
  * localhost-origin token replayed against the real API.
+ *
+ * Scope: this rejects tokens whose signed `u` host is not in the trusted
+ * allow-list (e.g. a foreign-origin token replayed here). It does NOT prevent a
+ * malicious page served from an allowed origin from minting a valid token — that
+ * is inherent to NIP-98 with auto-approving signers and is out of scope here.
  */
+function normalizeHost(entry: string): string {
+  const trimmed = entry.trim().toLowerCase()
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//.test(trimmed)
+    ? trimmed
+    : `http://${trimmed}`
+  try {
+    return new URL(withScheme).hostname
+  } catch {
+    return trimmed
+  }
+}
+
+let allowedHosts: Set<string> | undefined
+
 function getAllowedHosts(): Set<string> {
+  if (allowedHosts) return allowedHosts
   const hosts = new Set<string>()
   const configured = process.env.NIP98_ALLOWED_HOSTS
   if (configured) {
     for (const h of configured.split(',')) {
-      const trimmed = h.trim().toLowerCase()
-      if (trimmed) hosts.add(trimmed)
+      const trimmed = h.trim()
+      if (trimmed) hosts.add(normalizeHost(trimmed))
     }
   }
   if (process.env.NODE_ENV === 'production') {
@@ -41,6 +61,7 @@ function getAllowedHosts(): Set<string> {
     hosts.add('localhost')
     hosts.add('127.0.0.1')
   }
+  allowedHosts = hosts
   return hosts
 }
 
@@ -69,11 +90,12 @@ function getAllowedHosts(): Set<string> {
  */
 function urlTagMatches(signedUrl: string, requestUrl: string): boolean {
   try {
-    // Use a dummy base so relative URLs (just in case) still parse.
+    // Dummy base so a host-less `u` parses; in production it resolves to
+    // localhost, which is not in the allow-list and is therefore rejected below.
     const a = new URL(signedUrl, 'http://localhost')
     const b = new URL(requestUrl, 'http://localhost')
 
-    if (!getAllowedHosts().has(a.hostname.toLowerCase())) return false
+    if (!getAllowedHosts().has(a.hostname)) return false
 
     if (a.pathname !== b.pathname) return false
 
