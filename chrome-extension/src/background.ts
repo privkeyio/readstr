@@ -953,15 +953,6 @@ async function handleMessage(
       return { success: true };
     }
 
-    case 'DETECTED_FEEDS': {
-      const feeds = message['feeds'] as DetectedFeed[];
-      const tabId = sender.tab?.id;
-      if (tabId && feeds) {
-        updateContextMenuForTab(tabId, feeds);
-      }
-      return { success: true };
-    }
-
     default:
       return { success: false, error: `Unknown message type: ${message.type}` };
   }
@@ -971,13 +962,114 @@ const MENU_ID_PAGE_FEEDS = 'nostr-feedz-page-feeds';
 const MENU_ID_SUBSCRIBE_LINK = 'nostr-feedz-subscribe-link';
 const MENU_ID_PARENT = 'nostr-feedz-parent';
 
-interface DetectedFeed {
-  url: string;
-  title: string;
-  type: string;
+// Injected on demand into the active tab via chrome.scripting.executeScript when
+// the user invokes the context menu, so feed detection no longer requires a
+// standing all-URLs content script. Must be self-contained (runs in the page).
+function detectFeedsInPage(): { url: string; title: string; type: string }[] {
+  const feeds: { url: string; title: string; type: string }[] = [];
+  const seen = new Set<string>();
+
+  const linkSelectors = [
+    'link[rel="alternate"][type="application/rss+xml"]',
+    'link[rel="alternate"][type="application/atom+xml"]',
+    'link[rel="alternate"][type="application/feed+json"]',
+    'link[rel="feed"]',
+  ];
+
+  linkSelectors.forEach((selector) => {
+    document.querySelectorAll<HTMLLinkElement>(selector).forEach((link) => {
+      const href = link.href;
+      if (!href || seen.has(href)) return;
+      seen.add(href);
+
+      const type = link.type?.includes('atom') ? 'atom' : 'rss';
+      const title = link.title || document.title || new URL(href).hostname;
+
+      feeds.push({ url: href, title, type });
+    });
+  });
+
+  const aSelectors = [
+    'a[href*="/feed"]',
+    'a[href*="/rss"]',
+    'a[href*=".rss"]',
+    'a[href*=".xml"]',
+    'a[href*="atom"]',
+  ];
+
+  aSelectors.forEach((selector) => {
+    document.querySelectorAll<HTMLAnchorElement>(selector).forEach((link) => {
+      const href = link.href;
+      if (!href || seen.has(href)) return;
+
+      const url = new URL(href);
+      const path = url.pathname.toLowerCase();
+      const isLikelyFeed =
+        path.includes('/feed') ||
+        path.includes('/rss') ||
+        path.endsWith('.rss') ||
+        path.endsWith('.xml') ||
+        path.includes('atom');
+
+      if (!isLikelyFeed) return;
+      seen.add(href);
+
+      const type = path.includes('atom') ? 'atom' : 'rss';
+      const title = link.textContent?.trim() || document.title || url.hostname;
+
+      feeds.push({ url: href, title, type });
+    });
+  });
+
+  return feeds;
 }
 
-const tabFeeds = new Map<number, DetectedFeed[]>();
+async function subscribeDetectedFeedsForTab(tabId: number): Promise<void> {
+  let detected: { url: string; title: string; type: string }[] = [];
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: detectFeedsInPage,
+    });
+    detected = (results[0]?.result as typeof detected | undefined) ?? [];
+  } catch (err) {
+    console.error('Feed detection failed:', err);
+    await chrome.notifications.create({
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: 'Error',
+      message: 'Could not detect feeds on this page',
+    });
+    return;
+  }
+
+  if (detected.length === 0) {
+    await chrome.notifications.create({
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: 'No feeds detected',
+      message: 'No RSS/Atom feeds were found on this page',
+    });
+    return;
+  }
+
+  let added = 0;
+  for (const feed of detected) {
+    if (await addFeedToStorage(feed.url, feed.title, false)) {
+      added += 1;
+    }
+  }
+
+  await chrome.notifications.create({
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title: added > 0 ? 'Feeds Subscribed' : 'No New Feeds',
+    message:
+      added > 0
+        ? `Subscribed to ${added} of ${detected.length} detected feed${detected.length === 1 ? '' : 's'}`
+        : `All ${detected.length} detected feed${detected.length === 1 ? '' : 's'} were already added or invalid`,
+  });
+}
 
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -1003,16 +1095,18 @@ function isLikelyFeedUrl(url: string): boolean {
   }
 }
 
-async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boolean> {
+async function addFeedToStorage(feedUrl: string, feedTitle: string, notify = true): Promise<boolean> {
   try {
     const sanitizedFeedUrl = sanitizeUrl(feedUrl);
     if (!sanitizedFeedUrl) {
-      await chrome.notifications.create({
-        type: 'basic',
-        iconUrl: 'icons/icon128.png',
-        title: 'Invalid URL',
-        message: 'The feed URL is not valid',
-      });
+      if (notify) {
+        await chrome.notifications.create({
+          type: 'basic',
+          iconUrl: 'icons/icon128.png',
+          title: 'Invalid URL',
+          message: 'The feed URL is not valid',
+        });
+      }
       return false;
     }
 
@@ -1021,12 +1115,14 @@ async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boo
 
     const exists = localFeeds.some((f) => f.url === sanitizedFeedUrl);
     if (exists) {
-      await chrome.notifications.create({
-        type: 'basic',
-        iconUrl: 'icons/icon128.png',
-        title: 'Feed Already Added',
-        message: 'This feed is already in your list',
-      });
+      if (notify) {
+        await chrome.notifications.create({
+          type: 'basic',
+          iconUrl: 'icons/icon128.png',
+          title: 'Feed Already Added',
+          message: 'This feed is already in your list',
+        });
+      }
       return false;
     }
 
@@ -1043,12 +1139,14 @@ async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boo
     localFeeds.push(newFeed);
     await chrome.storage.sync.set({ localFeeds });
 
-    await chrome.notifications.create({
-      type: 'basic',
-      iconUrl: 'icons/icon128.png',
-      title: 'Feed Subscribed',
-      message: `Subscribed to: ${newFeed.title}`,
-    });
+    if (notify) {
+      await chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: 'Feed Subscribed',
+        message: `Subscribed to: ${newFeed.title}`,
+      });
+    }
 
     const storage = await getStorageData();
     const baseUrl = normalizeBaseUrl(storage.settings.webAppUrl);
@@ -1088,12 +1186,14 @@ async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boo
     return true;
   } catch (err) {
     console.error('Failed to add feed:', err);
-    await chrome.notifications.create({
-      type: 'basic',
-      iconUrl: 'icons/icon128.png',
-      title: 'Error',
-      message: 'Failed to subscribe to feed',
-    });
+    if (notify) {
+      await chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: 'Error',
+        message: 'Failed to subscribe to feed',
+      });
+    }
     return false;
   }
 }
@@ -1111,7 +1211,6 @@ function setupContextMenu(): void {
       parentId: MENU_ID_PARENT,
       title: 'Subscribe to detected feeds...',
       contexts: ['page'],
-      enabled: false,
     });
 
     chrome.contextMenus.create({
@@ -1120,20 +1219,6 @@ function setupContextMenu(): void {
       title: 'Subscribe to this link as feed',
       contexts: ['link'],
     });
-  });
-}
-
-function updateContextMenuForTab(tabId: number, feeds: DetectedFeed[]): void {
-  tabFeeds.set(tabId, feeds);
-
-  const hasFeeds = feeds.length > 0;
-  const title = hasFeeds
-    ? `Subscribe to this feed (${feeds.length} found)`
-    : 'No feeds detected on this page';
-
-  chrome.contextMenus.update(MENU_ID_PAGE_FEEDS, {
-    title,
-    enabled: hasFeeds,
   });
 }
 
@@ -1263,53 +1348,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-chrome.tabs.onActivated.addListener((activeInfo) => {
-  const feeds = tabFeeds.get(activeInfo.tabId);
-  if (feeds) {
-    updateContextMenuForTab(activeInfo.tabId, feeds);
-  } else {
-    // Query the content script for feeds on this tab
-    void chrome.tabs.sendMessage(activeInfo.tabId, { type: 'GET_DETECTED_FEEDS' })
-      .then((response: { feeds?: DetectedFeed[] } | undefined) => {
-        if (response?.feeds) {
-          updateContextMenuForTab(activeInfo.tabId, response.feeds);
-        }
-      })
-      .catch(() => {
-        // Tab might not have content script loaded, reset menu
-        updateContextMenuForTab(activeInfo.tabId, []);
-      });
-  }
-});
-
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && tab.url) {
-    // Query the content script for feeds when page loads
-    void chrome.tabs.sendMessage(tabId, { type: 'GET_DETECTED_FEEDS' })
-      .then((response: { feeds?: DetectedFeed[] } | undefined) => {
-        if (response?.feeds) {
-          updateContextMenuForTab(tabId, response.feeds);
-        }
-      })
-      .catch(() => {
-        // Content script not loaded yet
-      });
-  }
-});
-
-chrome.tabs.onRemoved.addListener((tabId) => {
-  tabFeeds.delete(tabId);
-});
-
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === MENU_ID_PAGE_FEEDS && tab?.id) {
-    const feeds = tabFeeds.get(tab.id);
-    if (feeds && feeds.length > 0) {
-      const feed = feeds[0];
-      if (feed) {
-        void addFeedToStorage(feed.url, feed.title);
-      }
-    }
+    void subscribeDetectedFeedsForTab(tab.id);
   } else if (info.menuItemId === MENU_ID_SUBSCRIBE_LINK) {
     const url = info.linkUrl;
     const title = tab?.title ?? '';
