@@ -166,9 +166,8 @@ src/app/api/guide/
 └── docs/
     └── route.ts          # GET /api/guide/docs (API docs)
 
-src/app/guide/
-└── subscribe/
-    └── page.tsx          # Subscribe page (web, not API)
+src/app/subscribe/
+└── page.tsx              # Subscribe page (web, not API)
 ```
 
 ### Response Headers
