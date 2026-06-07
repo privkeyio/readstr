@@ -18,6 +18,57 @@ const NIP98_KIND = 27235
 const TIMESTAMP_TOLERANCE_SECONDS = 60
 
 /**
+ * Hostnames the signed `u` tag is allowed to target.
+ *
+ * Sourced from trusted config (NIP98_ALLOWED_HOSTS, comma-separated) — never
+ * from the proxied request Host header, which an attacker controls. When
+ * NIP98_ALLOWED_HOSTS is set, only those hosts are honored. When it is unset, a
+ * default is used: the canonical production host in production, or localhost +
+ * 127.0.0.1 outside production so dev keeps working without accepting an
+ * attacker-minted localhost-origin token replayed against the real API.
+ *
+ * Scope: this rejects tokens whose signed `u` host is not in the trusted
+ * allow-list (e.g. a foreign-origin token replayed here). It does NOT prevent a
+ * malicious page served from an allowed origin from minting a valid token — that
+ * is inherent to NIP-98 with auto-approving signers and is out of scope here.
+ */
+function normalizeHost(entry: string): string {
+  const trimmed = entry.trim().toLowerCase()
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//.test(trimmed)
+    ? trimmed
+    : `http://${trimmed}`
+  try {
+    return new URL(withScheme).hostname
+  } catch {
+    return trimmed
+  }
+}
+
+let allowedHosts: Set<string> | undefined
+
+function getAllowedHosts(): Set<string> {
+  if (allowedHosts) return allowedHosts
+  const hosts = new Set<string>()
+  const configured = process.env.NIP98_ALLOWED_HOSTS
+  if (configured) {
+    for (const h of configured.split(',')) {
+      const trimmed = h.trim()
+      if (trimmed) hosts.add(normalizeHost(trimmed))
+    }
+  }
+  if (hosts.size === 0) {
+    if (process.env.NODE_ENV === 'production') {
+      hosts.add('readstr.privkey.io')
+    } else {
+      hosts.add('localhost')
+      hosts.add('127.0.0.1')
+    }
+  }
+  allowedHosts = hosts
+  return hosts
+}
+
+/**
  * Compare two URLs for NIP-98 `u`-tag matching.
  *
  * We do NOT require a byte-for-byte string match. tRPC v10 GET requests batch
@@ -25,23 +76,29 @@ const TIMESTAMP_TOLERANCE_SECONDS = 60
  * string (e.g. `/api/trpc/feed.getFeeds,feed.getStatus?batch=1&input=...`).
  * The client signs the exact fetch URL, but we want to be robust to:
  *   - http vs https (reconstructed from x-forwarded-proto behind Caddy),
- *   - host/port differences introduced by the reverse proxy,
+ *   - port differences introduced by the reverse proxy,
  *   - query-parameter ordering.
  *
  * Tradeoff: we match on pathname + the *sorted* set of query parameters, and we
- * ignore scheme/host. This is slightly looser than a full-URL match but is the
- * tightest comparison that survives a reverse proxy reliably. The signature
- * binds the event to this exact path + query input. For GET requests the input
- * lives in the query string, so it is covered by the `u` tag. For mutations the
- * body is NOT in the URL, so a captured header could otherwise be replayed with
- * a different body within the clock-skew window — the `payload` tag (see
- * verifyNip98Header) closes that gap by binding sha256(body) into the signature.
+ * ignore scheme/port. The signed host, however, IS validated against a trusted
+ * allow-list (getAllowedHosts) so a token whose `u` points at a foreign or
+ * localhost origin cannot be replayed against this server. We deliberately do
+ * not compare the request URL's host here — that comes from the proxy and is not
+ * trustworthy. The signature binds the event to this exact path + query input.
+ * For GET requests the input lives in the query string, so it is covered by the
+ * `u` tag. For mutations the body is NOT in the URL, so a captured header could
+ * otherwise be replayed with a different body within the clock-skew window — the
+ * `payload` tag (see verifyNip98Header) closes that gap by binding sha256(body)
+ * into the signature.
  */
 function urlTagMatches(signedUrl: string, requestUrl: string): boolean {
   try {
-    // Use a dummy base so relative URLs (just in case) still parse.
+    // Dummy base so a host-less `u` parses; in production it resolves to
+    // localhost, which is not in the allow-list and is therefore rejected below.
     const a = new URL(signedUrl, 'http://localhost')
     const b = new URL(requestUrl, 'http://localhost')
+
+    if (!getAllowedHosts().has(a.hostname)) return false
 
     if (a.pathname !== b.pathname) return false
 

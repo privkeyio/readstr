@@ -5,6 +5,19 @@ const server = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   DEFAULT_RELAYS: z.string().optional(),
   NOSTR_BUNKER_URL: z.string().optional(),
+  // Comma-separated list of bare hostnames the NIP-98 `u` tag is allowed to
+  // point at (entries with a scheme/port are normalized to the hostname).
+  // Rejects foreign-origin tokens replayed against this server. Compared against
+  // the signed `u` host only — never the proxied request Host header. When
+  // unset, a default is used: localhost in development, the canonical host
+  // (readstr.privkey.io) in production.
+  //
+  // Deployment: set this to your own host(s) when the production host differs
+  // from readstr.privkey.io. When set, ONLY the listed hosts are honored — the
+  // readstr.privkey.io default is not added. Every entry must be mutually
+  // trust-equivalent — the check only confirms the signed host is in the set,
+  // not that it matches the host actually serving the request.
+  NIP98_ALLOWED_HOSTS: z.string().optional(),
   FLASH_SUBSCRIPTION_KEY: z.string().optional(),
   // Temporary fallback escape hatch. When 'true', the Flash webhook verifier
   // falls back to the unsigned request body identity when the verified JWT
@@ -35,6 +48,7 @@ const processEnv = {
   NODE_ENV: process.env.NODE_ENV,
   DEFAULT_RELAYS: process.env.DEFAULT_RELAYS,
   NOSTR_BUNKER_URL: process.env.NOSTR_BUNKER_URL,
+  NIP98_ALLOWED_HOSTS: process.env.NIP98_ALLOWED_HOSTS,
   FLASH_SUBSCRIPTION_KEY: process.env.FLASH_SUBSCRIPTION_KEY,
   ALLOW_FLASH_BODY_IDENTITY: process.env.ALLOW_FLASH_BODY_IDENTITY,
   NEXT_PUBLIC_ADMIN_NPUB: process.env.NEXT_PUBLIC_ADMIN_NPUB,

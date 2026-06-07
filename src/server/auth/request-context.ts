@@ -18,8 +18,10 @@ export interface RequestLike {
  * proxies to the app over http. We prefer x-forwarded-proto/host when present
  * so the scheme/host line up with what the browser used. When the proxy strips
  * x-forwarded-proto we fall back to https in production (the only way the app is
- * reachable) and http otherwise. The server-side u-tag comparison ignores
- * scheme/host (path + sorted query only), so this is mostly belt-and-suspenders.
+ * reachable) and http otherwise. The server-side u-tag comparison matches on
+ * path + sorted query and ignores the reconstructed scheme/port; the signed
+ * host is validated separately against a trusted allow-list (see nip98.ts), not
+ * against this reconstructed (proxy-derived) host.
  */
 export function reconstructUrl(req: RequestLike): string {
   const forwardedProto = req.getHeader('x-forwarded-proto')?.split(',')[0]?.trim()
