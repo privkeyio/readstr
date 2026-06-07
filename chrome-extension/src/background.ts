@@ -1053,9 +1053,22 @@ async function subscribeDetectedFeedsForTab(tabId: number): Promise<void> {
     return;
   }
 
+  let added = 0;
   for (const feed of detected) {
-    await addFeedToStorage(feed.url, feed.title);
+    if (await addFeedToStorage(feed.url, feed.title, false)) {
+      added += 1;
+    }
   }
+
+  await chrome.notifications.create({
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title: added > 0 ? 'Feeds Subscribed' : 'No New Feeds',
+    message:
+      added > 0
+        ? `Subscribed to ${added} of ${detected.length} detected feed${detected.length === 1 ? '' : 's'}`
+        : `All ${detected.length} detected feed${detected.length === 1 ? '' : 's'} were already added or invalid`,
+  });
 }
 
 function generateId(): string {
@@ -1082,16 +1095,18 @@ function isLikelyFeedUrl(url: string): boolean {
   }
 }
 
-async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boolean> {
+async function addFeedToStorage(feedUrl: string, feedTitle: string, notify = true): Promise<boolean> {
   try {
     const sanitizedFeedUrl = sanitizeUrl(feedUrl);
     if (!sanitizedFeedUrl) {
-      await chrome.notifications.create({
-        type: 'basic',
-        iconUrl: 'icons/icon128.png',
-        title: 'Invalid URL',
-        message: 'The feed URL is not valid',
-      });
+      if (notify) {
+        await chrome.notifications.create({
+          type: 'basic',
+          iconUrl: 'icons/icon128.png',
+          title: 'Invalid URL',
+          message: 'The feed URL is not valid',
+        });
+      }
       return false;
     }
 
@@ -1100,12 +1115,14 @@ async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boo
 
     const exists = localFeeds.some((f) => f.url === sanitizedFeedUrl);
     if (exists) {
-      await chrome.notifications.create({
-        type: 'basic',
-        iconUrl: 'icons/icon128.png',
-        title: 'Feed Already Added',
-        message: 'This feed is already in your list',
-      });
+      if (notify) {
+        await chrome.notifications.create({
+          type: 'basic',
+          iconUrl: 'icons/icon128.png',
+          title: 'Feed Already Added',
+          message: 'This feed is already in your list',
+        });
+      }
       return false;
     }
 
@@ -1122,12 +1139,14 @@ async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boo
     localFeeds.push(newFeed);
     await chrome.storage.sync.set({ localFeeds });
 
-    await chrome.notifications.create({
-      type: 'basic',
-      iconUrl: 'icons/icon128.png',
-      title: 'Feed Subscribed',
-      message: `Subscribed to: ${newFeed.title}`,
-    });
+    if (notify) {
+      await chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: 'Feed Subscribed',
+        message: `Subscribed to: ${newFeed.title}`,
+      });
+    }
 
     const storage = await getStorageData();
     const baseUrl = normalizeBaseUrl(storage.settings.webAppUrl);
@@ -1167,12 +1186,14 @@ async function addFeedToStorage(feedUrl: string, feedTitle: string): Promise<boo
     return true;
   } catch (err) {
     console.error('Failed to add feed:', err);
-    await chrome.notifications.create({
-      type: 'basic',
-      iconUrl: 'icons/icon128.png',
-      title: 'Error',
-      message: 'Failed to subscribe to feed',
-    });
+    if (notify) {
+      await chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: 'Error',
+        message: 'Failed to subscribe to feed',
+      });
+    }
     return false;
   }
 }
