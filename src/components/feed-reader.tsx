@@ -83,6 +83,7 @@ export function FeedReader() {
   const [shareSuccess, setShareSuccess] = useState(false)
   const [showSyncPrompt, setShowSyncPrompt] = useState(false)
   const [pendingSyncImport, setPendingSyncImport] = useState<Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[] }> | null>(null)
+  const [pendingSyncCreatedAt, setPendingSyncCreatedAt] = useState<number | null>(null)
   const [isRefreshingAll, setIsRefreshingAll] = useState(false)
   const [lastRefreshTime, setLastRefreshTime] = useState<number | null>(null)
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null)
@@ -219,13 +220,12 @@ export function FeedReader() {
         // equal-or-older subscription list than the one we last applied.
         if (!isSyncEventFresh('nostr-feedz-subscriptions', result.createdAt)) return
 
-        // Accept this event as the new freshness basis now that we're using its
-        // data, so a later stale event is rejected even if the user dismisses
-        // the import prompt below.
-        setLastAppliedSyncCreatedAt('nostr-feedz-subscriptions', result.createdAt!)
-
-        // Check if there are new subscriptions to import
-        if (result.data.rss.length === 0 && result.data.nostr.length === 0) return
+        // Nothing remote to import: local already reflects this event, so accept
+        // it as the new freshness basis to avoid re-evaluating it forever.
+        if (result.data.rss.length === 0 && result.data.nostr.length === 0) {
+          setLastAppliedSyncCreatedAt('nostr-feedz-subscriptions', result.createdAt!)
+          return
+        }
 
         const currentFeeds = feeds.map((f: Feed) => ({
           type: f.type,
@@ -234,10 +234,16 @@ export function FeedReader() {
         }))
 
         const mergeResult = mergeSubscriptionLists(currentFeeds, result.data)
-        
+
         if (mergeResult.toAdd.length > 0) {
+          // Defer the watermark advance to the accept handler so a dismissed
+          // import can still be re-imported later.
           setPendingSyncImport(mergeResult.toAdd)
+          setPendingSyncCreatedAt(result.createdAt!)
           setShowSyncPrompt(true)
+        } else {
+          // Everything remote is already subscribed locally; safe to advance.
+          setLastAppliedSyncCreatedAt('nostr-feedz-subscriptions', result.createdAt!)
         }
       } catch (error) {
         console.error('Auto-sync check failed:', error)
@@ -2028,6 +2034,7 @@ export function FeedReader() {
                 onClick={() => {
                   setShowSyncPrompt(false)
                   setPendingSyncImport(null)
+                  setPendingSyncCreatedAt(null)
                 }}
                 className="btn-theme-secondary"
               >
@@ -2036,8 +2043,14 @@ export function FeedReader() {
               <button
                 onClick={async () => {
                   await handleImportFeeds(pendingSyncImport)
+                  // Re-check freshness: another sync path may have advanced the
+                  // watermark while this prompt was open, so keep it monotonic.
+                  if (pendingSyncCreatedAt !== null && isSyncEventFresh('nostr-feedz-subscriptions', pendingSyncCreatedAt)) {
+                    setLastAppliedSyncCreatedAt('nostr-feedz-subscriptions', pendingSyncCreatedAt)
+                  }
                   setShowSyncPrompt(false)
                   setPendingSyncImport(null)
+                  setPendingSyncCreatedAt(null)
                 }}
                 className="btn-theme-primary"
               >
