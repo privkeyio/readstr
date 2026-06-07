@@ -948,6 +948,18 @@ async function handleMessage(
       return { success: true };
     }
 
+    case 'SUBSCRIBE_SELECTED_FEEDS': {
+      const feeds = (message['feeds'] as { url: string; title: string }[] | undefined) ?? [];
+      let added = 0;
+      for (const feed of feeds) {
+        if (await addFeedToStorage(feed.url, feed.title, false)) {
+          added += 1;
+        }
+      }
+      await chrome.storage.session.remove('pendingDetectedFeeds');
+      return { success: true, data: { added, total: feeds.length } };
+    }
+
     default:
       return { success: false, error: `Unknown message type: ${message.type}` };
   }
@@ -1019,7 +1031,7 @@ function detectFeedsInPage(): { url: string; title: string; type: string }[] {
   return feeds;
 }
 
-async function subscribeDetectedFeedsForTab(tabId: number): Promise<void> {
+async function subscribeDetectedFeedsForTab(tabId: number, tab?: chrome.tabs.Tab): Promise<void> {
   let detected: { url: string; title: string; type: string }[] = [];
   try {
     const results = await chrome.scripting.executeScript({
@@ -1048,22 +1060,24 @@ async function subscribeDetectedFeedsForTab(tabId: number): Promise<void> {
     return;
   }
 
-  let added = 0;
-  for (const feed of detected) {
-    if (await addFeedToStorage(feed.url, feed.title, false)) {
-      added += 1;
-    }
-  }
-
-  await chrome.notifications.create({
-    type: 'basic',
-    iconUrl: 'icons/icon128.png',
-    title: added > 0 ? 'Feeds Subscribed' : 'No New Feeds',
-    message:
-      added > 0
-        ? `Subscribed to ${added} of ${detected.length} detected feed${detected.length === 1 ? '' : 's'}`
-        : `All ${detected.length} detected feed${detected.length === 1 ? '' : 's'} were already added or invalid`,
+  await chrome.storage.session.set({
+    pendingDetectedFeeds: {
+      feeds: detected,
+      sourceTitle: tab?.title ?? '',
+      sourceUrl: tab?.url ?? '',
+    },
   });
+
+  try {
+    await chrome.action.openPopup();
+  } catch {
+    await chrome.notifications.create({
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: detected.length === 1 ? '1 feed detected' : `${detected.length} feeds detected`,
+      message: 'Click the extension icon to choose which feeds to subscribe',
+    });
+  }
 }
 
 function generateId(): string {
@@ -1337,7 +1351,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === MENU_ID_PAGE_FEEDS && tab?.id) {
-    void subscribeDetectedFeedsForTab(tab.id);
+    void subscribeDetectedFeedsForTab(tab.id, tab);
   } else if (info.menuItemId === MENU_ID_SUBSCRIBE_LINK) {
     const url = info.linkUrl;
     const title = tab?.title ?? '';
