@@ -56,7 +56,6 @@ export interface NostrAuthData {
   method: NostrAuthMethod;
   pubkey: string | null;
   npub: string | null;
-  privateKeyHex: string | null;
 }
 
 export interface StorageData {

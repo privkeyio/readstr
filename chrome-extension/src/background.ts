@@ -90,6 +90,16 @@ async function saveStorageData(data: Partial<StorageData>): Promise<void> {
 // a successful signature so later breakage warns again.
 let warnedNip07Unauthenticated = false;
 
+// The raw nsec-derived key is kept only in the service worker's runtime memory
+// and is never written to chrome.storage.local. If the worker is torn down the
+// user must re-authenticate, which is the correct tradeoff for a root identity key.
+let sessionPrivateKeyHex: string | null = null;
+
+// The nsec session key lives only in worker memory; after an MV3 teardown it is
+// gone while persisted nostrAuth still says method:'nsec'. Warn once so the user
+// re-authenticates instead of silently 401ing. Reset on a fresh nsec login.
+let warnedNsecSessionExpired = false;
+
 async function warnNip07Unauthenticated(): Promise<void> {
   if (warnedNip07Unauthenticated) return;
   warnedNip07Unauthenticated = true;
@@ -101,6 +111,22 @@ async function warnNip07Unauthenticated(): Promise<void> {
       message:
         'Open readstr.privkey.io in a tab and approve the signing request to sync. ' +
         'Browser extension signing (NIP-07) needs an open readstr tab with your signer.',
+    });
+  } catch {
+    // Notifications may be unavailable; the warning is best-effort.
+  }
+}
+
+async function warnNsecSessionExpired(): Promise<void> {
+  if (warnedNsecSessionExpired) return;
+  warnedNsecSessionExpired = true;
+  try {
+    await chrome.notifications.create({
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: 'Sign in again',
+      message:
+        'Your readstr session expired. Open the extension and re-enter your nsec to keep syncing.',
     });
   } catch {
     // Notifications may be unavailable; the warning is best-effort.
@@ -171,8 +197,14 @@ async function getNostrAuthHeader(
 ): Promise<string | null> {
   if (!nostrAuth || !nostrAuth.pubkey) return null;
 
-  if (nostrAuth.method === 'nsec' && nostrAuth.privateKeyHex) {
-    return generateAuthHeader(url, method, nostrAuth.pubkey, nostrAuth.privateKeyHex, body);
+  if (nostrAuth.method === 'nsec') {
+    if (sessionPrivateKeyHex) {
+      return generateAuthHeader(url, method, nostrAuth.pubkey, sessionPrivateKeyHex, body);
+    }
+    // Worker was torn down and the in-memory key is gone; prompt re-auth instead
+    // of emitting an unsigned request that silently 401s and burns retries.
+    void warnNsecSessionExpired();
+    return null;
   }
 
   if (nostrAuth.method === 'nip07') {
@@ -541,7 +573,6 @@ async function tryRestoreAuthFromOpenTabs(): Promise<boolean> {
             method: response.session.method === 'nip07' ? 'nip07' : 'nsec',
             pubkey: response.session.pubkey,
             npub: response.session.npub,
-            privateKeyHex: null,
           };
           await saveStorageData({ nostrAuth });
           return true;
@@ -718,6 +749,7 @@ async function handleMessage(
     }
 
     case 'CLEAR_AUTH': {
+      sessionPrivateKeyHex = null;
       await saveStorageData({
         authToken: null,
         nostrAuth: null,
@@ -736,7 +768,6 @@ async function handleMessage(
       try {
         let pubkey: string;
         let npub: string;
-        let privateKeyHex: string | null = null;
 
         if (method === 'nsec' && nsec) {
           const decodedKey = decodeNsec(nsec);
@@ -745,10 +776,12 @@ async function handleMessage(
           }
           pubkey = getPublicKeyFromPrivate(decodedKey);
           npub = encodeNpub(pubkey);
-          privateKeyHex = decodedKey;
+          sessionPrivateKeyHex = decodedKey;
+          warnedNsecSessionExpired = false;
         } else if (method === 'nip07' && pubkeyHex) {
           pubkey = pubkeyHex;
           npub = encodeNpub(pubkeyHex);
+          sessionPrivateKeyHex = null;
         } else {
           return { success: false, error: 'Invalid login parameters' };
         }
@@ -757,7 +790,6 @@ async function handleMessage(
           method,
           pubkey,
           npub,
-          privateKeyHex,
         };
 
         await saveStorageData({ nostrAuth });
@@ -770,6 +802,7 @@ async function handleMessage(
     }
 
     case 'NOSTR_LOGOUT': {
+      sessionPrivateKeyHex = null;
       await saveStorageData({
         nostrAuth: null,
         feeds: [],
@@ -791,7 +824,7 @@ async function handleMessage(
       }
 
       const existing = await getStorageData();
-      if (existing.nostrAuth?.method === 'nsec' && existing.nostrAuth.privateKeyHex) {
+      if (existing.nostrAuth?.method === 'nsec' && sessionPrivateKeyHex) {
         return { success: true };
       }
 
@@ -799,7 +832,6 @@ async function handleMessage(
         method: session.method === 'nip07' ? 'nip07' : 'nsec',
         pubkey: session.pubkey,
         npub: session.npub,
-        privateKeyHex: null,
       };
 
       await saveStorageData({ nostrAuth });
@@ -1105,6 +1137,15 @@ function updateContextMenuForTab(tabId: number, feeds: DetectedFeed[]): void {
   });
 }
 
+async function purgePersistedPrivateKey(): Promise<void> {
+  const result = await chrome.storage.local.get('nostrAuth');
+  const stored = result['nostrAuth'] as (NostrAuthData & { privateKeyHex?: unknown }) | undefined;
+  if (stored && 'privateKeyHex' in stored) {
+    delete stored.privateKeyHex;
+    await chrome.storage.local.set({ nostrAuth: stored });
+  }
+}
+
 chrome.runtime.onInstalled.addListener((details) => {
   void (async () => {
     if (details.reason === 'install') {
@@ -1114,6 +1155,8 @@ chrome.runtime.onInstalled.addListener((details) => {
         settings: defaultSettings,
         authToken: null,
       });
+    } else {
+      await purgePersistedPrivateKey();
     }
 
     setupContextMenu();
