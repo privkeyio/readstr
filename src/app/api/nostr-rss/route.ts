@@ -27,6 +27,28 @@ async function sanitizeHtml(html: string): Promise<string> {
   );
 }
 
+// Plain-text RSS fields (titles, descriptions, author) carry untrusted Nostr data.
+// Strip all HTML so a lenient reader that renders them as markup can't be XSS'd.
+// These land in CDATA (no XML escaping), so we extract the decoded text and drop
+// any remaining angle brackets — a lenient reader then can't form a tag from them.
+const stripSchema: SanitizeSchema = {
+  ...defaultSchema,
+  tagNames: [],
+  attributes: {},
+};
+
+function hastToText(node: any): string {
+  if (node.type === 'text') return node.value;
+  if (Array.isArray(node.children)) return node.children.map(hastToText).join('');
+  return '';
+}
+
+async function stripHtml(input: string): Promise<string> {
+  const processor = unified().use(rehypeParse, { fragment: true }).use(rehypeSanitize, stripSchema);
+  const tree = await processor.run(processor.parse(String(input)));
+  return hastToText(tree).replace(/[<>]/g, '');
+}
+
 const DEFAULT_RELAYS = [
   'wss://relay.damus.io',
   'wss://relay.primal.net',
@@ -178,11 +200,14 @@ export async function GET(request: NextRequest) {
             const metadata = JSON.parse(profileEvents[0].content);
             authorName = metadata.displayName || metadata.name || authorName;
             authorAbout = metadata.about || authorAbout;
-            authorPicture = metadata.picture || '';
+            authorPicture = /^https?:\/\//i.test(metadata.picture) ? metadata.picture : '';
         } catch (e) {
             console.error("Error parsing profile metadata:", e);
         }
     }
+
+    authorName = await stripHtml(authorName);
+    authorAbout = await stripHtml(authorAbout);
 
     const feed = new RSS({
       title: `${authorName}'s Nostr Feed`,
@@ -202,7 +227,7 @@ export async function GET(request: NextRequest) {
     });
 
     for (const event of events) {
-      const title = event.tags.find((t: string[]) => t[0] === 'title')?.[1] || 'Untitled';
+      const rawTitle = event.tags.find((t: string[]) => t[0] === 'title')?.[1] || 'Untitled';
       const published = event.tags.find((t: string[]) => t[0] === 'published_at')?.[1];
       const summary = event.tags.find((t: string[]) => t[0] === 'summary')?.[1];
       const dTag = event.tags.find((t: string[]) => t[0] === 'd')?.[1];
@@ -231,9 +256,14 @@ export async function GET(request: NextRequest) {
         articleUrl = `https://njump.me/${nevent}`;
       }
 
+      const title = await stripHtml(rawTitle);
+      const description = summary
+        ? await stripHtml(summary)
+        : (await stripHtml(fullContent.slice(0, 1000))).slice(0, 300) + '...';
+
       feed.item({
         title: title,
-        description: summary || fullContent.slice(0, 300) + '...',
+        description: description,
         url: articleUrl,
         guid: event.id,
         author: authorName,
