@@ -102,7 +102,7 @@ model UserPreference {
     userPubkey      String   @unique // Nostr pubkey
     organizationMode String  @default("tags") // "tags" or "categories"
     nostrRelays     String[] @default([])
-    lastSubscriptionSyncCreatedAt Int? // created_at (unix seconds) of last applied subscription sync event
+    lastSubscriptionSyncCreatedAt BigInt? // created_at (unix seconds) of last applied subscription sync event
     createdAt       DateTime @default(now())
     updatedAt       DateTime @updatedAt
     
