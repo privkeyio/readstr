@@ -50,16 +50,22 @@ let activeBunkerRelays: string[] = []
 // All signer construction is serialized behind this single in-flight promise so
 // concurrent callers (lazy-init, restore, connect) never build competing pools.
 let bunkerInitPromise: Promise<BunkerSigner> | null = null
+// Bumped by disconnect so an in-flight init can detect it was torn down and
+// dispose the signer it built instead of installing a dead session.
+let bunkerGeneration = 0
 
-const closeActiveBunker = async () => {
-  // Claim the refs synchronously before the first await so a signer built by a
-  // concurrent reconnect can't be clobbered by this close finishing late.
-  const signer = activeBunkerSigner
-  const pool = activeBunkerPool
-  const relays = activeBunkerRelays
-  activeBunkerSigner = null
-  activeBunkerPool = null
-  activeBunkerRelays = []
+// Closes a specific signer/pool, clearing the module refs only if they still
+// point at it, so cleaning up a superseded build never tears down a newer one.
+const disposeSigner = async (
+  signer: BunkerSigner | null,
+  pool: SimplePool | null,
+  relays: string[],
+) => {
+  if (activeBunkerSigner === signer) activeBunkerSigner = null
+  if (activeBunkerPool === pool) {
+    activeBunkerPool = null
+    activeBunkerRelays = []
+  }
   if (signer) {
     try {
       await signer.close()
@@ -76,7 +82,21 @@ const closeActiveBunker = async () => {
   }
 }
 
-const buildBunkerSigner = (session: StoredNip46Session): BunkerSigner => {
+const closeActiveBunker = async () => {
+  // Claim the refs synchronously before the first await so a signer built by a
+  // concurrent reconnect can't be clobbered by this close finishing late.
+  const signer = activeBunkerSigner
+  const pool = activeBunkerPool
+  const relays = activeBunkerRelays
+  activeBunkerSigner = null
+  activeBunkerPool = null
+  activeBunkerRelays = []
+  await disposeSigner(signer, pool, relays)
+}
+
+const buildBunkerSigner = (
+  session: StoredNip46Session,
+): { signer: BunkerSigner; pool: SimplePool; relays: string[] } => {
   const pool = new SimplePool()
   const csk = hexToBytes(session.clientSecretKey)
   const signer = BunkerSigner.fromBunker(csk, session.bunker, {
@@ -95,18 +115,29 @@ const buildBunkerSigner = (session: StoredNip46Session): BunkerSigner => {
   activeBunkerSigner = signer
   activeBunkerPool = pool
   activeBunkerRelays = session.bunker.relays
-  return signer
+  return { signer, pool, relays: session.bunker.relays }
 }
 
 // The single owner of signer construction. Closes any existing signer before
 // building a replacement, connects with a timeout, and dedupes concurrent calls.
+// Disposes its own build on connect failure or if disconnect superseded it.
 const ensureBunkerSigner = (session: StoredNip46Session): Promise<BunkerSigner> => {
   if (!bunkerInitPromise) {
+    const generation = bunkerGeneration
     bunkerInitPromise = (async () => {
       await closeActiveBunker()
-      const signer = buildBunkerSigner(session)
-      await withTimeout(signer.connect(), NIP46_TIMEOUT_MS, 'NIP-46 connect')
-      return signer
+      const built = buildBunkerSigner(session)
+      try {
+        await withTimeout(built.signer.connect(), NIP46_TIMEOUT_MS, 'NIP-46 connect')
+      } catch (error) {
+        await disposeSigner(built.signer, built.pool, built.relays)
+        throw error
+      }
+      if (bunkerGeneration !== generation) {
+        await disposeSigner(built.signer, built.pool, built.relays)
+        throw new Error('NIP-46 connection superseded')
+      }
+      return built.signer
     })()
   }
   const inFlight = bunkerInitPromise
@@ -188,8 +219,8 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
             localStorage.removeItem('nostr_session')
           }
         } else if (sessionData.method === 'nip46') {
+          const stored = sessionData as StoredNip46Session
           try {
-            const stored = sessionData as StoredNip46Session
             const signer = await ensureBunkerSigner(stored)
             const pubkey = await withTimeout(signer.getPublicKey(), NIP46_TIMEOUT_MS, 'NIP-46 getPublicKey')
             if (pubkey !== stored.pubkey) {
@@ -202,8 +233,20 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
             return
           } catch (error) {
             debugLog('NIP-46 session restore failed, clearing session:', error)
-            await closeActiveBunker()
-            localStorage.removeItem('nostr_session')
+            // ensureBunkerSigner already disposed its own build. Only clear the
+            // stored session if it's still the one we tried to restore — a fresh
+            // connect/disconnect may have replaced it while we were connecting.
+            const current = localStorage.getItem('nostr_session')
+            if (current) {
+              try {
+                const parsed = JSON.parse(current) as StoredNip46Session
+                if (parsed.method === 'nip46' && parsed.clientSecretKey === stored.clientSecretKey) {
+                  localStorage.removeItem('nostr_session')
+                }
+              } catch {
+                localStorage.removeItem('nostr_session')
+              }
+            }
           }
         } else if (sessionData.method === 'npub_readonly' && sessionData.pubkey) {
           // Restore read-only npub session
@@ -296,6 +339,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
     }
 
     const run = async () => {
+      const generation = bunkerGeneration
       const bp = await parseBunkerInput(bunkerUri)
       if (!bp) {
         throw new Error('Invalid bunker URL')
@@ -315,6 +359,9 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
       try {
         builtSigner = await ensureBunkerSigner(session)
         const pubkey = await withTimeout(builtSigner.getPublicKey(), NIP46_TIMEOUT_MS, 'NIP-46 getPublicKey')
+        if (bunkerGeneration !== generation) {
+          throw new Error('NIP-46 connection superseded')
+        }
         const npub = nip19.npubEncode(pubkey)
 
         session.pubkey = pubkey
@@ -372,8 +419,10 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
   }
 
   const disconnect = () => {
-    // Abandon any in-flight init and close synchronously-claimed refs so an
-    // immediate reconnect can't interleave with this teardown.
+    // Supersede any in-flight init (so it disposes its own build instead of
+    // installing a dead session), abandon its promise, and close the active
+    // signer so an immediate reconnect can't interleave with this teardown.
+    bunkerGeneration++
     bunkerInitPromise = null
     void closeActiveBunker()
     setIsConnected(false)
