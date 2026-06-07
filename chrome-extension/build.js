@@ -5,12 +5,11 @@ const path = require('path');
 const isWatch = process.argv.includes('--watch');
 const isDev = process.env.EXTENSION_DEV === '1';
 const devPort = process.env.EXTENSION_DEV_PORT || '3000';
-const devMatchPatterns = isDev
-  ? [`http://localhost:${devPort}/*`, `http://127.0.0.1:${devPort}/*`]
-  : [];
-const devTrustedHosts = isDev
-  ? [`localhost:${devPort}`, `127.0.0.1:${devPort}`]
-  : [];
+if (isDev && !/^\d+$/.test(devPort)) {
+  throw new Error(`EXTENSION_DEV_PORT must be numeric, got: ${devPort}`);
+}
+const devTrustedHosts = isDev ? [`localhost:${devPort}`, `127.0.0.1:${devPort}`] : [];
+const devMatchPatterns = devTrustedHosts.map((host) => `http://${host}/*`);
 const distDir = path.join(__dirname, 'dist');
 const publicDir = path.join(__dirname, 'public');
 

@@ -7,7 +7,8 @@ import type { UnsignedEvent, NostrEvent } from './nostr';
 
 const SIGN_TIMEOUT_MS = 20000;
 
-function isTrustedHost(hostname: string): boolean {
+function isTrustedHost(): boolean {
+  const hostname = window.location.hostname;
   if (hostname === 'readstr.privkey.io' || hostname.endsWith('.readstr.privkey.io')) {
     return true;
   }
@@ -20,8 +21,7 @@ function generateId(): string {
 
 // Check if we're on readstr.privkey.io and sync auth with extension
 async function syncAuthFromWebApp(): Promise<void> {
-  const hostname = window.location.hostname;
-  if (!isTrustedHost(hostname)) {
+  if (!isTrustedHost()) {
     return;
   }
 
@@ -50,8 +50,7 @@ async function syncAuthFromWebApp(): Promise<void> {
 
 // Watch for auth changes in localStorage
 function watchAuthChanges(): void {
-  const hostname = window.location.hostname;
-  if (!isTrustedHost(hostname)) {
+  if (!isTrustedHost()) {
     return;
   }
 
@@ -115,7 +114,7 @@ function requestPageSignature(unsignedEvent: UnsignedEvent): Promise<NostrEvent>
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'SIGN_NIP98') {
-    if (!isTrustedHost(window.location.hostname)) {
+    if (!isTrustedHost()) {
       sendResponse({ error: 'Untrusted host' });
       return true;
     }
@@ -126,8 +125,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
     return true;
   } else if (message.type === 'GET_SESSION') {
-    const hostname = window.location.hostname;
-    if (!isTrustedHost(hostname)) {
+    if (!isTrustedHost()) {
       sendResponse({ session: null });
       return true;
     }
