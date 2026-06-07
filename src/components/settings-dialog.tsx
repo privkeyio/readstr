@@ -118,7 +118,7 @@ const CATEGORY_COLORS = [
 const CATEGORY_ICONS = ['📁', '📰', '🎬', '🎵', '💼', '🎮', '📚', '🔬', '💡', '🌍', '⚡', '🎯']
 
 export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds }: SettingsDialogProps) {
-  const { user, authMethod, signEventOrThrow } = useNostrAuth()
+  const { user, canSign, signEventOrThrow } = useNostrAuth()
   const [activeTab, setActiveTab] = useState<SettingsTab>('relays')
   const [relays, setRelays] = useState<Relay[]>([])
   const [newRelayUrl, setNewRelayUrl] = useState('')
@@ -205,8 +205,8 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
 
   // Export subscriptions to Nostr
   const handleExportToNostr = async () => {
-    if (authMethod !== 'nip07' || !user?.pubkey) {
-      alert('Connect with a Nostr browser extension (NIP-07) to sync.')
+    if (!canSign || !user?.pubkey) {
+      alert('Connect with a Nostr signer (browser extension or remote signer) to sync.')
       return
     }
 

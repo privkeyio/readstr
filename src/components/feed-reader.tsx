@@ -57,7 +57,7 @@ const QUICK_MARK_READ_OPTIONS: { value: MarkReadBehavior; label: string; helper:
 ]
 
 export function FeedReader() {
-  const { user, disconnect, authMethod, signEventOrThrow } = useNostrAuth()
+  const { user, disconnect, canSign, signEventOrThrow } = useNostrAuth()
   const { theme } = useTheme()
   const router = useRouter()
   const utils = api.useUtils()
@@ -724,8 +724,8 @@ export function FeedReader() {
 
   // Handle sharing to Nostr
   const handleShareToNostr = async (item: FeedItem, originalUrl: string | null | undefined) => {
-    if (authMethod !== 'nip07' || !user?.pubkey) {
-      alert('Connect with a Nostr browser extension (NIP-07) to share posts.')
+    if (!canSign || !user?.pubkey) {
+      alert('Connect with a Nostr signer (browser extension or remote signer) to share posts.')
       return
     }
 
@@ -776,7 +776,7 @@ export function FeedReader() {
   // Auto-export subscriptions to Nostr after changes
   const autoExportToNostr = useCallback(async () => {
     // Only auto-export if signing is available through the active auth method
-    if (authMethod !== 'nip07' || !user?.npub) {
+    if (!canSign || !user?.npub) {
       return
     }
 
@@ -799,7 +799,7 @@ export function FeedReader() {
       console.error('❌ Auto-export error:', error)
       // Silently fail - don't interrupt user experience
     }
-  }, [user?.npub, authMethod, signEventOrThrow, utils.feed])
+  }, [user?.npub, canSign, signEventOrThrow, utils.feed])
 
   // Handle importing feeds from Nostr sync
   const handleImportFeeds = async (feedsToImport: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => {
