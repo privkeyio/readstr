@@ -1,5 +1,7 @@
 // Video platform detection and parsing utilities
 
+import { safeFetch } from './safe-fetch'
+
 export type VideoPlatform = 'youtube' | 'rumble' | 'unknown'
 
 export interface VideoMetadata {
@@ -175,7 +177,7 @@ export function getRumbleFeedUrl(channelUrl: string): string | null {
  */
 export async function discoverYouTubeChannelId(channelUrl: string): Promise<string | null> {
   try {
-    const response = await fetch(channelUrl, {
+    const response = await safeFetch(channelUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       },
