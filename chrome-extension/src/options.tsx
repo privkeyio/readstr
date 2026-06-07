@@ -2,6 +2,7 @@ import { StrictMode, useState, useEffect, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { LocalFeed, SyncSettings, ExtensionSettings, Feed, NostrAuthData } from './types';
 import { isValidNsec } from './nostr';
+import { validateWebAppUrl } from './utils/webAppUrl';
 
 const DEFAULT_SYNC_SETTINGS: SyncSettings = {
   webAppUrl: 'https://readstr.privkey.io:8444',
@@ -330,6 +331,20 @@ function App() {
     showToast('Settings saved', 'success');
   };
 
+  const handleWebAppUrlChange = (value: string) => {
+    setSyncSettings((prev) => ({ ...prev, webAppUrl: value }));
+  };
+
+  const handleWebAppUrlBlur = async () => {
+    const url = syncSettings.webAppUrl.trim();
+    if (!validateWebAppUrl(url)) {
+      showToast('Enter a valid https URL (http allowed only for localhost)', 'error');
+      return;
+    }
+    await saveSyncSettings({ ...syncSettings, webAppUrl: url });
+    showToast('Settings saved', 'success');
+  };
+
   const handleNostrLogin = async () => {
     const nsec = nsecInput.trim();
     if (!nsec) {
@@ -632,7 +647,8 @@ function App() {
           <input
             type="url"
             value={syncSettings.webAppUrl}
-            onChange={(e) => void handleSettingChange('webAppUrl', e.target.value)}
+            onChange={(e) => handleWebAppUrlChange(e.target.value)}
+            onBlur={() => void handleWebAppUrlBlur()}
             placeholder="https://readstr.privkey.io:8444"
           />
           <p className="form-hint">URL of your Readstr instance (for self-hosted)</p>
