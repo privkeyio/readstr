@@ -1,4 +1,5 @@
 import { SimplePool, Event, Filter, nip19 } from 'nostr-tools'
+import { safeFetch } from './safe-fetch'
 
 export interface NostrLongFormPost {
   id: string // event id
@@ -408,19 +409,22 @@ export class NostrFeedFetcher {
   // Verify NIP-05 address
   async verifyNip05(nip05: string, pubkey: string): Promise<boolean> {
     try {
-      if (!nip05.includes('@')) return false
+      const parts = nip05.split('@')
+      if (parts.length !== 2) return false
+
+      const [name, domain] = parts
+      if (!name || !domain) return false
+
+      const url = `https://${domain}/.well-known/nostr.json?name=${encodeURIComponent(name)}`
       
-      const [name, domain] = nip05.split('@')
-      const url = `https://${domain}/.well-known/nostr.json?name=${name}`
-      
-      const response = await fetch(url, {
+      const response = await safeFetch(url, {
         headers: { 'Accept': 'application/json' },
         signal: AbortSignal.timeout(5000), // 5 second timeout
       })
-      
+
       if (!response.ok) return false
-      
-      const data = await response.json()
+
+      const data = JSON.parse(await response.text())
       return data.names?.[name] === pubkey
     } catch (error) {
       return false
