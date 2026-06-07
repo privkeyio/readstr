@@ -157,6 +157,7 @@ export interface SafeResponse {
   statusText: string
   headers: Headers
   text: () => Promise<string>
+  cancel: () => Promise<void>
 }
 
 export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise<SafeResponse> {
@@ -169,19 +170,20 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise
 
     if (response.status >= 300 && response.status < 400 && response.headers.has('location')) {
       const location = response.headers.get('location') as string
-      await response.body?.cancel()
+      await response.body?.cancel().catch(() => {})
       currentUrl = new URL(location, currentUrl).href
       continue
     }
 
     if (!response.ok) {
-      await response.body?.cancel()
+      await response.body?.cancel().catch(() => {})
       return {
         ok: response.ok,
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,
         text: async () => '',
+        cancel: async () => {},
       }
     }
 
@@ -191,6 +193,9 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise
       statusText: response.statusText,
       headers: response.headers,
       text: () => readCappedText(response),
+      cancel: async () => {
+        await response.body?.cancel().catch(() => {})
+      },
     }
   }
 
