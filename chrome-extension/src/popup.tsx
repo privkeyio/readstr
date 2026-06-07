@@ -16,6 +16,12 @@ interface RecentItem extends FeedItem {
   feedId: string;
 }
 
+interface DetectedFeed {
+  url: string;
+  title: string;
+  type: string;
+}
+
 function formatTimeAgo(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
@@ -131,6 +137,10 @@ function App() {
   const [showStats, setShowStats] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [pollIntervalMinutes, setPollIntervalMinutes] = useState(5);
+  const [detectedFeeds, setDetectedFeeds] = useState<DetectedFeed[]>([]);
+  const [detectedSource, setDetectedSource] = useState<string>('');
+  const [selectedDetected, setSelectedDetected] = useState<Set<string>>(new Set());
+  const [subscribingDetected, setSubscribingDetected] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const syncStatusTimeoutRef = useRef<number | null>(null);
 
@@ -188,6 +198,25 @@ function App() {
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const result = await chrome.storage.session.get('pendingDetectedFeeds');
+        const pending = result['pendingDetectedFeeds'] as
+          | { feeds: DetectedFeed[]; sourceTitle?: string; sourceUrl?: string }
+          | undefined;
+        if (pending?.feeds?.length) {
+          setDetectedFeeds(pending.feeds);
+          setDetectedSource(pending.sourceTitle || pending.sourceUrl || '');
+          setSelectedDetected(new Set(pending.feeds.map((f) => f.url)));
+        }
+        await chrome.storage.session.remove('pendingDetectedFeeds');
+      } catch (err) {
+        console.error('Failed to load detected feeds:', err);
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     chrome.runtime.sendMessage({ type: 'REFRESH_FEEDS', forceSync: false })
@@ -433,6 +462,45 @@ function App() {
     }
   };
 
+  const toggleDetected = (url: string) => {
+    setSelectedDetected((prev) => {
+      const next = new Set(prev);
+      if (next.has(url)) {
+        next.delete(url);
+      } else {
+        next.add(url);
+      }
+      return next;
+    });
+  };
+
+  const closeDetected = () => {
+    setDetectedFeeds([]);
+    setSelectedDetected(new Set());
+    setDetectedSource('');
+  };
+
+  const handleSubscribeSelected = async () => {
+    const chosen = detectedFeeds.filter((f) => selectedDetected.has(f.url));
+    if (chosen.length === 0) {
+      closeDetected();
+      return;
+    }
+    setSubscribingDetected(true);
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'SUBSCRIBE_SELECTED_FEEDS',
+        feeds: chosen.map((f) => ({ url: f.url, title: f.title })),
+      });
+      await loadData();
+      closeDetected();
+    } catch (err) {
+      console.error('Failed to subscribe selected feeds:', err);
+    } finally {
+      setSubscribingDetected(false);
+    }
+  };
+
   useEffect(() => {
     if (view === 'favorites') {
       void loadFavorites();
@@ -491,6 +559,47 @@ function App() {
 
   return (
     <div className="container" ref={containerRef}>
+      {detectedFeeds.length > 0 && (
+        <div className="stats-overlay">
+          <div className="stats-modal">
+            <div className="stats-header">
+              <h3>Choose feeds to subscribe</h3>
+              <button className="stats-close" onClick={() => closeDetected()} aria-label="Cancel">
+                ✕
+              </button>
+            </div>
+            {detectedSource && <p className="detected-source">From: {detectedSource}</p>}
+            <div className="detected-list">
+              {detectedFeeds.map((feed) => (
+                <label key={feed.url} className="detected-item">
+                  <input
+                    type="checkbox"
+                    checked={selectedDetected.has(feed.url)}
+                    onChange={() => toggleDetected(feed.url)}
+                  />
+                  <span className="detected-info">
+                    <span className="detected-title">{feed.title}</span>
+                    <span className="detected-url">{feed.url}</span>
+                  </span>
+                  <span className="detected-type">{feed.type}</span>
+                </label>
+              ))}
+            </div>
+            <div className="actions">
+              <button className="btn btn-secondary" onClick={() => closeDetected()} disabled={subscribingDetected}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={() => void handleSubscribeSelected()}
+                disabled={subscribingDetected || selectedDetected.size === 0}
+              >
+                {subscribingDetected ? 'Subscribing…' : `Subscribe selected (${selectedDetected.size})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <header className="header">
         <h1>Readstr</h1>
         {totalUnread > 0 && <span className="badge total-badge">{totalUnread}</span>}
