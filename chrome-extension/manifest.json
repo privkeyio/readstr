@@ -16,8 +16,7 @@
   ],
   "host_permissions": [
     "*://readstr.privkey.io/*",
-    "*://*.readstr.privkey.io/*",
-    "*://localhost/*"
+    "*://*.readstr.privkey.io/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -45,8 +44,7 @@
     {
       "matches": [
         "*://readstr.privkey.io/*",
-        "*://*.readstr.privkey.io/*",
-        "*://localhost/*"
+        "*://*.readstr.privkey.io/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"
@@ -54,8 +52,7 @@
     {
       "matches": [
         "*://readstr.privkey.io/*",
-        "*://*.readstr.privkey.io/*",
-        "*://localhost/*"
+        "*://*.readstr.privkey.io/*"
       ],
       "js": ["page-signer.js"],
       "world": "MAIN",
