@@ -92,10 +92,16 @@ function ipv6ToBlocked(ip: string): boolean {
   if (groupsAreZero(groups, 0, 5) && groups[5] === 0xffff) {
     return ipv4ToBlocked(groupsToIpv4(groups[6], groups[7]))
   }
+  // IPv4-translated ::ffff:0:0/96 (RFC 2765)
+  if (groupsAreZero(groups, 0, 4) && groups[4] === 0xffff && groups[5] === 0) {
+    return ipv4ToBlocked(groupsToIpv4(groups[6], groups[7]))
+  }
   // NAT64 64:ff9b::/96 — embedded IPv4 in the final two groups
   if (groups[0] === 0x0064 && groups[1] === 0xff9b && groupsAreZero(groups, 2, 6)) {
     return ipv4ToBlocked(groupsToIpv4(groups[6], groups[7]))
   }
+  // NAT64 local-use prefix 64:ff9b:1::/48 (RFC 8215)
+  if (groups[0] === 0x0064 && groups[1] === 0xff9b && groups[2] === 0x0001) return true
   // 6to4 2002::/16 — embedded IPv4 in the two groups after the 2002 prefix
   if (groups[0] === 0x2002) {
     return ipv4ToBlocked(groupsToIpv4(groups[1], groups[2]))
