@@ -19,6 +19,7 @@ import {
 } from './nostr';
 import type { NostrEvent, UnsignedEvent } from './nostr';
 import { withRetry } from './utils/retry';
+import { validateWebAppUrl, normalizeWebAppUrl, isSameOrigin } from './utils/webAppUrl';
 import { feedDatabase } from './db/feedDatabase';
 
 const ALARM_NAME = 'refresh-feeds';
@@ -39,8 +40,7 @@ function sanitizeUrl(urlString: string): string | null {
 }
 
 function normalizeBaseUrl(urlString: string): string | null {
-  const sanitized = sanitizeUrl(urlString);
-  return sanitized ? sanitized.replace(/\/+$/, '') : null;
+  return normalizeWebAppUrl(urlString);
 }
 
 const defaultSettings: ExtensionSettings = {
@@ -221,8 +221,38 @@ async function getNostrAuthHeader(
   return null;
 }
 
+// Attach credentials only when the request targets the validated web app
+// origin. authToken is a plaintext bearer; if webAppUrl is ever pointed at an
+// attacker host (synced/tampered settings, self-XSS) this guard fails closed
+// instead of leaking the token. baseUrl is always normalizeBaseUrl(webAppUrl).
+async function applyAuthHeaders(
+  headers: Record<string, string>,
+  url: string,
+  baseUrl: string,
+  method: string,
+  authToken: string | null,
+  nostrAuth: NostrAuthData | null,
+  body: string | null = null
+): Promise<void> {
+  if (!isSameOrigin(url, baseUrl)) {
+    throw new Error('Refusing to send credentials to an untrusted origin');
+  }
+
+  if (authToken) {
+    headers['Authorization'] = `Bearer ${authToken}`;
+  } else if (nostrAuth && nostrAuth.pubkey) {
+    // Authenticate via signed NIP-98 event; the server derives identity from
+    // the verified signature, not from any plaintext pubkey header.
+    const nostrHeader = await getNostrAuthHeader(url, method, nostrAuth, body);
+    if (nostrHeader) {
+      headers['Authorization'] = nostrHeader;
+    }
+  }
+}
+
 async function fetchWithAuth<T>(
   url: string,
+  baseUrl: string,
   authToken: string | null,
   options: RequestInit = {},
   nostrAuth: NostrAuthData | null = null
@@ -232,16 +262,7 @@ async function fetchWithAuth<T>(
     ...(options.headers as Record<string, string> | undefined),
   };
 
-  if (authToken) {
-    headers['Authorization'] = `Bearer ${authToken}`;
-  } else if (nostrAuth && nostrAuth.pubkey) {
-    // Authenticate via signed NIP-98 event; the server derives identity from
-    // the verified signature, not from any plaintext pubkey header.
-    const nostrHeader = await getNostrAuthHeader(url, options.method ?? 'GET', nostrAuth);
-    if (nostrHeader) {
-      headers['Authorization'] = nostrHeader;
-    }
-  }
+  await applyAuthHeaders(headers, url, baseUrl, options.method ?? 'GET', authToken, nostrAuth);
 
   const response = await fetch(url, {
     ...options,
@@ -272,6 +293,7 @@ async function fetchFeeds(
   return withRetry(async () => {
     const response = await fetchWithAuth<{ result: { data: { json: FeedsResponse[] } } }>(
       url,
+      baseUrl,
       authToken,
       {},
       nostrAuth
@@ -308,6 +330,7 @@ async function fetchNewItems(
     const data = await withRetry(async () => {
       const response = await fetchWithAuth<{ result: { data: { json: FeedItemsResponse } } }>(
         url,
+        baseUrl,
         authToken,
         {},
         nostrAuth
@@ -344,15 +367,7 @@ async function markItemAsRead(itemId: string): Promise<void> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-
-  if (authToken) {
-    headers['Authorization'] = `Bearer ${authToken}`;
-  } else if (nostrAuth && nostrAuth.pubkey) {
-    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth, body);
-    if (nostrHeader) {
-      headers['Authorization'] = nostrHeader;
-    }
-  }
+  await applyAuthHeaders(headers, url, baseUrl, 'POST', authToken, nostrAuth, body);
 
   await fetch(url, {
     method: 'POST',
@@ -377,15 +392,7 @@ async function markAllAsRead(): Promise<void> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-
-  if (authToken) {
-    headers['Authorization'] = `Bearer ${authToken}`;
-  } else if (nostrAuth && nostrAuth.pubkey) {
-    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth, body);
-    if (nostrHeader) {
-      headers['Authorization'] = nostrHeader;
-    }
-  }
+  await applyAuthHeaders(headers, url, baseUrl, 'POST', authToken, nostrAuth, body);
 
   await fetch(url, {
     method: 'POST',
@@ -413,15 +420,7 @@ async function addFavorite(itemId: string): Promise<void> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-
-  if (authToken) {
-    headers['Authorization'] = `Bearer ${authToken}`;
-  } else if (nostrAuth && nostrAuth.pubkey) {
-    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth, body);
-    if (nostrHeader) {
-      headers['Authorization'] = nostrHeader;
-    }
-  }
+  await applyAuthHeaders(headers, url, baseUrl, 'POST', authToken, nostrAuth, body);
 
   await fetch(url, {
     method: 'POST',
@@ -446,15 +445,7 @@ async function removeFavorite(itemId: string): Promise<void> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-
-  if (authToken) {
-    headers['Authorization'] = `Bearer ${authToken}`;
-  } else if (nostrAuth && nostrAuth.pubkey) {
-    const nostrHeader = await getNostrAuthHeader(url, 'POST', nostrAuth, body);
-    if (nostrHeader) {
-      headers['Authorization'] = nostrHeader;
-    }
-  }
+  await applyAuthHeaders(headers, url, baseUrl, 'POST', authToken, nostrAuth, body);
 
   await fetch(url, {
     method: 'POST',
@@ -480,6 +471,7 @@ async function fetchFavorites(
   return withRetry(async () => {
     const response = await fetchWithAuth<{ result: { data: { json: { items: FeedItem[] } } } }>(
       url,
+      baseUrl,
       authToken,
       {},
       nostrAuth
@@ -943,6 +935,9 @@ async function handleMessage(
 
     case 'UPDATE_SETTINGS': {
       const newSettings = message['settings'] as Partial<ExtensionSettings>;
+      if (newSettings.webAppUrl !== undefined && !validateWebAppUrl(newSettings.webAppUrl)) {
+        return { success: false, error: 'Invalid web app URL' };
+      }
       const storage = await getStorageData();
       const updatedSettings = { ...storage.settings, ...newSettings };
       await saveStorageData({ settings: updatedSettings });
@@ -1162,15 +1157,7 @@ async function addFeedToStorage(feedUrl: string, feedTitle: string, notify = tru
           },
         });
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-
-        if (storage.authToken) {
-          headers['Authorization'] = `Bearer ${storage.authToken}`;
-        } else if (storage.nostrAuth?.pubkey) {
-          const nostrHeader = await getNostrAuthHeader(url, 'POST', storage.nostrAuth, body);
-          if (nostrHeader) {
-            headers['Authorization'] = nostrHeader;
-          }
-        }
+        await applyAuthHeaders(headers, url, baseUrl, 'POST', storage.authToken, storage.nostrAuth, body);
 
         await fetch(url, {
           method: 'POST',
@@ -1288,7 +1275,7 @@ chrome.notifications.onClicked.addListener((notificationId) => {
         void markItemAsRead(data.itemId);
       }
     } else {
-      const appUrl = sanitizeUrl(storage.settings.webAppUrl);
+      const appUrl = normalizeBaseUrl(storage.settings.webAppUrl);
       if (appUrl) {
         await chrome.tabs.create({ url: appUrl });
       }
@@ -1306,7 +1293,7 @@ chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) =
 
     if (data === 'batch') {
       if (buttonIndex === 0) {
-        const appUrl = sanitizeUrl(storage.settings.webAppUrl);
+        const appUrl = normalizeBaseUrl(storage.settings.webAppUrl);
         if (appUrl) {
           await chrome.tabs.create({ url: appUrl });
         }

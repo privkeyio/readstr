@@ -2,6 +2,7 @@ import { StrictMode, useState, useEffect, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { LocalFeed, SyncSettings, ExtensionSettings, Feed, NostrAuthData } from './types';
 import { isValidNsec } from './nostr';
+import { normalizeWebAppUrl } from './utils/webAppUrl';
 
 const DEFAULT_SYNC_SETTINGS: SyncSettings = {
   webAppUrl: 'https://readstr.privkey.io:8444',
@@ -180,24 +181,30 @@ function App() {
     setLocalFeeds(feeds);
   };
 
-  const saveSyncSettings = async (settings: SyncSettings) => {
-    await chrome.storage.sync.set({ syncSettings: settings });
+  const saveSyncSettings = async (settings: SyncSettings): Promise<boolean> => {
+    const normalizedUrl = normalizeWebAppUrl(settings.webAppUrl);
+    if (!normalizedUrl) {
+      return false;
+    }
+    const normalized = { ...settings, webAppUrl: normalizedUrl };
+    await chrome.storage.sync.set({ syncSettings: normalized });
     const existingSettings = await chrome.storage.local.get(['settings']);
     const current = existingSettings['settings'] as ExtensionSettings | undefined;
     await chrome.storage.local.set({
       settings: {
-        webAppUrl: settings.webAppUrl,
-        pollIntervalMinutes: settings.pollIntervalMinutes,
-        notificationsEnabled: settings.notificationsEnabled,
-        notifyOnNewItems: settings.notifyOnNewItems,
-        maxNotificationsPerRefresh: settings.maxNotificationsPerRefresh,
+        webAppUrl: normalized.webAppUrl,
+        pollIntervalMinutes: normalized.pollIntervalMinutes,
+        notificationsEnabled: normalized.notificationsEnabled,
+        notifyOnNewItems: normalized.notifyOnNewItems,
+        maxNotificationsPerRefresh: normalized.maxNotificationsPerRefresh,
         lastSyncTime: current?.lastSyncTime ?? null,
         theme: current?.theme ?? 'system',
         showUnreadOnly: current?.showUnreadOnly ?? false,
       } satisfies ExtensionSettings,
     });
-    setSyncSettings(settings);
-    await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings });
+    setSyncSettings(normalized);
+    await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: normalized });
+    return true;
   };
 
   const handleAddFeed = async () => {
@@ -326,7 +333,23 @@ function App() {
 
   const handleSettingChange = async (key: keyof SyncSettings, value: string | number | boolean) => {
     const updated = { ...syncSettings, [key]: value };
-    await saveSyncSettings(updated);
+    if (!(await saveSyncSettings(updated))) {
+      showToast('Enter a valid https URL (http allowed only for localhost)', 'error');
+      return;
+    }
+    showToast('Settings saved', 'success');
+  };
+
+  const handleWebAppUrlChange = (value: string) => {
+    setSyncSettings((prev) => ({ ...prev, webAppUrl: value }));
+  };
+
+  const handleWebAppUrlBlur = async () => {
+    const url = syncSettings.webAppUrl.trim();
+    if (!(await saveSyncSettings({ ...syncSettings, webAppUrl: url }))) {
+      showToast('Enter a valid https URL (http allowed only for localhost)', 'error');
+      return;
+    }
     showToast('Settings saved', 'success');
   };
 
@@ -632,7 +655,8 @@ function App() {
           <input
             type="url"
             value={syncSettings.webAppUrl}
-            onChange={(e) => void handleSettingChange('webAppUrl', e.target.value)}
+            onChange={(e) => handleWebAppUrlChange(e.target.value)}
+            onBlur={() => void handleWebAppUrlBlur()}
             placeholder="https://readstr.privkey.io:8444"
           />
           <p className="form-hint">URL of your Readstr instance (for self-hosted)</p>
