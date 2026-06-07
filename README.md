@@ -81,7 +81,7 @@ Readstr is a full-stack web application built with Next.js that provides a unifi
 
 ### Authentication
 - **NIP-07** signing via browser extensions (nos2x, Alby, etc.) on desktop
-- **NIP-46 remote signing (Nostr Connect)** — pair a remote signer with a `bunker://` connection string, including **NIP-55 mobile signers like Amber** on Android and other browsers without an extension
+- **NIP-46 remote signing (Nostr Connect)** — pair a remote signer such as Amber with a `bunker://` connection string, for Android and other browsers without an extension
 - Read-only npub view for browsing without a signer
 - No centralized account system — your npub is your identity
 
