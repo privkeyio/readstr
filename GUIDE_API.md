@@ -131,17 +131,17 @@ This is a **web page** (not JSON API) for handling deep-link subscriptions from 
 
 **Query Parameters:**
 
-| Parameter  | Type   | Description                           |
-|------------|--------|---------------------------------------|
-| `npub`     | string | Nostr pubkey to subscribe to          |
-| `url`      | string | RSS feed URL to subscribe to          |
-| `callback` | string | Optional callback URL after subscription |
+| Parameter | Type   | Description                                                                                  |
+|-----------|--------|----------------------------------------------------------------------------------------------|
+| `npub`    | string | **Required.** The guide feed's Nostr pubkey to subscribe to. Missing → error "Missing npub parameter". |
+| `tags`    | string | Optional comma-separated tags. Falls back to the guide feed's own tags when omitted.          |
+| `return`  | string | Optional same-origin path to redirect to after subscribing. Must start with a single `/` (e.g. `/reader`). Off-origin URLs, protocol-relative `//host`, and custom schemes are rejected and fall back to `/reader`. |
 
 **Behavior:**
 
-1. If user is logged in → Add subscription and redirect to reader
+1. If user is logged in → Add subscription and redirect to the `return` path
 2. If user is not logged in → Show login prompt, then subscribe
-3. After success → Redirect to `callback` URL or reader page
+3. After success → Redirect to the sanitized same-origin `return` path, defaulting to `/reader`
 
 **Implementation Notes:**
 
@@ -208,7 +208,7 @@ const headers = {
                       │
                       ▼
 ┌─────────────────────────────────────────────────┐
-│  Browser: readstr.privkey.io/subscribe?url=...      │
+│  Browser: readstr.privkey.io/subscribe?npub=...     │
 │  ┌─────────────────────────────────────────────┐│
 │  │       Subscribe to Bitcoin Magazine          ││
 │  │                                              ││
@@ -229,20 +229,14 @@ const headers = {
 
 ## Native App Integration Examples
 
+A native app simply opens the subscribe URL in the browser. There is **no app-scheme callback**: the `/subscribe` page only accepts `npub`, optional `tags`, and an optional same-origin `return` path. Custom schemes like `myapp://subscribed` are rejected by the page and fall back to `/reader`, so do not pass them.
+
 ### iOS Swift
 
 ```swift
 func subscribeToFeed(npub: String) {
-    let subscribeUrl = "https://readstr.privkey.io/subscribe?npub=\(npub)&callback=myapp://subscribed"
+    let subscribeUrl = "https://readstr.privkey.io/subscribe?npub=\(npub)&return=/reader"
     UIApplication.shared.open(URL(string: subscribeUrl)!)
-}
-
-// Handle callback
-func application(_ app: UIApplication, open url: URL, options: ...) -> Bool {
-    if url.scheme == "myapp" && url.host == "subscribed" {
-        // Show success message
-    }
-    return true
 }
 ```
 
@@ -251,7 +245,7 @@ func application(_ app: UIApplication, open url: URL, options: ...) -> Bool {
 ```kotlin
 fun subscribeToFeed(npub: String) {
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(
-        "https://readstr.privkey.io/subscribe?npub=$npub&callback=myapp://subscribed"
+        "https://readstr.privkey.io/subscribe?npub=$npub&return=/reader"
     ))
     startActivity(intent)
 }
@@ -263,16 +257,9 @@ fun subscribeToFeed(npub: String) {
 import { Linking } from 'react-native';
 
 const subscribeToFeed = (npub) => {
-  const url = `https://readstr.privkey.io/subscribe?npub=${npub}&callback=myapp://subscribed`;
+  const url = `https://readstr.privkey.io/subscribe?npub=${npub}&return=/reader`;
   Linking.openURL(url);
 };
-
-// Handle callback in app
-Linking.addEventListener('url', ({ url }) => {
-  if (url.startsWith('myapp://subscribed')) {
-    // Show success message
-  }
-});
 ```
 
 ### Flutter
@@ -281,7 +268,7 @@ Linking.addEventListener('url', ({ url }) => {
 import 'package:url_launcher/url_launcher.dart';
 
 void subscribeToFeed(String npub) async {
-  final url = 'https://readstr.privkey.io/subscribe?npub=$npub&callback=myapp://subscribed';
+  final url = 'https://readstr.privkey.io/subscribe?npub=$npub&return=/reader';
   if (await canLaunch(url)) {
     await launch(url);
   }
