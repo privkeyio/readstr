@@ -17,7 +17,7 @@ The app is fully responsive and optimized for mobile devices:
 
 ## Progressive Web App (PWA)
 
-Install Nostr Feedz as a standalone app on your device!
+Install Readstr as a standalone app on your device!
 
 ### Installation
 
@@ -29,7 +29,7 @@ Install Nostr Feedz as a standalone app on your device!
 
 #### On Desktop (Chrome/Edge)
 1. Look for the install icon in the address bar
-2. Click "Install Nostr Feedz"
+2. Click "Install Readstr"
 3. The app will open in its own window
 
 ### PWA Features

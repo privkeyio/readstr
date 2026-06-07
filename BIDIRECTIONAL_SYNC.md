@@ -2,7 +2,7 @@
 
 ## Overview
 
-Nostr Feedz now features **fully automatic bidirectional sync** - your subscriptions, categories, and tags sync seamlessly across all your devices without any manual intervention.
+Readstr now features **fully automatic bidirectional sync** - your subscriptions, categories, and tags sync seamlessly across all your devices without any manual intervention.
 
 ## How It Works
 
@@ -119,8 +119,8 @@ Done (silent success/failure)
   "kind": 30404,
   "created_at": 1738095789,
   "tags": [
-    ["d", "nostr-feedz-subscriptions"],
-    ["client", "nostr-feedz"]
+    ["d", "readstr-subscriptions"],
+    ["client", "readstr"]
   ],
   "content": {
     "rss": ["https://example.com/feed.xml"],

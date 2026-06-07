@@ -174,7 +174,7 @@ Use Nostr **replaceable events** (kind 30404) to sync subscriptions across devic
   "pubkey": "<user's hex pubkey>",
   "created_at": 1732645747,
   "tags": [
-    ["d", "nostr-feedz-subscriptions"],
+    ["d", "readstr-subscriptions"],
     ["client", "nostrfeedz-cli"]
   ],
   "content": "{\"rss\":[...],\"nostr\":[...],\"tags\":{...},\"deleted\":[...],\"lastUpdated\":1732645747}"
@@ -206,8 +206,8 @@ import (
 const (
     SubscriptionListKind = 30404
     ReadStatusKind       = 30405
-    SubscriptionDTag     = "nostr-feedz-subscriptions"
-    ReadStatusDTag       = "nostr-feedz-read-status"
+    SubscriptionDTag     = "readstr-subscriptions"
+    ReadStatusDTag       = "readstr-read-status"
 )
 
 type SyncClient struct {
@@ -281,7 +281,7 @@ Use Nostr **replaceable events** (kind 30405) to sync which articles have been r
   "pubkey": "<user's hex pubkey>",
   "created_at": 1732645747,
   "tags": [
-    ["d", "nostr-feedz-read-status"],
+    ["d", "readstr-read-status"],
     ["client", "nostrfeedz-cli"]
   ],
   "content": "{\"itemGuids\":[\"guid1\",\"guid2\",\"guid3\",...],\"lastUpdated\":1732645747}"

@@ -159,7 +159,7 @@ npm install
 3. Set up environment variables:
 Create a `.env` file in the root directory:
 ```env
-DATABASE_URL="postgresql://user:password@localhost:5432/nostr_feedz"
+DATABASE_URL="postgresql://user:password@localhost:5432/readstr"
 ```
 
 4. Initialize the database:

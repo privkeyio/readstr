@@ -42,7 +42,7 @@ async function main() {
 
   console.log(`\nPackaging version ${version}...`);
 
-  const webStoreZip = path.join(releaseDir, `nostr-feedz-${version}-webstore.zip`);
+  const webStoreZip = path.join(releaseDir, `readstr-${version}-webstore.zip`);
   createZip(distDir, webStoreZip);
   console.log(`Created: ${webStoreZip}`);
 
@@ -50,7 +50,7 @@ async function main() {
     console.log(`\nCreating self-hosted version with update_url: ${updateUrl}`);
     patchManifestForSelfHosting(updateUrl);
 
-    const selfHostedZip = path.join(releaseDir, `nostr-feedz-${version}-selfhosted.zip`);
+    const selfHostedZip = path.join(releaseDir, `readstr-${version}-selfhosted.zip`);
     createZip(distDir, selfHostedZip);
     console.log(`Created: ${selfHostedZip}`);
 

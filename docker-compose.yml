@@ -3,7 +3,7 @@ services:
     image: postgres:15
     container_name: readstr-db
     environment:
-      POSTGRES_DB: nostr_feedz
+      POSTGRES_DB: readstr
       POSTGRES_USER: nostr_user
       POSTGRES_PASSWORD: nostr_password
     volumes:
@@ -21,7 +21,7 @@ services:
       - .env.production
     environment:
       - NODE_ENV=production
-      - DATABASE_URL=postgresql://nostr_user:nostr_password@postgres:5432/nostr_feedz
+      - DATABASE_URL=postgresql://nostr_user:nostr_password@postgres:5432/readstr
       - DEFAULT_RELAYS=wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band
     depends_on:
       - postgres

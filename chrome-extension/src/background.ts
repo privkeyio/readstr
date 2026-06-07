@@ -973,9 +973,9 @@ async function handleMessage(
   }
 }
 
-const MENU_ID_PAGE_FEEDS = 'nostr-feedz-page-feeds';
-const MENU_ID_SUBSCRIBE_LINK = 'nostr-feedz-subscribe-link';
-const MENU_ID_PARENT = 'nostr-feedz-parent';
+const MENU_ID_PAGE_FEEDS = 'readstr-page-feeds';
+const MENU_ID_SUBSCRIBE_LINK = 'readstr-subscribe-link';
+const MENU_ID_PARENT = 'readstr-parent';
 
 // Injected on demand into the active tab via chrome.scripting.executeScript when
 // the user invokes the context menu, so feed detection no longer requires a

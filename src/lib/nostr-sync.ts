@@ -158,8 +158,8 @@ export async function publishSubscriptionList(
       kind: SUBSCRIPTION_LIST_KIND,
       created_at: Math.floor(Date.now() / 1000),
       tags: [
-        ['d', 'nostr-feedz-subscriptions'], // d-tag for replaceable event identification
-        ['client', 'nostr-feedz'],
+        ['d', 'readstr-subscriptions'], // d-tag for replaceable event identification
+        ['client', 'readstr'],
       ],
       content: JSON.stringify({
         ...subscriptionList,
@@ -207,10 +207,10 @@ export async function fetchSubscriptionList(
     const event = await pool.get(relays, {
       kinds: [SUBSCRIPTION_LIST_KIND],
       authors: [pubkeyHex],
-      '#d': ['nostr-feedz-subscriptions'],
+      '#d': ['readstr-subscriptions'],
     })
 
-    if (!event || !isExpectedEvent(event, pubkeyHex, SUBSCRIPTION_LIST_KIND, 'nostr-feedz-subscriptions')) {
+    if (!event || !isExpectedEvent(event, pubkeyHex, SUBSCRIPTION_LIST_KIND, 'readstr-subscriptions')) {
       return {
         success: true,
         data: { rss: [], nostr: [] }, // Return empty list if none found
@@ -269,10 +269,10 @@ export async function fetchSubscriptionListFromServer(
     const event = await pool.get(syncRelays, {
       kinds: [SUBSCRIPTION_LIST_KIND],
       authors: [pubkeyHex],
-      '#d': ['nostr-feedz-subscriptions'],
+      '#d': ['readstr-subscriptions'],
     })
 
-    if (!event || !isExpectedEvent(event, pubkeyHex, SUBSCRIPTION_LIST_KIND, 'nostr-feedz-subscriptions')) {
+    if (!event || !isExpectedEvent(event, pubkeyHex, SUBSCRIPTION_LIST_KIND, 'readstr-subscriptions')) {
       return {
         success: true,
         data: { rss: [], nostr: [] }, // Return empty list if none found
@@ -555,7 +555,7 @@ export function mergeSubscriptionLists(
  */
 export function getLastSyncTime(): number | null {
   if (typeof window === 'undefined') return null
-  const stored = localStorage.getItem('nostr_feedz_last_sync')
+  const stored = localStorage.getItem('readstr_last_sync')
   return stored ? parseInt(stored, 10) : null
 }
 
@@ -564,11 +564,11 @@ export function getLastSyncTime(): number | null {
  */
 export function setLastSyncTime(timestamp: number): void {
   if (typeof window !== 'undefined') {
-    localStorage.setItem('nostr_feedz_last_sync', timestamp.toString())
+    localStorage.setItem('readstr_last_sync', timestamp.toString())
   }
 }
 
-const APPLIED_CREATEDAT_PREFIX = 'nostr_feedz_applied_createdat:'
+const APPLIED_CREATEDAT_PREFIX = 'readstr_applied_createdat:'
 
 /**
  * Get the created_at of the last applied sync event for a given d-tag.
@@ -614,8 +614,8 @@ export async function publishReadStatus(
       kind: READ_STATUS_KIND,
       created_at: Math.floor(Date.now() / 1000),
       tags: [
-        ['d', 'nostr-feedz-read-status'],
-        ['client', 'nostr-feedz'],
+        ['d', 'readstr-read-status'],
+        ['client', 'readstr'],
       ],
       content: JSON.stringify({
         itemGuids: readItemGuids,
@@ -657,10 +657,10 @@ export async function fetchReadStatus(
     const event = await pool.get(relays, {
       kinds: [READ_STATUS_KIND],
       authors: [pubkeyHex],
-      '#d': ['nostr-feedz-read-status'],
+      '#d': ['readstr-read-status'],
     })
 
-    if (!event || !isExpectedEvent(event, pubkeyHex, READ_STATUS_KIND, 'nostr-feedz-read-status')) {
+    if (!event || !isExpectedEvent(event, pubkeyHex, READ_STATUS_KIND, 'readstr-read-status')) {
       return {
         success: true,
         data: { itemGuids: [] },
@@ -686,7 +686,7 @@ export async function fetchReadStatus(
     // Defense-in-depth: drop stale/replayed events so a relay can't roll back
     // read status. The caller advances the watermark on apply (mirrors the
     // subscription path), so it isn't persisted here.
-    if (!isSyncEventFresh('nostr-feedz-read-status', event.created_at)) {
+    if (!isSyncEventFresh('readstr-read-status', event.created_at)) {
       return {
         success: true,
         data: { itemGuids: [] },
