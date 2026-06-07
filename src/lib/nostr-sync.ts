@@ -1,5 +1,6 @@
 import { SimplePool, Event, nip19 } from 'nostr-tools'
 import type { UnsignedEvent } from 'nostr-tools'
+import { z } from 'zod'
 
 // Privacy note: sync events (kinds 30404 and 30405) are published to public
 // relays in cleartext by design. The subscription list must stay readable by
@@ -32,6 +33,49 @@ export interface ReadStatusList {
   itemGuids: string[] // FeedItem guids that have been read
   lastUpdated?: number // Unix timestamp
 }
+
+// Caps bound untrusted relay payloads so a malicious/malformed event cannot
+// drive resource-exhaustion (the server loops over these arrays to import/fetch).
+// Oversized or malformed payloads fail validation and are rejected wholesale.
+// MAX_CONTENT_BYTES is checked before JSON.parse so an enormous frame is rejected
+// without first being materialized into memory; it comfortably covers an honest
+// max-size read-status list (~100k short guids).
+const MAX_CONTENT_BYTES = 8 * 1024 * 1024 // max raw event.content length before parsing
+const MAX_SYNC_FEEDS = 5000 // max rss/nostr/deleted entries, and tags/categories keys
+const MAX_READ_ITEMS = 100000 // max read itemGuids
+const MAX_URL_LEN = 2048 // max length of a feed URL / npub
+const MAX_GUID_LEN = 256 // max length of a read-status itemGuid
+const MAX_TAGS_PER_FEED = 100 // max tags attached to a single feed
+
+const subscriptionListSchema: z.ZodType<SubscriptionList> = z.object({
+  rss: z.array(z.string().max(MAX_URL_LEN)).max(MAX_SYNC_FEEDS),
+  nostr: z.array(z.string().max(MAX_URL_LEN)).max(MAX_SYNC_FEEDS),
+  tags: z
+    .record(
+      z.string().max(MAX_URL_LEN),
+      z.array(z.string().max(256)).max(MAX_TAGS_PER_FEED)
+    )
+    .refine(o => Object.keys(o).length <= MAX_SYNC_FEEDS, 'too many tag entries')
+    .optional(),
+  categories: z
+    .record(
+      z.string().max(MAX_URL_LEN),
+      z.object({
+        name: z.string().max(256),
+        color: z.string().max(64).optional(),
+        icon: z.string().max(256).optional(),
+      })
+    )
+    .refine(o => Object.keys(o).length <= MAX_SYNC_FEEDS, 'too many category entries')
+    .optional(),
+  deleted: z.array(z.string().max(MAX_URL_LEN)).max(MAX_SYNC_FEEDS).optional(),
+  lastUpdated: z.number().int().nonnegative().optional(),
+})
+
+const readStatusListSchema: z.ZodType<ReadStatusList> = z.object({
+  itemGuids: z.array(z.string().max(MAX_GUID_LEN)).max(MAX_READ_ITEMS),
+  lastUpdated: z.number().int().nonnegative().optional(),
+})
 
 // Default relays for sync operations
 const DEFAULT_SYNC_RELAYS = [
@@ -173,12 +217,26 @@ export async function fetchSubscriptionList(
       }
     }
     
-    // Parse the content
-    const content = JSON.parse(event.content) as SubscriptionList
-    
+    // Reject oversized frames before JSON.parse materializes them, then validate
+    if (event.content.length > MAX_CONTENT_BYTES) {
+      console.error('Rejected oversized subscription list payload:', event.content.length)
+      return {
+        success: true,
+        data: { rss: [], nostr: [] },
+      }
+    }
+    const parsed = subscriptionListSchema.safeParse(JSON.parse(event.content))
+    if (!parsed.success) {
+      console.error('Rejected malformed subscription list payload:', parsed.error.message)
+      return {
+        success: true,
+        data: { rss: [], nostr: [] },
+      }
+    }
+
     return {
       success: true,
-      data: content,
+      data: parsed.data,
       eventId: event.id,
       createdAt: event.created_at,
     }
@@ -221,12 +279,26 @@ export async function fetchSubscriptionListFromServer(
       }
     }
     
-    // Parse the content
-    const content = JSON.parse(event.content) as SubscriptionList
-    
+    // Reject oversized frames before JSON.parse materializes them, then validate
+    if (event.content.length > MAX_CONTENT_BYTES) {
+      console.error('Rejected oversized subscription list payload:', event.content.length)
+      return {
+        success: true,
+        data: { rss: [], nostr: [] },
+      }
+    }
+    const parsed = subscriptionListSchema.safeParse(JSON.parse(event.content))
+    if (!parsed.success) {
+      console.error('Rejected malformed subscription list payload:', parsed.error.message)
+      return {
+        success: true,
+        data: { rss: [], nostr: [] },
+      }
+    }
+
     return {
       success: true,
-      data: content,
+      data: parsed.data,
       eventId: event.id,
       createdAt: event.created_at,
     }
@@ -595,7 +667,21 @@ export async function fetchReadStatus(
       }
     }
     
-    const content = JSON.parse(event.content) as ReadStatusList
+    if (event.content.length > MAX_CONTENT_BYTES) {
+      console.error('Rejected oversized read status payload:', event.content.length)
+      return {
+        success: true,
+        data: { itemGuids: [] },
+      }
+    }
+    const parsed = readStatusListSchema.safeParse(JSON.parse(event.content))
+    if (!parsed.success) {
+      console.error('Rejected malformed read status payload:', parsed.error.message)
+      return {
+        success: true,
+        data: { itemGuids: [] },
+      }
+    }
 
     // Defense-in-depth: drop stale/replayed events so a relay can't roll back
     // read status. The caller advances the watermark on apply (mirrors the
@@ -609,7 +695,7 @@ export async function fetchReadStatus(
 
     return {
       success: true,
-      data: content,
+      data: parsed.data,
       createdAt: event.created_at,
     }
   } catch (error) {
