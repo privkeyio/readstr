@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio'
+import { safeFetch } from './safe-fetch'
 
 export interface FeedDiscoveryResult {
   found: boolean
@@ -61,7 +62,7 @@ export async function discoverFeed(url: string): Promise<FeedDiscoveryResult> {
  */
 async function checkIfFeed(url: string): Promise<FeedDiscoveryResult> {
   try {
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; readstr/1.0; +https://readstr.privkey.io)'
       },
@@ -134,7 +135,7 @@ async function checkIfFeed(url: string): Promise<FeedDiscoveryResult> {
  */
 async function findFeedInHTML(url: string): Promise<FeedDiscoveryResult> {
   try {
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; readstr/1.0)'
       },
