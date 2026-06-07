@@ -597,6 +597,16 @@ export async function fetchReadStatus(
     
     const content = JSON.parse(event.content) as ReadStatusList
 
+    // Defense-in-depth: drop stale/replayed events so a relay can't roll back
+    // read status. The caller advances the watermark on apply (mirrors the
+    // subscription path), so it isn't persisted here.
+    if (!isSyncEventFresh('nostr-feedz-read-status', event.created_at)) {
+      return {
+        success: true,
+        data: { itemGuids: [] },
+      }
+    }
+
     return {
       success: true,
       data: content,
