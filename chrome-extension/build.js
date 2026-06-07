@@ -3,6 +3,14 @@ const fs = require('fs');
 const path = require('path');
 
 const isWatch = process.argv.includes('--watch');
+const isDev = process.env.EXTENSION_DEV === '1';
+const devPort = process.env.EXTENSION_DEV_PORT || '3000';
+const devMatchPatterns = isDev
+  ? [`http://localhost:${devPort}/*`, `http://127.0.0.1:${devPort}/*`]
+  : [];
+const devTrustedHosts = isDev
+  ? [`localhost:${devPort}`, `127.0.0.1:${devPort}`]
+  : [];
 const distDir = path.join(__dirname, 'dist');
 const publicDir = path.join(__dirname, 'public');
 
@@ -25,9 +33,18 @@ function copyPublicFiles() {
 }
 
 function copyManifest() {
-  fs.copyFileSync(
-    path.join(__dirname, 'manifest.json'),
-    path.join(distDir, 'manifest.json')
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(__dirname, 'manifest.json'), 'utf8')
+  );
+  if (devMatchPatterns.length > 0) {
+    manifest.host_permissions.push(...devMatchPatterns);
+    for (const script of manifest.content_scripts) {
+      script.matches.push(...devMatchPatterns);
+    }
+  }
+  fs.writeFileSync(
+    path.join(distDir, 'manifest.json'),
+    JSON.stringify(manifest, null, 2)
   );
 }
 
@@ -46,6 +63,10 @@ const buildOptions = {
   sourcemap: isWatch ? 'inline' : false,
   minify: !isWatch,
   jsx: 'automatic',
+  define: {
+    __EXTENSION_DEV_MATCHES__: JSON.stringify(devMatchPatterns),
+    __EXTENSION_DEV_HOSTS__: JSON.stringify(devTrustedHosts),
+  },
 };
 
 async function build() {

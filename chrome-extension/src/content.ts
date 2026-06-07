@@ -8,11 +8,10 @@ import type { UnsignedEvent, NostrEvent } from './nostr';
 const SIGN_TIMEOUT_MS = 20000;
 
 function isTrustedHost(hostname: string): boolean {
-  return (
-    hostname === 'readstr.privkey.io' ||
-    hostname.endsWith('.readstr.privkey.io') ||
-    hostname === 'localhost'
-  );
+  if (hostname === 'readstr.privkey.io' || hostname.endsWith('.readstr.privkey.io')) {
+    return true;
+  }
+  return __EXTENSION_DEV_HOSTS__.includes(window.location.host);
 }
 
 function generateId(): string {

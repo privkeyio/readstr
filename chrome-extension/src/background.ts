@@ -141,7 +141,7 @@ async function warnNsecSessionExpired(): Promise<void> {
 const NOSTR_TAB_URLS = [
   '*://readstr.privkey.io/*',
   '*://*.readstr.privkey.io/*',
-  '*://localhost/*',
+  ...__EXTENSION_DEV_MATCHES__,
 ];
 
 // Serialize nip07 page-context signing. refreshFeeds fires getFeeds and
