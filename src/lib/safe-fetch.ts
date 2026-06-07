@@ -29,11 +29,18 @@ function groupsToIpv4(hi: number, lo: number): string {
   return [(hi >> 8) & 255, hi & 255, (lo >> 8) & 255, lo & 255].join('.')
 }
 
+function groupsAreZero(groups: number[], start: number, end: number): boolean {
+  for (let i = start; i < end; i++) {
+    if (groups[i] !== 0) return false
+  }
+  return true
+}
+
 function expandIpv6(ip: string): number[] | null {
   const halves = ip.split('::')
   if (halves.length > 2) return null
 
-  const parseGroups = (segment: string): number[] | null => {
+  function parseGroups(segment: string): number[] | null {
     if (segment === '') return []
     const out: number[] = []
     const parts = segment.split(':')
@@ -59,7 +66,9 @@ function expandIpv6(ip: string): number[] | null {
     if (head === null || tail === null) return null
     const fill = 8 - head.length - tail.length
     if (fill < 0) return null
-    return [...head, ...new Array(fill).fill(0), ...tail]
+    const expanded = [...head, ...new Array(fill).fill(0), ...tail]
+    if (expanded.length !== 8) return null
+    return expanded
   }
 
   const all = parseGroups(ip)
@@ -69,21 +78,6 @@ function expandIpv6(ip: string): number[] | null {
 
 function ipv6ToBlocked(ip: string): boolean {
   const lower = ip.toLowerCase()
-  // IPv4-mapped addresses (::ffff:a.b.c.d or normalized ::ffff:7f00:1)
-  const mapped = lower.match(/^::ffff:(.+)$/)
-  if (mapped) {
-    const rest = mapped[1]
-    if (rest.includes('.')) return ipv4ToBlocked(rest)
-    const groups = rest.split(':')
-    if (groups.length === 2) {
-      const hi = parseInt(groups[0], 16)
-      const lo = parseInt(groups[1], 16)
-      if (!Number.isNaN(hi) && !Number.isNaN(lo)) {
-        return ipv4ToBlocked(groupsToIpv4(hi, lo))
-      }
-    }
-    return true
-  }
   if (lower === '::' || lower === '::1') return true // unspecified / loopback
   if (lower.startsWith('fc') || lower.startsWith('fd')) return true // fc00::/7 ULA
   if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) {
@@ -92,33 +86,23 @@ function ipv6ToBlocked(ip: string): boolean {
   if (lower.startsWith('ff')) return true // multicast
 
   const groups = expandIpv6(lower)
-  if (groups) {
-    // NAT64 64:ff9b::/96 — embedded IPv4 in the final two groups
-    if (
-      groups[0] === 0x0064 &&
-      groups[1] === 0xff9b &&
-      groups[2] === 0 &&
-      groups[3] === 0 &&
-      groups[4] === 0 &&
-      groups[5] === 0
-    ) {
-      return ipv4ToBlocked(groupsToIpv4(groups[6], groups[7]))
-    }
-    // 6to4 2002::/16 — embedded IPv4 in the two groups after the 2002 prefix
-    if (groups[0] === 0x2002) {
-      return ipv4ToBlocked(groupsToIpv4(groups[1], groups[2]))
-    }
-    // IPv4-compatible ::/96 (high 96 bits zero; :: and ::1 handled above)
-    if (
-      groups[0] === 0 &&
-      groups[1] === 0 &&
-      groups[2] === 0 &&
-      groups[3] === 0 &&
-      groups[4] === 0 &&
-      groups[5] === 0
-    ) {
-      return ipv4ToBlocked(groupsToIpv4(groups[6], groups[7]))
-    }
+  if (!groups) return true // fail closed: unparseable IPv6
+
+  // IPv4-mapped ::ffff:a.b.c.d (and all alternate spellings)
+  if (groupsAreZero(groups, 0, 5) && groups[5] === 0xffff) {
+    return ipv4ToBlocked(groupsToIpv4(groups[6], groups[7]))
+  }
+  // NAT64 64:ff9b::/96 — embedded IPv4 in the final two groups
+  if (groups[0] === 0x0064 && groups[1] === 0xff9b && groupsAreZero(groups, 2, 6)) {
+    return ipv4ToBlocked(groupsToIpv4(groups[6], groups[7]))
+  }
+  // 6to4 2002::/16 — embedded IPv4 in the two groups after the 2002 prefix
+  if (groups[0] === 0x2002) {
+    return ipv4ToBlocked(groupsToIpv4(groups[1], groups[2]))
+  }
+  // IPv4-compatible ::/96 (high 96 bits zero; :: and ::1 handled above)
+  if (groupsAreZero(groups, 0, 6)) {
+    return ipv4ToBlocked(groupsToIpv4(groups[6], groups[7]))
   }
   return false
 }
