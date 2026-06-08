@@ -76,19 +76,36 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
           )}
 
           <div className="space-y-3">
-            {/* Primary button for PWA on Android - Amber with NIP-07 */}
+            {/* Primary path for PWA on Android - Amber via NIP-46 bunker */}
             {isPWA && isAndroid && (
-              <button
-                onClick={() => handleConnect('nip07')}
-                disabled={isLoading}
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-br from-[#27ae60] to-[#229954] px-6 py-3 font-semibold text-white shadow-[0_4px_14px_rgba(39,174,96,0.25)] transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_8px_25px_rgba(39,174,96,0.35)] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isLoading ? (
-                  <span className="animate-pulse">Connecting...</span>
-                ) : (
-                  <span>Connect with Amber</span>
-                )}
-              </button>
+              <div className="space-y-2">
+                <p className="text-xs text-[#B3B3B3]">
+                  In Amber, choose &quot;Connect app&quot; and paste the <code>bunker://</code> string here.
+                </p>
+                <input
+                  type="text"
+                  inputMode="url"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={bunkerUri}
+                  onChange={(e) => setBunkerUri(e.target.value)}
+                  placeholder="bunker://..."
+                  disabled={isLoading}
+                  className="w-full rounded-lg border border-[#27ae60]/25 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-[#6b7280] focus:border-[#27ae60]/60 focus:outline-none disabled:opacity-50"
+                />
+                <button
+                  onClick={() => handleConnect('nip46')}
+                  disabled={isLoading}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-br from-[#27ae60] to-[#229954] px-6 py-3 font-semibold text-white shadow-[0_4px_14px_rgba(39,174,96,0.25)] transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_8px_25px_rgba(39,174,96,0.35)] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isLoading ? (
+                    <span className="animate-pulse">Connecting...</span>
+                  ) : (
+                    <span>Connect with Amber</span>
+                  )}
+                </button>
+              </div>
             )}
 
             {/* Standard NIP-07 for browser extensions */}
@@ -112,6 +129,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
                 Other sign-in options
               </summary>
               <div className="mt-3 space-y-3">
+                {!(isPWA && isAndroid) && (
                 <div className="space-y-2 rounded-xl border border-[#27ae60]/25 bg-white/[0.04] p-3">
                   <p className="text-sm font-semibold text-white">Connect with Amber (remote signer)</p>
                   <p className="text-xs text-[#B3B3B3]">
@@ -137,6 +155,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
                     {isLoading ? <span className="animate-pulse">Connecting...</span> : <span>Connect with Amber (NIP-46)</span>}
                   </button>
                 </div>
+                )}
                 <button
                   onClick={() => handleConnect('npub_readonly')}
                   disabled={isLoading}
