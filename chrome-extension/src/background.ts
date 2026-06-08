@@ -29,6 +29,14 @@ const DEFAULT_WEB_APP_URL = 'https://readstr.privkey.io:8444';
 
 const ALLOWED_PROTOCOLS = ['https:', 'http:'];
 
+class AuthUnavailableError extends Error {
+  readonly retryable = false;
+  constructor() {
+    super('Re-authentication required');
+    this.name = 'AuthUnavailableError';
+  }
+}
+
 function sanitizeUrl(urlString: string): string | null {
   try {
     const url = new URL(urlString);
@@ -246,6 +254,11 @@ async function applyAuthHeaders(
     const nostrHeader = await getNostrAuthHeader(url, method, nostrAuth, body);
     if (nostrHeader) {
       headers['Authorization'] = nostrHeader;
+    } else {
+      // Signing material is gone (worker evicted) or no open tab to sign:
+      // skip the request instead of emitting an unsigned one that 401s. The
+      // re-auth notification already fired from getNostrAuthHeader.
+      throw new AuthUnavailableError();
     }
   }
 }
@@ -647,7 +660,11 @@ async function refreshFeeds(forceSync = false): Promise<{ newItemCount: number; 
     return { newItemCount: newItems.length };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    console.error('Feed refresh failed, using cache:', errorMessage);
+    if (error instanceof AuthUnavailableError) {
+      console.warn('Feed refresh skipped, re-authentication required; using cache');
+    } else {
+      console.error('Feed refresh failed, using cache:', errorMessage);
+    }
 
     const cached = await loadCachedData();
     if (cached.feeds.length > 0) {
