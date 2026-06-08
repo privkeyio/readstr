@@ -141,6 +141,31 @@ function isExpectedEvent(
   return eventDTag === dTag
 }
 
+// Replaceable events (kind 30000-39999) can exist in differing versions across
+// relays. pool.get returns whichever arrives first, which may be a stale or
+// empty version; latching onto that poisons the freshness watermark and blocks
+// later imports. Gather all matching events and return the newest by created_at.
+async function getNewestReplaceableEvent(
+  pool: SimplePool,
+  relays: string[],
+  pubkeyHex: string,
+  kind: number,
+  dTag: string
+): Promise<Event | null> {
+  const events = await pool.querySync(relays, {
+    kinds: [kind],
+    authors: [pubkeyHex],
+    '#d': [dTag],
+  })
+
+  let newest: Event | null = null
+  for (const event of events) {
+    if (!isExpectedEvent(event, pubkeyHex, kind, dTag)) continue
+    if (!newest || event.created_at > newest.created_at) newest = event
+  }
+  return newest
+}
+
 /**
  * Publish a subscription list to Nostr relays using kind 30404
  * This is a replaceable event (kind 30000-39999), so newer versions replace older ones
@@ -202,21 +227,23 @@ export async function fetchSubscriptionList(
   
   try {
     const pubkeyHex = getPubkeyHex(userPubkey)
-    
-    // Fetch the subscription list event
-    const event = await pool.get(relays, {
-      kinds: [SUBSCRIPTION_LIST_KIND],
-      authors: [pubkeyHex],
-      '#d': ['readstr-subscriptions'],
-    })
 
-    if (!event || !isExpectedEvent(event, pubkeyHex, SUBSCRIPTION_LIST_KIND, 'readstr-subscriptions')) {
+    // Fetch the newest subscription list event across relays
+    const event = await getNewestReplaceableEvent(
+      pool,
+      relays,
+      pubkeyHex,
+      SUBSCRIPTION_LIST_KIND,
+      'readstr-subscriptions'
+    )
+
+    if (!event) {
       return {
         success: true,
         data: { rss: [], nostr: [] }, // Return empty list if none found
       }
     }
-    
+
     // Reject oversized frames before JSON.parse materializes them, then validate
     if (event.content.length > MAX_CONTENT_BYTES) {
       console.error('Rejected oversized subscription list payload:', event.content.length)
@@ -242,9 +269,9 @@ export async function fetchSubscriptionList(
     }
   } catch (error) {
     console.error('Failed to fetch subscription list:', error)
-    return { 
-      success: false, 
-      error: error instanceof Error ? error.message : 'Unknown error' 
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
     }
   } finally {
     pool.close(relays)
@@ -264,15 +291,17 @@ export async function fetchSubscriptionListFromServer(
   
   try {
     const pubkeyHex = getPubkeyHex(userPubkey)
-    
-    // Fetch the subscription list event
-    const event = await pool.get(syncRelays, {
-      kinds: [SUBSCRIPTION_LIST_KIND],
-      authors: [pubkeyHex],
-      '#d': ['readstr-subscriptions'],
-    })
 
-    if (!event || !isExpectedEvent(event, pubkeyHex, SUBSCRIPTION_LIST_KIND, 'readstr-subscriptions')) {
+    // Fetch the newest subscription list event across relays
+    const event = await getNewestReplaceableEvent(
+      pool,
+      syncRelays,
+      pubkeyHex,
+      SUBSCRIPTION_LIST_KIND,
+      'readstr-subscriptions'
+    )
+
+    if (!event) {
       return {
         success: true,
         data: { rss: [], nostr: [] }, // Return empty list if none found
@@ -653,14 +682,16 @@ export async function fetchReadStatus(
   
   try {
     const pubkeyHex = getPubkeyHex(userPubkey)
-    
-    const event = await pool.get(relays, {
-      kinds: [READ_STATUS_KIND],
-      authors: [pubkeyHex],
-      '#d': ['readstr-read-status'],
-    })
 
-    if (!event || !isExpectedEvent(event, pubkeyHex, READ_STATUS_KIND, 'readstr-read-status')) {
+    const event = await getNewestReplaceableEvent(
+      pool,
+      relays,
+      pubkeyHex,
+      READ_STATUS_KIND,
+      'readstr-read-status'
+    )
+
+    if (!event) {
       return {
         success: true,
         data: { itemGuids: [] },
