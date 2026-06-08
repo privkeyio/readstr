@@ -29,6 +29,14 @@ const DEFAULT_WEB_APP_URL = 'https://readstr.privkey.io:8444';
 
 const ALLOWED_PROTOCOLS = ['https:', 'http:'];
 
+class AuthUnavailableError extends Error {
+  readonly retryable = false;
+  constructor() {
+    super('Re-authentication required');
+    this.name = 'AuthUnavailableError';
+  }
+}
+
 function sanitizeUrl(urlString: string): string | null {
   try {
     const url = new URL(urlString);
@@ -246,6 +254,12 @@ async function applyAuthHeaders(
     const nostrHeader = await getNostrAuthHeader(url, method, nostrAuth, body);
     if (nostrHeader) {
       headers['Authorization'] = nostrHeader;
+    } else {
+      // Signing material is gone (worker evicted) or no open tab to sign:
+      // skip the request instead of emitting an unsigned one that 401s. For
+      // 'nsec'/'nip07' getNostrAuthHeader already fired the re-auth notification;
+      // other methods just fail closed here without one.
+      throw new AuthUnavailableError();
     }
   }
 }
@@ -647,7 +661,11 @@ async function refreshFeeds(forceSync = false): Promise<{ newItemCount: number; 
     return { newItemCount: newItems.length };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    console.error('Feed refresh failed, using cache:', errorMessage);
+    if (error instanceof AuthUnavailableError) {
+      console.warn('Feed refresh skipped, re-authentication required; using cache');
+    } else {
+      console.error('Feed refresh failed, using cache:', errorMessage);
+    }
 
     const cached = await loadCachedData();
     if (cached.feeds.length > 0) {
@@ -855,7 +873,13 @@ async function handleMessage(
       }
       try {
         await Promise.all([
-          markItemAsRead(itemId),
+          markItemAsRead(itemId).catch((error) => {
+            if (error instanceof AuthUnavailableError) {
+              console.warn('Server mark-as-read skipped, re-authentication required; updating locally');
+            } else {
+              throw error;
+            }
+          }),
           feedDatabase.markItemRead(itemId),
         ]);
         const result = await chrome.storage.local.get(['recentItems', 'feeds']);
@@ -1313,32 +1337,40 @@ chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) =
     const data = notificationDataCache.get(notificationId);
     const storage = await getStorageData();
 
-    if (data === 'batch') {
-      if (buttonIndex === 0) {
-        const appUrl = normalizeBaseUrl(storage.settings.webAppUrl);
-        if (appUrl) {
-          await chrome.tabs.create({ url: appUrl });
+    try {
+      if (data === 'batch') {
+        if (buttonIndex === 0) {
+          const appUrl = normalizeBaseUrl(storage.settings.webAppUrl);
+          if (appUrl) {
+            await chrome.tabs.create({ url: appUrl });
+          }
+        } else if (buttonIndex === 1) {
+          await markAllAsRead();
         }
-      } else if (buttonIndex === 1) {
-        await markAllAsRead();
-      }
-    } else if (data) {
-      if (buttonIndex === 0) {
-        const baseUrl = normalizeBaseUrl(data.webAppUrl);
-        const itemUrl = data.itemUrl ? sanitizeUrl(data.itemUrl) : null;
-        const targetUrl = itemUrl ?? (baseUrl ? `${baseUrl}/item/${encodeURIComponent(data.itemId)}` : null);
-        if (targetUrl) {
-          await chrome.tabs.create({ url: targetUrl });
-          void markItemAsRead(data.itemId);
+      } else if (data) {
+        if (buttonIndex === 0) {
+          const baseUrl = normalizeBaseUrl(data.webAppUrl);
+          const itemUrl = data.itemUrl ? sanitizeUrl(data.itemUrl) : null;
+          const targetUrl = itemUrl ?? (baseUrl ? `${baseUrl}/item/${encodeURIComponent(data.itemId)}` : null);
+          if (targetUrl) {
+            await chrome.tabs.create({ url: targetUrl });
+            void markItemAsRead(data.itemId);
+          }
+        } else if (buttonIndex === 1) {
+          await markItemAsRead(data.itemId);
+          void refreshFeeds();
         }
-      } else if (buttonIndex === 1) {
-        await markItemAsRead(data.itemId);
-        void refreshFeeds();
       }
+    } catch (error) {
+      if (error instanceof AuthUnavailableError) {
+        console.warn('Notification action skipped, re-authentication required');
+      } else {
+        console.error('Notification action failed:', error instanceof Error ? error.message : error);
+      }
+    } finally {
+      notificationDataCache.delete(notificationId);
+      await chrome.notifications.clear(notificationId);
     }
-
-    notificationDataCache.delete(notificationId);
-    await chrome.notifications.clear(notificationId);
   })();
 });
 
