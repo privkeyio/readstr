@@ -145,7 +145,7 @@ export function AuthShowcase() {
       {loginMethod === 'nip46' && (
         <div className="w-full p-4 bg-gray-800/50 rounded-lg">
           <p className="text-gray-300 text-sm mb-4">
-            In Amber, choose &quot;Connect app&quot; and paste the <code>bunker://</code> string here.
+            In your remote signer app, choose &quot;Connect app&quot; and paste the <code>bunker://</code> string here.
           </p>
           <div className="space-y-3">
             <div>

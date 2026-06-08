@@ -28,7 +28,7 @@ function BunkerConnect({
         <p className="text-sm font-semibold text-white">Connect to Signer (remote)</p>
       )}
       <p className="text-xs text-[#B3B3B3]">
-        In Amber, choose &quot;Connect app&quot; and paste the <code>bunker://</code> string here.
+        In your remote signer app, choose &quot;Connect app&quot; and paste the <code>bunker://</code> string here.
       </p>
       <input
         type="text"
