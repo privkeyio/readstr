@@ -37,13 +37,14 @@ export interface ReadStatusList {
 // Caps bound untrusted relay payloads so a malicious/malformed event cannot
 // drive resource-exhaustion (the server loops over these arrays to import/fetch).
 // Oversized or malformed payloads fail validation and are rejected wholesale.
-// MAX_CONTENT_BYTES is checked before JSON.parse so an enormous frame is rejected
-// without first being materialized into memory; it comfortably covers an honest
-// max-size read-status list (~100k short guids).
+// MAX_CONTENT_BYTES bounds event.content; getNewestReplaceableEvent skips frames
+// over the cap during selection so an oversized payload is never parsed. It
+// comfortably covers an honest max-size read-status list (~100k short guids).
 const MAX_CONTENT_BYTES = 8 * 1024 * 1024 // max raw event.content length before parsing
 const MAX_SYNC_FEEDS = 5000 // max rss/nostr/deleted entries, and tags/categories keys
 const MAX_READ_ITEMS = 100000 // max read itemGuids
 const MAX_URL_LEN = 2048 // max length of a feed URL / npub
+const SYNC_QUERY_TIMEOUT_MS = 8000 // max time to wait for relays when fetching sync events
 const MAX_GUID_LEN = 256 // max length of a read-status itemGuid
 const MAX_TAGS_PER_FEED = 100 // max tags attached to a single feed
 
@@ -141,10 +142,12 @@ function isExpectedEvent(
   return eventDTag === dTag
 }
 
-// Replaceable events (kind 30000-39999) can exist in differing versions across
-// relays. pool.get returns whichever arrives first, which may be a stale or
-// empty version; latching onto that poisons the freshness watermark and blocks
-// later imports. Gather all matching events and return the newest by created_at.
+// Replaceable events (kind 30000-39999) should have a single newest version, but
+// a relay that retains older versions can return a stale one under pool.get's
+// implicit limit:1, hiding the true-newest from the result and poisoning the
+// freshness watermark so later imports are blocked. Query without a limit so every
+// retained version is returned, then select the newest by created_at. Do NOT
+// re-add limit:1 here — that reintroduces the bug.
 async function getNewestReplaceableEvent(
   pool: SimplePool,
   relays: string[],
@@ -152,16 +155,28 @@ async function getNewestReplaceableEvent(
   kind: number,
   dTag: string
 ): Promise<Event | null> {
+  // maxWait bounds the query so an unresponsive relay can't hang the fetch (and
+  // leak the pool, which is closed in the caller's finally) indefinitely.
   const events = await pool.querySync(relays, {
     kinds: [kind],
     authors: [pubkeyHex],
     '#d': [dTag],
-  })
+  }, { maxWait: SYNC_QUERY_TIMEOUT_MS })
 
   let newest: Event | null = null
+  let oversizedSkipped = 0
   for (const event of events) {
     if (!isExpectedEvent(event, pubkeyHex, kind, dTag)) continue
+    // Skip oversized payloads during selection so a malicious relay can't make us
+    // hold or parse a huge content frame even if it carries the highest created_at.
+    if (event.content.length > MAX_CONTENT_BYTES) {
+      oversizedSkipped++
+      continue
+    }
     if (!newest || event.created_at > newest.created_at) newest = event
+  }
+  if (oversizedSkipped > 0) {
+    console.error(`Skipped ${oversizedSkipped} oversized replaceable event payload(s)`)
   }
   return newest
 }
@@ -244,14 +259,6 @@ export async function fetchSubscriptionList(
       }
     }
 
-    // Reject oversized frames before JSON.parse materializes them, then validate
-    if (event.content.length > MAX_CONTENT_BYTES) {
-      console.error('Rejected oversized subscription list payload:', event.content.length)
-      return {
-        success: true,
-        data: { rss: [], nostr: [] },
-      }
-    }
     const parsed = subscriptionListSchema.safeParse(JSON.parse(event.content))
     if (!parsed.success) {
       console.error('Rejected malformed subscription list payload:', parsed.error.message)
@@ -308,14 +315,6 @@ export async function fetchSubscriptionListFromServer(
       }
     }
     
-    // Reject oversized frames before JSON.parse materializes them, then validate
-    if (event.content.length > MAX_CONTENT_BYTES) {
-      console.error('Rejected oversized subscription list payload:', event.content.length)
-      return {
-        success: true,
-        data: { rss: [], nostr: [] },
-      }
-    }
     const parsed = subscriptionListSchema.safeParse(JSON.parse(event.content))
     if (!parsed.success) {
       console.error('Rejected malformed subscription list payload:', parsed.error.message)
@@ -698,13 +697,6 @@ export async function fetchReadStatus(
       }
     }
     
-    if (event.content.length > MAX_CONTENT_BYTES) {
-      console.error('Rejected oversized read status payload:', event.content.length)
-      return {
-        success: true,
-        data: { itemGuids: [] },
-      }
-    }
     const parsed = readStatusListSchema.safeParse(JSON.parse(event.content))
     if (!parsed.success) {
       console.error('Rejected malformed read status payload:', parsed.error.message)
