@@ -94,7 +94,7 @@ export function AuthShowcase() {
             }}
             className="rounded-lg border border-white/20 bg-white/5 px-6 py-3 font-semibold text-gray-200 hover:bg-white/10 transition"
           >
-            📱 Connect with Amber (remote signer)
+            📱 Connect to Signer (remote)
           </button>
 
           <button
@@ -117,7 +117,7 @@ export function AuthShowcase() {
         {loginMethod === 'nip07'
           ? '🔌 Browser Extension'
           : loginMethod === 'nip46'
-          ? '📱 Connect with Amber'
+          ? '📱 Connect to Signer'
           : '👤 Read-only npub view'}
       </p>
 
@@ -169,7 +169,7 @@ export function AuthShowcase() {
               disabled={loading || !bunkerUri.trim()}
               className="w-full rounded-lg bg-[#27ae60] px-4 py-2 font-semibold text-white hover:bg-[#229954] disabled:opacity-50 transition"
             >
-              {loading ? 'Connecting...' : 'Connect with Amber (NIP-46)'}
+              {loading ? 'Connecting...' : 'Connect to Signer (NIP-46)'}
             </button>
           </div>
         </div>
