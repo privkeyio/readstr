@@ -6,8 +6,9 @@ import { useState } from 'react'
 export function AuthShowcase() {
   const { isConnected, user, authMethod, connect, disconnect } = useNostrAuth()
   const [showLoginForm, setShowLoginForm] = useState(false)
-  const [loginMethod, setLoginMethod] = useState<'nip07' | 'npub_readonly' | null>(null)
+  const [loginMethod, setLoginMethod] = useState<'nip07' | 'npub_readonly' | 'nip46' | null>(null)
   const [npub, setNpub] = useState('')
+  const [bunkerUri, setBunkerUri] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -22,6 +23,13 @@ export function AuthShowcase() {
         await connect('nip07')
       } else if (loginMethod === 'npub_readonly') {
         await connect('npub_readonly', { npub })
+      } else if (loginMethod === 'nip46') {
+        const uri = bunkerUri.trim()
+        if (!uri) {
+          setError('Paste a bunker:// connection string from Amber first.')
+          return
+        }
+        await connect('nip46', { bunkerUri: uri })
       }
       setShowLoginForm(false)
     } catch (err) {
@@ -81,6 +89,16 @@ export function AuthShowcase() {
           
           <button
             onClick={() => {
+              setLoginMethod('nip46')
+              setShowLoginForm(true)
+            }}
+            className="rounded-lg border border-white/20 bg-white/5 px-6 py-3 font-semibold text-gray-200 hover:bg-white/10 transition"
+          >
+            📱 Connect with Amber (remote signer)
+          </button>
+
+          <button
+            onClick={() => {
               setLoginMethod('npub_readonly')
               setShowLoginForm(true)
             }}
@@ -96,7 +114,11 @@ export function AuthShowcase() {
   return (
     <div className="flex flex-col items-center justify-center gap-4 w-full max-w-md">
       <p className="text-center text-2xl text-white mb-4">
-        {loginMethod === 'nip07' ? '🔌 Browser Extension' : '👤 Read-only npub view'}
+        {loginMethod === 'nip07'
+          ? '🔌 Browser Extension'
+          : loginMethod === 'nip46'
+          ? '📱 Connect with Amber'
+          : '👤 Read-only npub view'}
       </p>
 
       {error && (
@@ -117,6 +139,39 @@ export function AuthShowcase() {
           >
             {loading ? 'Connecting...' : 'Connect Extension'}
           </button>
+        </div>
+      )}
+
+      {loginMethod === 'nip46' && (
+        <div className="w-full p-4 bg-gray-800/50 rounded-lg">
+          <p className="text-gray-300 text-sm mb-4">
+            In Amber, choose &quot;Connect app&quot; and paste the <code>bunker://</code> string here.
+          </p>
+          <div className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">
+                bunker:// connection string
+              </label>
+              <input
+                type="text"
+                inputMode="url"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                value={bunkerUri}
+                onChange={(e) => setBunkerUri(e.target.value)}
+                placeholder="bunker://..."
+                className="w-full rounded-md bg-gray-700 px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-[#27ae60]"
+              />
+            </div>
+            <button
+              onClick={handleConnect}
+              disabled={loading || !bunkerUri.trim()}
+              className="w-full rounded-lg bg-[#27ae60] px-4 py-2 font-semibold text-white hover:bg-[#229954] disabled:opacity-50 transition"
+            >
+              {loading ? 'Connecting...' : 'Connect with Amber (NIP-46)'}
+            </button>
+          </div>
         </div>
       )}
 
