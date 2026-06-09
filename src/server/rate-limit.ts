@@ -96,3 +96,16 @@ export function clientIpFromHeaders(
 export function clientIpFromRequest(request: Request): string {
   return clientIpFromHeaders(name => request.headers.get(name) ?? undefined)
 }
+
+// Test-only seam: clears the module-level fixed-window state so each test starts
+// from a clean slate. Not part of the runtime API.
+export function __resetRateLimitForTests(): void {
+  buckets.clear()
+  lastPrune = 0
+}
+
+// Test-only seam: number of live windows currently tracked, used to assert prune
+// eviction. Not part of the runtime API.
+export function __rateLimitBucketCountForTests(): number {
+  return buckets.size
+}
