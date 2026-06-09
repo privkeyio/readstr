@@ -57,7 +57,7 @@
     "vitest": "^4.1.8"
   },
   "overrides": {
-    "postcss": "$postcss",
+    "postcss": "^8.5.10",
     "serialize-javascript": "^7.0.5"
   },
   "ct3aMetadata": {
