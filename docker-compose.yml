@@ -21,7 +21,7 @@ services:
       - .env.production
     environment:
       - NODE_ENV=production
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-nostr_user}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-readstr}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-nostr_user}:${POSTGRES_PASSWORD_ENCODED:-${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}}@postgres:5432/${POSTGRES_DB:-readstr}
       - DEFAULT_RELAYS=wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band
     depends_on:
       - postgres

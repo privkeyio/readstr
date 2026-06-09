@@ -70,11 +70,13 @@ export function rateLimit(
 
 /**
  * Extract a best-effort client IP from proxy headers. The app sits behind a
- * single trusted Caddy proxy that APPENDS the real peer IP to x-forwarded-for,
- * so the trustworthy hop is the rightmost entry — earlier entries are
- * client-controlled and must not be trusted. Falls back to x-real-ip (also
- * client-settable, so XFF takes precedence) and finally to a constant so missing
- * headers share a single conservative bucket rather than bypassing the limit.
+ * single trusted Caddy proxy that OVERWRITES x-forwarded-for with the real peer
+ * IP at the trust boundary (see Caddyfile), so the only trustworthy hop is the
+ * rightmost entry — earlier entries would be client-controlled and must not be
+ * trusted. x-real-ip is intentionally ignored: it is client-settable and only
+ * ever reaches the app if the proxy is bypassed. When x-forwarded-for is absent
+ * we fall back to a constant so such requests share a single conservative bucket
+ * rather than bypassing the limit.
  */
 export function clientIpFromHeaders(
   getHeader: (name: string) => string | undefined
@@ -85,8 +87,6 @@ export function clientIpFromHeaders(
     const last = parts[parts.length - 1]?.trim()
     if (last) return last
   }
-  const realIp = getHeader('x-real-ip')?.trim()
-  if (realIp) return realIp
   return 'unknown'
 }
 
