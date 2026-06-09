@@ -628,6 +628,18 @@ export function isSyncEventFresh(dTag: string, fetchedCreatedAt?: number): boole
 }
 
 /**
+ * Advance the freshness watermark for a d-tag, but only when a created_at is
+ * present and only monotonically. Centralizes the null-check and monotonic guard
+ * so a missing created_at can't throw and a stale relay event can't roll the
+ * watermark backward.
+ */
+export function advanceSyncWatermarkIfFresh(dTag: string, createdAt?: number): void {
+  if (createdAt != null && isSyncEventFresh(dTag, createdAt)) {
+    setLastAppliedSyncCreatedAt(dTag, createdAt)
+  }
+}
+
+/**
  * Publish read status to Nostr relays using kind 30405
  */
 export async function publishReadStatus(
