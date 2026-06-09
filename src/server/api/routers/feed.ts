@@ -100,6 +100,16 @@ const buildNostrOriginalUrl = (feedType: FeedType, guid?: string | null, authorN
   }
 }
 
+const assertCategoryOwnership = async (db: any, userPubkey: string, categoryId: string) => {
+  const category = await db.category.findFirst({
+    where: { id: categoryId, userPubkey },
+    select: { id: true },
+  })
+  if (!category) {
+    throw new TRPCError({ code: 'FORBIDDEN', message: 'Category not found' })
+  }
+}
+
 const refreshAllUserFeedsInternal = async (db: any, userPubkey: string, force = false) => {
   // 1. Get all active subscriptions for this user
   const subscriptions = await db.subscription.findMany({
@@ -666,7 +676,7 @@ export const feedRouter = createTRPCRouter({
       npub: z.string().optional(),
       title: z.string().optional(),
       tags: z.array(z.string()).optional(),
-      categoryId: z.string().optional(),
+      categoryId: z.string().optional().transform(v => v || null),
     }))
     .mutation(async ({ ctx, input }) => {
       // Validate input based on type
@@ -679,13 +689,7 @@ export const feedRouter = createTRPCRouter({
 
       // Ensure the target category, if any, belongs to the requesting user
       if (input.categoryId) {
-        const category = await ctx.db.category.findFirst({
-          where: { id: input.categoryId, userPubkey: ctx.nostrPubkey },
-          select: { id: true },
-        })
-        if (!category) {
-          throw new TRPCError({ code: 'FORBIDDEN', message: 'Category not found' })
-        }
+        await assertCategoryOwnership(ctx.db, ctx.nostrPubkey, input.categoryId)
       }
 
       let feedUrl = input.url
@@ -1730,18 +1734,12 @@ export const feedRouter = createTRPCRouter({
   updateSubscriptionCategory: protectedProcedure
     .input(z.object({
       feedId: z.string(),
-      categoryId: z.string().nullable(),
+      categoryId: z.string().nullable().transform(v => v || null),
     }))
     .mutation(async ({ ctx, input }) => {
       // Ensure the target category, if any, belongs to the requesting user
       if (input.categoryId) {
-        const category = await ctx.db.category.findFirst({
-          where: { id: input.categoryId, userPubkey: ctx.nostrPubkey },
-          select: { id: true },
-        })
-        if (!category) {
-          throw new TRPCError({ code: 'FORBIDDEN', message: 'Category not found' })
-        }
+        await assertCategoryOwnership(ctx.db, ctx.nostrPubkey, input.categoryId)
       }
 
       await ctx.db.subscription.update({
