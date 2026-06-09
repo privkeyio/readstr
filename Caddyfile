@@ -5,6 +5,10 @@
 readstr.privkey.io {
     # Reverse proxy to the Next.js app
     reverse_proxy app:3000 {
+        # Overwrite X-Forwarded-For at the trust boundary so clients cannot
+        # inject spoofed entries; the app reads the rightmost (real peer) hop.
+        header_up X-Forwarded-For {remote_host}
+
         # Health check
         health_uri /api/health
         health_interval 30s
@@ -14,17 +18,10 @@ readstr.privkey.io {
     # Enable compression
     encode gzip
 
-    # Security headers
+    # Security headers (CSP/HSTS/nosniff/Referrer-Policy) are emitted by the app
+    # in next.config.mjs as the single authoritative source — do not duplicate
+    # them here, as browsers intersect multiple CSPs.
     header {
-        # Security headers
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        X-Content-Type-Options "nosniff"
-        X-XSS-Protection "1; mode=block"
-        Referrer-Policy "strict-origin-when-cross-origin"
-        
-        # Content Security Policy - allow YouTube and Rumble embeds
-        Content-Security-Policy "frame-src 'self' https://www.youtube.com https://youtube.com https://www.youtube-nocookie.com https://rumble.com https://*.rumble.com; frame-ancestors 'self';"
-        
         # Remove server information
         -Server
     }

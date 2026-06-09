@@ -12,6 +12,7 @@ const buckets = new Map<string, WindowState>()
 
 let lastPrune = 0
 const PRUNE_INTERVAL_MS = 60_000
+const MAX_BUCKETS = 10_000
 
 function prune(now: number): void {
   if (now - lastPrune < PRUNE_INTERVAL_MS) return
@@ -35,15 +36,23 @@ export function rateLimit(
   name: string,
   identifier: string,
   limit: number,
-  windowMs: number
+  windowMs: number,
+  now: number = Date.now()
 ): RateLimitResult {
-  const now = Date.now()
   prune(now)
 
   const key = `${name}:${identifier}`
   const state = buckets.get(key)
 
   if (!state || state.resetAt <= now) {
+    // Hard cap the map to bound memory under key-flooding. When full and the key
+    // is new, deny rather than grow unbounded.
+    if (!state && buckets.size >= MAX_BUCKETS) {
+      return {
+        allowed: false,
+        retryAfterSeconds: Math.max(1, Math.ceil(windowMs / 1000)),
+      }
+    }
     buckets.set(key, { count: 1, resetAt: now + windowMs })
     return { allowed: true, retryAfterSeconds: 0 }
   }
@@ -60,8 +69,11 @@ export function rateLimit(
 }
 
 /**
- * Extract a best-effort client IP from proxy headers. The app sits behind Caddy,
- * which sets x-forwarded-for / x-real-ip. Falls back to a constant so missing
+ * Extract a best-effort client IP from proxy headers. The app sits behind a
+ * single trusted Caddy proxy that APPENDS the real peer IP to x-forwarded-for,
+ * so the trustworthy hop is the rightmost entry — earlier entries are
+ * client-controlled and must not be trusted. Falls back to x-real-ip (also
+ * client-settable, so XFF takes precedence) and finally to a constant so missing
  * headers share a single conservative bucket rather than bypassing the limit.
  */
 export function clientIpFromHeaders(
@@ -69,10 +81,18 @@ export function clientIpFromHeaders(
 ): string {
   const forwardedFor = getHeader('x-forwarded-for')
   if (forwardedFor) {
-    const first = forwardedFor.split(',')[0]?.trim()
-    if (first) return first
+    const parts = forwardedFor.split(',')
+    const last = parts[parts.length - 1]?.trim()
+    if (last) return last
   }
   const realIp = getHeader('x-real-ip')?.trim()
   if (realIp) return realIp
   return 'unknown'
+}
+
+/**
+ * Adapter for the Fetch `Request` used by the route handlers.
+ */
+export function clientIpFromRequest(request: Request): string {
+  return clientIpFromHeaders(name => request.headers.get(name) ?? undefined)
 }

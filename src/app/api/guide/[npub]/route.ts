@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
 import { getNostrFetcher } from '@/lib/nostr-fetcher'
-import { rateLimit, clientIpFromHeaders } from '@/server/rate-limit'
+import { rateLimit, clientIpFromRequest } from '@/server/rate-limit'
 
 // CORS headers for native apps
 const corsHeaders = {
@@ -78,7 +78,7 @@ export async function GET(
     
     // Optionally fetch recent posts from Nostr
     if (includePosts) {
-      const ip = clientIpFromHeaders(name => request.headers.get(name) ?? undefined)
+      const ip = clientIpFromRequest(request)
       const limit = rateLimit('guide.includePosts', ip, 20, 60 * 1000)
       if (!limit.allowed) {
         return NextResponse.json({
