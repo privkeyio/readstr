@@ -48,6 +48,7 @@ next-env.d.ts
 
 # Private documentation (contains sensitive setup info)
 SQUARE_SETUP.md
+CLAUDE.md
 
 # Beads / Dolt files (added by bd init)
 .dolt/
