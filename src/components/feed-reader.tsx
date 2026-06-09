@@ -1,6 +1,6 @@
 'use client'
 
-import { useNostrAuth } from '@/contexts/NostrAuthContext'
+import { useNostrAuth, getLastSigningError } from '@/contexts/NostrAuthContext'
 import { useTheme, themeConfig } from '@/contexts/ThemeContext'
 import { ThemeSelector, ThemeToggleButton } from './theme-selector'
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
@@ -962,9 +962,11 @@ export function FeedReader() {
           banner an auth problem renders as a silently empty reader. */}
       {feedsQueryError && (
         <div className="fixed top-16 md:top-0 left-0 right-0 z-[60] bg-red-600 text-white text-sm px-4 py-2 flex items-center justify-between gap-3">
-          <span className="truncate">
+          <span className="min-w-0 break-words">
             {feedsQueryError.data?.code === 'UNAUTHORIZED'
-              ? 'Could not authenticate with your signer — subscriptions can\'t be loaded or saved. Check your signer app, then retry.'
+              ? `Could not authenticate with your signer — subscriptions can't be loaded or saved.${
+                  getLastSigningError() ? ` Signing error: ${getLastSigningError()}.` : ''
+                } Check your signer app, then retry.`
               : `Failed to load subscriptions: ${feedsQueryError.message}`}
           </span>
           <button
