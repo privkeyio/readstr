@@ -16,7 +16,7 @@ import {
   mergeSubscriptionLists,
   getLastSyncTime,
   isSyncEventFresh,
-  setLastAppliedSyncCreatedAt,
+  advanceSyncWatermarkIfFresh,
   publishSubscriptionList,
   buildSubscriptionListFromFeeds,
 } from '@/lib/nostr-sync'
@@ -217,13 +217,15 @@ export function FeedReader() {
         if (!result.success || !result.data) return
 
         // Ignore stale events: a relay must not roll back state with an
-        // equal-or-older subscription list than the one we last applied.
-        if (!isSyncEventFresh('readstr-subscriptions', result.createdAt)) return
+        // equal-or-older subscription list than the one we last applied. Skip this
+        // gate when there are no local feeds — nothing applied locally to protect,
+        // so a stale/persisted watermark must not leave the device silently empty.
+        if (feeds.length > 0 && !isSyncEventFresh('readstr-subscriptions', result.createdAt)) return
 
         // Nothing remote to import: local already reflects this event, so accept
         // it as the new freshness basis to avoid re-evaluating it forever.
         if (result.data.rss.length === 0 && result.data.nostr.length === 0) {
-          setLastAppliedSyncCreatedAt('readstr-subscriptions', result.createdAt!)
+          advanceSyncWatermarkIfFresh('readstr-subscriptions', result.createdAt)
           return
         }
 
@@ -243,7 +245,7 @@ export function FeedReader() {
           setShowSyncPrompt(true)
         } else {
           // Everything remote is already subscribed locally; safe to advance.
-          setLastAppliedSyncCreatedAt('readstr-subscriptions', result.createdAt!)
+          advanceSyncWatermarkIfFresh('readstr-subscriptions', result.createdAt)
         }
       } catch (error) {
         console.error('Auto-sync check failed:', error)
@@ -2045,9 +2047,7 @@ export function FeedReader() {
                   await handleImportFeeds(pendingSyncImport)
                   // Re-check freshness: another sync path may have advanced the
                   // watermark while this prompt was open, so keep it monotonic.
-                  if (pendingSyncCreatedAt !== null && isSyncEventFresh('readstr-subscriptions', pendingSyncCreatedAt)) {
-                    setLastAppliedSyncCreatedAt('readstr-subscriptions', pendingSyncCreatedAt)
-                  }
+                  advanceSyncWatermarkIfFresh('readstr-subscriptions', pendingSyncCreatedAt ?? undefined)
                   setShowSyncPrompt(false)
                   setPendingSyncImport(null)
                   setPendingSyncCreatedAt(null)

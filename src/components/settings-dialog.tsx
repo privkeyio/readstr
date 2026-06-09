@@ -10,7 +10,7 @@ import {
   mergeSubscriptionLists,
   getLastSyncTime,
   setLastSyncTime,
-  setLastAppliedSyncCreatedAt,
+  advanceSyncWatermarkIfFresh,
   type SubscriptionList,
 } from '@/lib/nostr-sync'
 
@@ -36,6 +36,7 @@ export interface SyncState {
   pendingImport?: {
     toAdd: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>
     localOnly: Array<{ type: 'RSS' | 'NOSTR' | 'NOSTR_VIDEO'; url: string }>
+    createdAt?: number
   }
 }
 
@@ -259,11 +260,8 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
       // removes local feeds), so there is nothing for the anti-rollback watermark
       // to protect. Gating it would permanently block re-importing the same list
       // after local subscriptions are cleared. The merge result drives the UX.
-
-      // Advance the freshness basis so automatic sync doesn't re-prompt for this event.
-      if (result.createdAt != null) {
-        setLastAppliedSyncCreatedAt('readstr-subscriptions', result.createdAt)
-      }
+      // The watermark is advanced in handleConfirmImport (only on accept, and only
+      // monotonically) so a dismissed import can still be re-imported later.
 
       if (!result.data || (result.data.rss.length === 0 && result.data.nostr.length === 0)) {
         setSyncState({
@@ -289,7 +287,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
       setSyncState({
         status: 'idle',
         lastSync: syncState.lastSync,
-        pendingImport: mergeResult,
+        pendingImport: { ...mergeResult, createdAt: result.createdAt },
       })
     } catch (error) {
       setSyncState({
@@ -308,6 +306,9 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
     
     try {
       await onImportFeeds(syncState.pendingImport.toAdd)
+      // Advance the freshness basis now that the data is applied (only on accept,
+      // null-safe, and monotonic so a stale relay event can't roll it backward).
+      advanceSyncWatermarkIfFresh('readstr-subscriptions', syncState.pendingImport.createdAt)
       const now = Math.floor(Date.now() / 1000)
       setLastSyncTime(now)
       setSyncState({ status: 'success', lastSync: now })
