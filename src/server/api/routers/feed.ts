@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { TRPCError } from '@trpc/server'
 import { createTRPCRouter, protectedProcedure } from '@/server/api/trpc'
 import { fetchAndParseFeed } from '@/lib/rss-parser'
 import { getNostrFetcher, NostrFeedFetcher } from '@/lib/nostr-fetcher'
@@ -674,6 +675,17 @@ export const feedRouter = createTRPCRouter({
       }
       if (input.type === 'NOSTR' && !input.npub) {
         throw new Error('Nostr feeds require an npub')
+      }
+
+      // Ensure the target category, if any, belongs to the requesting user
+      if (input.categoryId) {
+        const category = await ctx.db.category.findFirst({
+          where: { id: input.categoryId, userPubkey: ctx.nostrPubkey },
+          select: { id: true },
+        })
+        if (!category) {
+          throw new TRPCError({ code: 'FORBIDDEN', message: 'Category not found' })
+        }
       }
 
       let feedUrl = input.url
@@ -1721,6 +1733,17 @@ export const feedRouter = createTRPCRouter({
       categoryId: z.string().nullable(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // Ensure the target category, if any, belongs to the requesting user
+      if (input.categoryId) {
+        const category = await ctx.db.category.findFirst({
+          where: { id: input.categoryId, userPubkey: ctx.nostrPubkey },
+          select: { id: true },
+        })
+        if (!category) {
+          throw new TRPCError({ code: 'FORBIDDEN', message: 'Category not found' })
+        }
+      }
+
       await ctx.db.subscription.update({
         where: {
           userPubkey_feedId: {
