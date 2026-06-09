@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { TRPCError } from '@trpc/server'
 import { createTRPCRouter, protectedProcedure } from '@/server/api/trpc'
 import { fetchAndParseFeed } from '@/lib/rss-parser'
 import { getNostrFetcher, NostrFeedFetcher } from '@/lib/nostr-fetcher'
@@ -96,6 +97,16 @@ const buildNostrOriginalUrl = (feedType: FeedType, guid?: string | null, authorN
   } catch (error) {
     console.error('Failed to build Nostr original URL', { feedType, guid, error })
     return undefined
+  }
+}
+
+const assertCategoryOwnership = async (db: any, userPubkey: string, categoryId: string) => {
+  const category = await db.category.findFirst({
+    where: { id: categoryId, userPubkey },
+    select: { id: true },
+  })
+  if (!category) {
+    throw new TRPCError({ code: 'FORBIDDEN', message: 'Category not found' })
   }
 }
 
@@ -665,7 +676,7 @@ export const feedRouter = createTRPCRouter({
       npub: z.string().optional(),
       title: z.string().optional(),
       tags: z.array(z.string()).optional(),
-      categoryId: z.string().optional(),
+      categoryId: z.string().optional().transform(v => v || null),
     }))
     .mutation(async ({ ctx, input }) => {
       // Validate input based on type
@@ -674,6 +685,11 @@ export const feedRouter = createTRPCRouter({
       }
       if (input.type === 'NOSTR' && !input.npub) {
         throw new Error('Nostr feeds require an npub')
+      }
+
+      // Ensure the target category, if any, belongs to the requesting user
+      if (input.categoryId) {
+        await assertCategoryOwnership(ctx.db, ctx.nostrPubkey, input.categoryId)
       }
 
       let feedUrl = input.url
@@ -1718,9 +1734,14 @@ export const feedRouter = createTRPCRouter({
   updateSubscriptionCategory: protectedProcedure
     .input(z.object({
       feedId: z.string(),
-      categoryId: z.string().nullable(),
+      categoryId: z.string().nullable().transform(v => v || null),
     }))
     .mutation(async ({ ctx, input }) => {
+      // Ensure the target category, if any, belongs to the requesting user
+      if (input.categoryId) {
+        await assertCategoryOwnership(ctx.db, ctx.nostrPubkey, input.categoryId)
+      }
+
       await ctx.db.subscription.update({
         where: {
           userPubkey_feedId: {
