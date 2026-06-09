@@ -14,8 +14,10 @@ import { verifyEvent, type Event as NostrToolsEvent } from 'nostr-tools'
 const NIP98_KIND = 27235
 
 // Allowed clock skew between the signed `created_at` and server time, in seconds.
-// Rejects both stale and future-dated events.
-const TIMESTAMP_TOLERANCE_SECONDS = 60
+// Rejects both stale and future-dated events. Generous enough to absorb a slow
+// NIP-46 remote-sign round trip (the event is timestamped before the signer
+// responds); replay within the window is blocked by the single-use id check.
+const TIMESTAMP_TOLERANCE_SECONDS = 120
 
 /**
  * Hostnames the signed `u` tag is allowed to target.
@@ -198,6 +200,14 @@ function consumeEventId(id: string, createdAt: number, now: number): boolean {
  * @returns the verified hex pubkey on success, or null on any failure.
  *          Fail-closed: never throws.
  */
+// Logs why a presented token was rejected so device-specific auth failures
+// (e.g. slow NIP-46 signing on mobile) are diagnosable from server logs.
+// Never logs the token itself; the event id/pubkey are public by design.
+function reject(reason: string, detail?: Record<string, string | number>): null {
+  console.warn(`nip98: rejected (${reason})`, detail ?? '')
+  return null
+}
+
 export async function verifyNip98Header(
   authHeader: string | undefined,
   opts: { url: string; method: string; body?: string | null }
@@ -206,30 +216,35 @@ export async function verifyNip98Header(
     if (!authHeader) return null
 
     const event = decodeAuthEvent(authHeader)
-    if (!event) return null
+    if (!event) return reject('malformed header')
 
     // 1. Correct kind.
-    if (event.kind !== NIP98_KIND) return null
+    if (event.kind !== NIP98_KIND) return reject('wrong kind', { kind: event.kind })
 
     // 2. Valid signature + event id.
-    if (!verifyEvent(event)) return null
+    if (!verifyEvent(event)) return reject('bad signature', { id: event.id })
 
     // 3. Timestamp within tolerance (reject stale/future).
     const now = Math.floor(Date.now() / 1000)
     if (Math.abs(now - event.created_at) > TIMESTAMP_TOLERANCE_SECONDS) {
-      return null
+      return reject('timestamp out of tolerance', {
+        skewSeconds: now - event.created_at,
+        pubkey: event.pubkey,
+      })
     }
 
     // 4. Method tag is required and must match.
     const methodTag = getTag(event, 'method')
     if (!methodTag || methodTag.toUpperCase() !== opts.method.toUpperCase()) {
-      return null
+      return reject('method mismatch', { signed: methodTag ?? '(none)', request: opts.method })
     }
 
     // 5. `u` tag matches the request URL (path + sorted query).
     const uTag = getTag(event, 'u')
-    if (!uTag) return null
-    if (!urlTagMatches(uTag, opts.url)) return null
+    if (!uTag) return reject('missing u tag', { pubkey: event.pubkey })
+    if (!urlTagMatches(uTag, opts.url)) {
+      return reject('u tag mismatch', { signed: uTag, request: opts.url })
+    }
 
     // 6. Body binding via `payload` tag (NIP-98). For non-GET methods the body
     // is not covered by the `u` tag, so we require the signature to commit to
@@ -239,14 +254,18 @@ export async function verifyNip98Header(
     const payloadTag = getTag(event, 'payload')
     const isMutation = method !== 'GET' && method !== 'HEAD'
     if (payloadTag || isMutation) {
-      if (!payloadTag) return null
+      if (!payloadTag) return reject('missing payload tag on mutation', { pubkey: event.pubkey })
       const body = opts.body ?? ''
       const digest = createHash('sha256').update(body, 'utf8').digest('hex')
-      if (digest !== payloadTag.toLowerCase()) return null
+      if (digest !== payloadTag.toLowerCase()) {
+        return reject('payload hash mismatch', { pubkey: event.pubkey })
+      }
     }
 
     // 7. Single-use: reject an event id we have already accepted in-window.
-    if (consumeEventId(event.id, event.created_at, now)) return null
+    if (consumeEventId(event.id, event.created_at, now)) {
+      return reject('replayed event id', { id: event.id })
+    }
 
     // All checks passed; the pubkey is now trustworthy.
     return event.pubkey
