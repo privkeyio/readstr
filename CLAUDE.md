@@ -58,11 +58,13 @@ This repo is checked out on three machines: **two Dolt-backed dev laptops** and 
 | | **Dev laptops (×2)** | **Server / deploy host** |
 |---|---|---|
 | Purpose | Write code, track work | Pull latest code, build, serve |
-| Beads | Source of truth. Dolt backend → syncs to `refs/dolt/data` on origin | Stealth mode (`.beads/` is in `.git/info/exclude`), SQLite backend — does NOT sync anywhere |
+| Beads | Source of truth. Dolt backend with a Dolt remote → syncs to `refs/dolt/data` on origin | Stealth mode (`bd init --stealth`: `.beads/` in `.git/info/exclude`, no Dolt remote) — does NOT sync anywhere |
 | `bd dolt push` / Session Completion beads steps | Apply | Do **not** apply — there is no path for beads data to reach origin |
 | Hosts readstr.privkey.io | No | Yes (host Caddy → app container) |
 
-**How to tell where you are:** run `bd vc status`. If it errors with *"requires Dolt backend"*, you are on the **server** — do all issue tracking on a dev laptop instead, and skip every beads/`bd dolt push` step when ending a session here. (Note: on a dev laptop, `bd dolt push` is the correct sync command in bd 1.0.4 — it pushes the Dolt data to `refs/dolt/data` on origin. There is no `bd daemon` in 1.0.4; `bd vc status` is just for inspecting local branch/commit state.)
+**Backend note (bd 1.0.4):** Dolt is the *only* backend — the legacy SQLite backend has been removed. So "stealth" no longer means a different backend; every machine runs Dolt. `bd init --stealth` only (a) adds `.beads/` to `.git/info/exclude` and (b) wires no Dolt remote, so a stealth checkout stays purely local. A dev laptop is just a normal `bd init` plus a Dolt remote (`bd dolt remote add origin git+https://github.com/privkeyio/readstr`).
+
+**How to tell where you are:** run `bd dolt remote list`. If it shows `origin … git+https://github.com/privkeyio/readstr`, you are on a **dev laptop** — apply the full Session Completion beads workflow. If it shows **(none)**, you are on the **server** (stealth) — do all issue tracking on a dev laptop instead, and skip every beads/`bd dolt push` step when ending a session here. (On a dev laptop, `bd dolt push` is the correct sync command — it pushes Dolt data to `refs/dolt/data` on origin. There is no `bd daemon` in 1.0.4; `bd vc status` is just for inspecting local branch/commit state.)
 
 **Two dev laptops — keep them in sync.** Both laptops are Dolt sources of truth that round-trip through `refs/dolt/data` on origin (they never talk directly). On whichever laptop you sit down at: **`bd dolt pull` before you start, `bd dolt push` before you stop.**
 ```bash
