@@ -191,7 +191,7 @@ export function FeedReader() {
     return undefined
   }, [organizationMode, selectedCategoryId, selectedTags])
   
-  const { data: feedsData = [], refetch: refetchFeeds, isLoading: isFeedsLoading, isFetched: isFeedsFetched, error: feedsQueryError } = api.feed.getFeeds.useQuery(
+  const { data: feedsData = [], isLoading: isFeedsLoading, isFetched: isFeedsFetched, error: feedsQueryError } = api.feed.getFeeds.useQuery(
     getFeedsInput,
     {
       enabled: !!user && !!user.npub,
@@ -968,7 +968,7 @@ export function FeedReader() {
               : `Failed to load subscriptions: ${feedsQueryError.message}`}
           </span>
           <button
-            onClick={() => refetchFeeds()}
+            onClick={() => invalidateFeedData()}
             className="flex-shrink-0 underline font-semibold"
           >
             Retry

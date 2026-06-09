@@ -175,6 +175,20 @@ function getTag(event: NostrToolsEvent, name: string): string | undefined {
 // acceptance window. An id is only valid until its signed `created_at` falls
 // out of tolerance, after which the timestamp check rejects it regardless, so
 // we can safely evict entries once they expire.
+//
+// This map is per-process: replay protection assumes the single-container
+// deployment this app runs as. If the app is ever scaled horizontally (or a
+// restart mid-window matters), move this to a shared store (e.g. Redis) with
+// TTL = tolerance.
+//
+// Size is capped so a flood of valid, unique-id events (requires a real key;
+// fill rate is gated by the schnorr verify cost) cannot grow memory without
+// bound. Eviction is FIFO (Map preserves insertion order). Tradeoff: a
+// future-dated entry evicted under cap pressure can be replayed again until its
+// timestamp leaves tolerance — but reaching the cap takes ~50k validly-signed
+// unique events inside the window, and only the attacker's own token becomes
+// replayable, so the memory bound is worth it.
+const MAX_SEEN_EVENT_IDS = 50_000
 const seenEventIds = new Map<string, number>()
 
 function pruneSeen(now: number): void {
@@ -190,6 +204,10 @@ function pruneSeen(now: number): void {
 function consumeEventId(id: string, createdAt: number, now: number): boolean {
   pruneSeen(now)
   if (seenEventIds.has(id)) return true
+  if (seenEventIds.size >= MAX_SEEN_EVENT_IDS) {
+    const oldest = seenEventIds.keys().next().value
+    if (oldest !== undefined) seenEventIds.delete(oldest)
+  }
   seenEventIds.set(id, createdAt + TIMESTAMP_TOLERANCE_SECONDS)
   return false
 }
@@ -203,8 +221,48 @@ function consumeEventId(id: string, createdAt: number, now: number): boolean {
 // Logs why a presented token was rejected so device-specific auth failures
 // (e.g. slow NIP-46 signing on mobile) are diagnosable from server logs.
 // Never logs the token itself; the event id/pubkey are public by design.
+//
+// This path is unauthenticated and runs before any rate limiting, so logging is
+// throttled to a fixed budget per window — a flood of garbage Authorization
+// headers must not translate into unbounded log volume.
+//
+// SAFETY: `detail` values are attacker-controlled. They must ONLY ever be passed
+// as the object argument to console.warn (util.inspect quotes and escapes
+// control characters) — never interpolated into the message string, which would
+// open a CRLF/ANSI log-injection sink. Values are also length-capped.
+const REJECT_LOG_WINDOW_MS = 60_000
+const REJECT_LOG_MAX_PER_WINDOW = 30
+const REJECT_LOG_VALUE_MAX_LENGTH = 256
+let rejectLogWindowStart = 0
+let rejectLogCount = 0
+
+function truncateDetail(detail?: Record<string, string | number>): Record<string, string | number> | undefined {
+  if (!detail) return undefined
+  const out: Record<string, string | number> = {}
+  for (const [key, value] of Object.entries(detail)) {
+    out[key] =
+      typeof value === 'string' && value.length > REJECT_LOG_VALUE_MAX_LENGTH
+        ? `${value.slice(0, REJECT_LOG_VALUE_MAX_LENGTH)}…`
+        : value
+  }
+  return out
+}
+
 function reject(reason: string, detail?: Record<string, string | number>): null {
-  console.warn(`nip98: rejected (${reason})`, detail ?? '')
+  const now = Date.now()
+  if (now - rejectLogWindowStart >= REJECT_LOG_WINDOW_MS) {
+    if (rejectLogCount > REJECT_LOG_MAX_PER_WINDOW) {
+      console.warn(
+        `nip98: suppressed ${rejectLogCount - REJECT_LOG_MAX_PER_WINDOW} rejection log(s) in the last window`
+      )
+    }
+    rejectLogWindowStart = now
+    rejectLogCount = 0
+  }
+  rejectLogCount++
+  if (rejectLogCount <= REJECT_LOG_MAX_PER_WINDOW) {
+    console.warn(`nip98: rejected (${reason})`, truncateDetail(detail) ?? '')
+  }
   return null
 }
 
