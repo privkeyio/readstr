@@ -42,6 +42,16 @@ interface StoredNip46Session {
   timestamp: number
 }
 
+// Last signing failure, kept so the UI can show WHY auth is failing (e.g. a
+// NIP-46 timeout on mobile) instead of a generic "could not authenticate".
+// Module-scoped because the consumer (error banner) renders outside this
+// provider's state updates.
+let lastSigningError: string | null = null
+
+export function getLastSigningError(): string | null {
+  return lastSigningError
+}
+
 // The live BunkerSigner is not serializable, so it lives in module scope
 // alongside its pool. signEvent/disconnect/restore reach it from here.
 let activeBunkerSigner: BunkerSigner | null = null
@@ -435,45 +445,55 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
     if (!isConnected || !user) return null
 
     try {
-      switch (authMethod) {
-        case 'nip07':
-          if (window.nostr?.signEvent) {
-            return await window.nostr.signEvent({ ...unsignedEvent, pubkey: user.pubkey })
-          }
-          throw new Error('NIP-07 signing not available')
-
-        case 'nip46': {
-          let signer = activeBunkerSigner
-          if (!signer) {
-            const storedSession = localStorage.getItem('nostr_session')
-            if (!storedSession) throw new Error('NIP-46 session not available')
-            const parsed = JSON.parse(storedSession) as StoredNip46Session
-            if (parsed.method !== 'nip46') throw new Error('NIP-46 session not available')
-            signer = await ensureBunkerSigner(parsed)
-          }
-          return await withTimeout(
-            signer.signEvent({
-              kind: unsignedEvent.kind,
-              content: unsignedEvent.content,
-              tags: unsignedEvent.tags,
-              created_at: unsignedEvent.created_at,
-            }),
-            NIP46_TIMEOUT_MS,
-            'NIP-46 sign',
-          )
-        }
-
-        case 'npub_readonly':
-          throw new Error('Cannot sign events in read-only npub view. Use a NIP-07 extension or remote signer for signing.')
-
-        default:
-          throw new Error('No signing method available')
-      }
+      const signed = await signEventInner(unsignedEvent)
+      lastSigningError = null
+      return signed
     } catch (error) {
+      lastSigningError = error instanceof Error ? error.message : String(error)
       console.error('Signing failed:', error)
       return null
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected, user, authMethod])
+
+  const signEventInner = async (unsignedEvent: UnsignedEvent): Promise<Event | null> => {
+    if (!user) throw new Error('Not connected')
+
+    switch (authMethod) {
+      case 'nip07':
+        if (window.nostr?.signEvent) {
+          return await window.nostr.signEvent({ ...unsignedEvent, pubkey: user.pubkey })
+        }
+        throw new Error('NIP-07 signing not available')
+
+      case 'nip46': {
+        let signer = activeBunkerSigner
+        if (!signer) {
+          const storedSession = localStorage.getItem('nostr_session')
+          if (!storedSession) throw new Error('NIP-46 session not available')
+          const parsed = JSON.parse(storedSession) as StoredNip46Session
+          if (parsed.method !== 'nip46') throw new Error('NIP-46 session not available')
+          signer = await ensureBunkerSigner(parsed)
+        }
+        return await withTimeout(
+          signer.signEvent({
+            kind: unsignedEvent.kind,
+            content: unsignedEvent.content,
+            tags: unsignedEvent.tags,
+            created_at: unsignedEvent.created_at,
+          }),
+          NIP46_TIMEOUT_MS,
+          'NIP-46 sign',
+        )
+      }
+
+      case 'npub_readonly':
+        throw new Error('Cannot sign events in read-only npub view. Use a NIP-07 extension or remote signer for signing.')
+
+      default:
+        throw new Error('No signing method available')
+    }
+  }
 
   const signEventOrThrow = useCallback(async (unsignedEvent: UnsignedEvent): Promise<Event> => {
     const signedEvent = await signEvent(unsignedEvent)
