@@ -4,6 +4,7 @@ import { TRPCReactProvider } from '@/trpc/react'
 import { NostrAuthProvider } from '@/contexts/NostrAuthContext'
 import { ThemeProvider } from '@/contexts/ThemeContext'
 import { Footer } from '@/components/footer'
+import { ServiceWorkerUpdater } from '@/components/service-worker-updater'
 
 const inter = Inter({ subsets: ['latin'] })
 const spaceGrotesk = Space_Grotesk({
@@ -50,6 +51,7 @@ export default function RootLayout({
       </head>
       <body className={`${inter.className} flex flex-col min-h-screen`}>
         <ThemeProvider>
+          <ServiceWorkerUpdater />
           <NostrAuthProvider>
             <TRPCReactProvider>
               <div className="flex-1">
