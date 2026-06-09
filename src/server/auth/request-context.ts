@@ -1,5 +1,6 @@
 import { db } from '@/server/db'
 import { verifyNip98Header } from '@/server/auth/nip98'
+import { clientIpFromHeaders } from '@/server/rate-limit'
 
 /**
  * Minimal view of the inbound request we need to build auth context. Works for
@@ -39,6 +40,7 @@ export function reconstructUrl(req: RequestLike): string {
 export interface TRPCContext {
   db: typeof db
   nostrPubkey: string | null
+  clientIp: string
 }
 
 /**
@@ -55,6 +57,7 @@ export async function buildRequestContext(
   const authHeader = req.getHeader('authorization')
 
   const nostrPubkey = await verifyNip98Header(authHeader, { url, method, body })
+  const clientIp = clientIpFromHeaders(name => req.getHeader(name))
 
-  return { db, nostrPubkey: nostrPubkey ?? null }
+  return { db, nostrPubkey: nostrPubkey ?? null, clientIp }
 }

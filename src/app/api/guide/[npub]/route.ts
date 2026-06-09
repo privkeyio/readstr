@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
 import { getNostrFetcher } from '@/lib/nostr-fetcher'
+import { rateLimit, clientIpFromHeaders } from '@/server/rate-limit'
 
 // CORS headers for native apps
 const corsHeaders = {
@@ -77,6 +78,18 @@ export async function GET(
     
     // Optionally fetch recent posts from Nostr
     if (includePosts) {
+      const ip = clientIpFromHeaders(name => request.headers.get(name) ?? undefined)
+      const limit = rateLimit('guide.includePosts', ip, 20, 60 * 1000)
+      if (!limit.allowed) {
+        return NextResponse.json({
+          success: false,
+          error: 'Too many requests',
+        }, {
+          status: 429,
+          headers: { ...corsHeaders, 'Retry-After': String(limit.retryAfterSeconds) },
+        })
+      }
+
       try {
         const nostrFetcher = getNostrFetcher()
         const posts = await nostrFetcher.fetchLongFormPosts(npub, postLimit)

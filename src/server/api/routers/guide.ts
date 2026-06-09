@@ -1,6 +1,8 @@
 import { z } from 'zod'
+import { TRPCError } from '@trpc/server'
 import { createTRPCRouter, publicProcedure, protectedProcedure } from '@/server/api/trpc'
 import { getNostrFetcher } from '@/lib/nostr-fetcher'
+import { rateLimit } from '@/server/rate-limit'
 import { nip19 } from 'nostr-tools'
 
 export const guideRouter = createTRPCRouter({
@@ -71,6 +73,14 @@ export const guideRouter = createTRPCRouter({
       tags: z.array(z.string()).min(1).max(10),
     }))
     .mutation(async ({ ctx, input }) => {
+      const limit = rateLimit('guide.submitFeed', ctx.clientIp, 5, 60 * 60 * 1000)
+      if (!limit.allowed) {
+        throw new TRPCError({
+          code: 'TOO_MANY_REQUESTS',
+          message: `Too many submissions. Try again in ${limit.retryAfterSeconds}s.`,
+        })
+      }
+
       // Check if feed already exists
       const existing = await ctx.db.guideFeed.findUnique({
         where: { npub: input.npub },
@@ -163,6 +173,14 @@ export const guideRouter = createTRPCRouter({
       npub: z.string().startsWith('npub1'),
     }))
     .mutation(async ({ ctx, input }) => {
+      const limit = rateLimit('guide.refreshFeedData', ctx.clientIp, 20, 60 * 1000)
+      if (!limit.allowed) {
+        throw new TRPCError({
+          code: 'TOO_MANY_REQUESTS',
+          message: `Too many requests. Try again in ${limit.retryAfterSeconds}s.`,
+        })
+      }
+
       const nostrFetcher = getNostrFetcher()
       const posts = await nostrFetcher.fetchLongFormPosts(input.npub, 50)
 

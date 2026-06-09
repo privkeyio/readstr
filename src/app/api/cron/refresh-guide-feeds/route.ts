@@ -5,11 +5,16 @@ import { getNostrFetcher } from '@/lib/nostr-fetcher';
 // This endpoint refreshes all guide feed metadata
 // Can be called by a cron job (e.g., Vercel Cron, external service)
 export async function GET(request: NextRequest) {
-  // Optional: Add authentication via secret token
+  // Authenticate via secret token. Fail closed: refuse to run if no secret is
+  // configured so an unconfigured deploy can't be triggered anonymously.
   const authHeader = request.headers.get('authorization');
   const cronSecret = process.env.CRON_SECRET;
-  
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+
+  if (!cronSecret) {
+    return new NextResponse('Server misconfigured: CRON_SECRET not set', { status: 500 });
+  }
+
+  if (authHeader !== `Bearer ${cronSecret}`) {
     return new NextResponse('Unauthorized', { status: 401 });
   }
 

@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
 import { getNostrFetcher } from '@/lib/nostr-fetcher'
 
@@ -50,7 +50,19 @@ const seedFeeds: SeedFeed[] = [
   },
 ]
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  // Authenticate via the same secret as the cron route. Fail closed.
+  const authHeader = request.headers.get('authorization')
+  const cronSecret = process.env.CRON_SECRET
+
+  if (!cronSecret) {
+    return new NextResponse('Server misconfigured: CRON_SECRET not set', { status: 500 })
+  }
+
+  if (authHeader !== `Bearer ${cronSecret}`) {
+    return new NextResponse('Unauthorized', { status: 401 })
+  }
+
   const results = {
     total: seedFeeds.length,
     success: 0,
