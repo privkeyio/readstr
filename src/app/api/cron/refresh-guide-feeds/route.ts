@@ -1,17 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/server/db';
 import { getNostrFetcher } from '@/lib/nostr-fetcher';
+import { requireCronSecret } from '@/server/auth/cron';
 
 // This endpoint refreshes all guide feed metadata
 // Can be called by a cron job (e.g., Vercel Cron, external service)
 export async function GET(request: NextRequest) {
-  // Optional: Add authentication via secret token
-  const authHeader = request.headers.get('authorization');
-  const cronSecret = process.env.CRON_SECRET;
-  
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
-    return new NextResponse('Unauthorized', { status: 401 });
-  }
+  const authFailure = requireCronSecret(request);
+  if (authFailure) return authFailure;
 
   try {
     // Get all active guide feeds

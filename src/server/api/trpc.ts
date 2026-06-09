@@ -60,8 +60,8 @@ const enforceNostrAuth = t.middleware(({ ctx, next }) => {
   }
   return next({
     ctx: {
+      ...ctx,
       nostrPubkey: ctx.nostrPubkey,
-      db: ctx.db,
     },
   })
 })

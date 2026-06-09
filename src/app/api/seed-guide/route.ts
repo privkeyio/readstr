@@ -1,6 +1,7 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
 import { getNostrFetcher } from '@/lib/nostr-fetcher'
+import { requireCronSecret } from '@/server/auth/cron'
 
 interface SeedFeed {
   npub: string
@@ -50,7 +51,10 @@ const seedFeeds: SeedFeed[] = [
   },
 ]
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const authFailure = requireCronSecret(request)
+  if (authFailure) return authFailure
+
   const results = {
     total: seedFeeds.length,
     success: 0,

@@ -5,6 +5,7 @@ import { unified } from 'unified';
 import rehypeParse from 'rehype-parse';
 import rehypeSanitize, { defaultSchema, type Options as SanitizeSchema } from 'rehype-sanitize';
 import rehypeStringify from 'rehype-stringify';
+import { rateLimit, clientIpFromRequest } from '@/server/rate-limit';
 
 // Sanitize generated HTML before it lands in content:encoded. readstr's own UI
 // renders feeds through rehype-sanitize, but third-party RSS readers consume this
@@ -149,6 +150,15 @@ function convertMarkdownToHtml(markdown: string, featuredImage?: string): string
 }
 
 export async function GET(request: NextRequest) {
+  const ip = clientIpFromRequest(request);
+  const limit = rateLimit('nostr-rss', ip, 20, 60 * 1000);
+  if (!limit.allowed) {
+    return new NextResponse('Too many requests.', {
+      status: 429,
+      headers: { 'Retry-After': String(limit.retryAfterSeconds) },
+    });
+  }
+
   const { searchParams } = new URL(request.url);
   const npub = searchParams.get('npub');
   const tags = searchParams.get('tags')?.split(',').map(t => t.trim()).filter(Boolean);
