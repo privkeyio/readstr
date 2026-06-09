@@ -6,6 +6,7 @@
     "build": "next build --webpack",
     "dev": "next dev",
     "lint": "eslint .",
+    "test": "vitest run",
     "start": "next start",
     "postinstall": "prisma generate"
   },
@@ -21,7 +22,6 @@
     "cheerio": "^1.1.2",
     "jsonwebtoken": "^9.0.2",
     "next": "^16.0.2",
-    "next-pwa": "^5.6.0",
     "nostr-tools": "^2.17.2",
     "react": "^18",
     "react-dom": "^18",
@@ -37,6 +37,7 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@ducanh2912/next-pwa": "^10.2.9",
     "@tailwindcss/typography": "^0.5.19",
     "@types/eslint": "^8.56.0",
     "@types/jsonwebtoken": "^9.0.5",
@@ -49,10 +50,15 @@
     "autoprefixer": "^10.1",
     "eslint": "^9.39.1",
     "eslint-config-next": "^16.0.2",
-    "postcss": "^8",
+    "postcss": "^8.5.10",
     "prisma": "^5.8.1",
     "tailwindcss": "^3.3.0",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.8"
+  },
+  "overrides": {
+    "postcss": "$postcss",
+    "serialize-javascript": "^7.0.5"
   },
   "ct3aMetadata": {
     "initVersion": "7.25.2"
