@@ -38,7 +38,7 @@ describe('rateLimit', () => {
     expect(denied.retryAfterSeconds).toBe(8)
   })
 
-  it('rounds retryAfterSeconds up to a minimum of 1 second', () => {
+  it('ceils a sub-second remaining window up to 1 second', () => {
     rateLimit('ep', 'ip', 1, 1000, 0)
     const denied = rateLimit('ep', 'ip', 1, 1000, 999)
     expect(denied.allowed).toBe(false)

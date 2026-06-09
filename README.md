@@ -137,6 +137,17 @@ Readstr is a full-stack web application built with Next.js that provides a unifi
 - **Docker Compose** - Multi-container orchestration
 - **Caddy** - Reverse proxy with automatic HTTPS
 
+## Dependency Overrides
+
+The `overrides` block in `package.json` pins transitive dependencies to patched
+versions that remediate known advisories:
+
+- **serialize-javascript** `^7.0.5` — fixes RCE via `RegExp.flags` /
+  `Date.prototype.toISOString()` ([GHSA-5c6j-r48x-rmvq](https://github.com/advisories/GHSA-5c6j-r48x-rmvq), affected `<= 7.0.2`).
+- **postcss** `$postcss` — forces transitive consumers onto the top-level
+  `postcss` (`^8.5.10`), past the line-return parsing flaw
+  ([GHSA-7fh5-64p2-3v2j](https://github.com/advisories/GHSA-7fh5-64p2-3v2j), affected `< 8.4.31`).
+
 ## Getting Started
 
 ### Prerequisites
