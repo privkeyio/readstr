@@ -42,7 +42,7 @@ Install Readstr as a standalone app on your device!
 ### Technical Details
 
 #### Service Worker
-- Automatically registered via `next-pwa`
+- Automatically registered via `@ducanh2912/next-pwa`
 - Caches static assets (JS, CSS, images, fonts)
 - Network-first strategy for API calls
 - Cache-first for static resources
@@ -53,7 +53,7 @@ To build with PWA support:
 npm run build -- --webpack
 ```
 
-**Note**: Next.js 16 uses Turbopack by default, but `next-pwa` requires webpack. The `--webpack` flag ensures proper PWA generation.
+**Note**: Next.js 16 uses Turbopack by default, but `@ducanh2912/next-pwa` requires webpack. The `--webpack` flag ensures proper PWA generation.
 
 #### Icons
 - SVG icon at `/public/icon.svg`

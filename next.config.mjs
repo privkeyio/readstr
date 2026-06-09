@@ -1,11 +1,13 @@
 import './src/env.mjs'
-import nextPWA from 'next-pwa'
+import withPWAInit from '@ducanh2912/next-pwa'
 
-const withPWA = nextPWA({
+const withPWA = withPWAInit({
   dest: 'public',
   register: true,
-  skipWaiting: true,
   disable: process.env.NODE_ENV === 'development',
+  workboxOptions: {
+    skipWaiting: true,
+  },
 })
 
 // Conservative CSP. img-src/media-src/connect-src stay permissive because the

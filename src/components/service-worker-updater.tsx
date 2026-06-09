@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react'
 
-// next-pwa registers the service worker with skipWaiting + clientsClaim, so a new
+// @ducanh2912/next-pwa registers the service worker with skipWaiting + clientsClaim, so a new
 // service worker activates and claims clients on its own. What's missing is the
 // page actually reloading onto the new bundles, plus a proactive update check —
 // browsers only re-fetch sw.js on navigation or every ~24h, so a long-lived
