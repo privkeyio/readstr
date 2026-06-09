@@ -191,7 +191,7 @@ export function FeedReader() {
     return undefined
   }, [organizationMode, selectedCategoryId, selectedTags])
   
-  const { data: feedsData = [], refetch: refetchFeeds, isLoading: isFeedsLoading, isFetched: isFeedsFetched } = api.feed.getFeeds.useQuery(
+  const { data: feedsData = [], isLoading: isFeedsLoading, isFetched: isFeedsFetched, error: feedsQueryError } = api.feed.getFeeds.useQuery(
     getFeedsInput,
     {
       enabled: !!user && !!user.npub,
@@ -206,6 +206,10 @@ export function FeedReader() {
     const checkRemoteSync = async () => {
       // Only check once per session and AFTER feeds query has completed (not just started)
       if (hasCheckedSyncRef.current || !user?.npub || !isFeedsFetched || isFeedsLoading) return
+      // If the feeds query failed (e.g. auth failure), local state is unknown —
+      // don't offer an import that can't be persisted anyway. Leave the ref
+      // unset so the check re-runs once the query recovers.
+      if (feedsQueryError) return
       hasCheckedSyncRef.current = true
 
       // Skip if synced recently (within last hour)
@@ -256,7 +260,7 @@ export function FeedReader() {
     // 'feeds' is derived from feedsData each render (new reference); depending on
     // feedsData here is the stable proxy and the check is guarded to run once per session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.npub, feedsData, isFeedsFetched, isFeedsLoading])
+  }, [user?.npub, feedsData, isFeedsFetched, isFeedsLoading, feedsQueryError])
   
   const { data: userTags = [] } = api.feed.getUserTags.useQuery(undefined, {
     enabled: !!user && !!user.npub,
@@ -811,6 +815,8 @@ export function FeedReader() {
       categoryMap.set(cat.name, cat.id)
     }
 
+    const failures: Array<{ url: string; message: string }> = []
+
     for (const feed of feedsToImport) {
       try {
         let categoryId: string | undefined
@@ -857,7 +863,23 @@ export function FeedReader() {
         }
       } catch (error) {
         console.error(`Failed to import feed: ${feed.url}`, error)
+        failures.push({
+          url: feed.url,
+          message: error instanceof Error ? error.message : String(error),
+        })
       }
+    }
+
+    // Surface failures instead of silently pretending the import succeeded —
+    // otherwise an auth failure looks like a successful import of nothing.
+    if (failures.length > 0) {
+      const detail = failures[0]!.message
+      alert(
+        `${failures.length} of ${feedsToImport.length} subscription(s) failed to import.\n\n` +
+        `First error: ${detail}\n\n` +
+        `If this mentions authentication, your signer may not be approving requests — check your signer app and try again.`
+      )
+      throw new Error(`Import failed for ${failures.length} of ${feedsToImport.length} feeds: ${detail}`)
     }
   }
   
@@ -936,6 +958,23 @@ export function FeedReader() {
 
   return (
     <div className="flex h-screen bg-theme-secondary">
+      {/* Subscriptions failed to load (e.g. signer auth failure) — without this
+          banner an auth problem renders as a silently empty reader. */}
+      {feedsQueryError && (
+        <div className="fixed top-16 md:top-0 left-0 right-0 z-[60] bg-red-600 text-white text-sm px-4 py-2 flex items-center justify-between gap-3">
+          <span className="truncate">
+            {feedsQueryError.data?.code === 'UNAUTHORIZED'
+              ? 'Could not authenticate with your signer — subscriptions can\'t be loaded or saved. Check your signer app, then retry.'
+              : `Failed to load subscriptions: ${feedsQueryError.message}`}
+          </span>
+          <button
+            onClick={() => invalidateFeedData()}
+            className="flex-shrink-0 underline font-semibold"
+          >
+            Retry
+          </button>
+        </div>
+      )}
       {/* Mobile Header */}
       <div className="md:hidden fixed top-0 left-0 right-0 bg-theme-surface border-b border-theme-primary z-50 shadow-theme-sm">
         <div className="flex items-center justify-between p-4">
@@ -2044,7 +2083,13 @@ export function FeedReader() {
               </button>
               <button
                 onClick={async () => {
-                  await handleImportFeeds(pendingSyncImport)
+                  try {
+                    await handleImportFeeds(pendingSyncImport)
+                  } catch {
+                    // Import failed (already surfaced to the user). Keep the
+                    // prompt open and the watermark unadvanced so retry works.
+                    return
+                  }
                   // Re-check freshness: another sync path may have advanced the
                   // watermark while this prompt was open, so keep it monotonic.
                   advanceSyncWatermarkIfFresh('readstr-subscriptions', pendingSyncCreatedAt ?? undefined)
