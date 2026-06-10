@@ -104,7 +104,7 @@ We've implemented **fully automatic bidirectional sync** for your subscriptions!
 
 **Manual sync still available:** You can still use Settings > Sync > Export/Import if you want to force an immediate sync.
 
-See [BIDIRECTIONAL_SYNC.md](./BIDIRECTIONAL_SYNC.md) for full technical details.
+See [BIDIRECTIONAL_SYNC.md](./docs/BIDIRECTIONAL_SYNC.md) for full technical details.
 
 ---
 
@@ -127,7 +127,7 @@ When you import feeds from another device, if they have categories:
 
 **Example:** You organize feeds into "Tech 💻", "News 📰", and "Bitcoin ₿" on your desktop. When you open Readstr on your phone, those exact categories appear with the same colors and icons.
 
-See [CATEGORY_SYNC.md](./CATEGORY_SYNC.md) for implementation details.
+See [CATEGORY_SYNC.md](./docs/CATEGORY_SYNC.md) for implementation details.
 
 ---
 

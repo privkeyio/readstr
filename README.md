@@ -279,10 +279,10 @@ To switch modes:
 ## API Documentation
 
 ### Guide API
-Public API for accessing the Nostr feed directory. See [GUIDE_API.md](./GUIDE_API.md) for full documentation.
+Public API for accessing the Nostr feed directory. See [GUIDE_API.md](./docs/GUIDE_API.md) for full documentation.
 
 ### Subscription Sync Protocol
-Cross-app subscription sync using Nostr kind 30404 events. See [SUBSCRIPTION_SYNC.md](./SUBSCRIPTION_SYNC.md) for implementation details.
+Cross-app subscription sync using Nostr kind 30404 events. See [SUBSCRIPTION_SYNC.md](./docs/SUBSCRIPTION_SYNC.md) for implementation details.
 
 ## Database Schema
 

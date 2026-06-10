@@ -57,3 +57,6 @@ CLAUDE.md
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# mdbook build output
+/book
