@@ -960,7 +960,7 @@ export function FeedReader() {
     <div className="flex h-screen bg-theme-secondary">
       {/* Subscriptions failed to load (e.g. signer auth failure) — without this
           banner an auth problem renders as a silently empty reader. */}
-      {feedsQueryError && (
+      {feedsQueryError && !showAddFeed && !showSettings && !showSyncPrompt && !editingFeedId && (
         <div className="fixed top-16 md:top-0 left-0 right-0 z-[60] bg-red-600 text-white text-sm px-4 py-2 flex items-center justify-between gap-3">
           <span className="min-w-0 break-words">
             {feedsQueryError.data?.code === 'UNAUTHORIZED'
