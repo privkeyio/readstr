@@ -845,14 +845,21 @@ async function handleMessage(
         return { success: true };
       }
 
-      // Never downgrade an nsec (root-key) session to a weaker/keyless one,
+      const resolvedMethod: NostrAuthData['method'] =
+        session.method === 'nip07' ? 'nip07' : 'none';
+
+      // Never downgrade a usable session (nsec or nip07) to a keyless one,
       // even if the in-memory key was lost on a service-worker restart.
-      if (existing.nostrAuth?.method === 'nsec') {
+      if (
+        resolvedMethod === 'none' &&
+        existing.nostrAuth?.method != null &&
+        existing.nostrAuth.method !== 'none'
+      ) {
         return { success: true };
       }
 
       const nostrAuth: NostrAuthData = {
-        method: session.method === 'nip07' ? 'nip07' : 'none',
+        method: resolvedMethod,
         pubkey: session.pubkey,
         npub: session.npub,
       };

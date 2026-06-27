@@ -1342,27 +1342,36 @@ export const feedRouter = createTRPCRouter({
         return { success: true }
       }
 
-      const unreadItems = await ctx.db.feedItem.findMany({
-        where: {
-          feedId: { in: feedIds },
-          readItems: { none: { userPubkey: ctx.nostrPubkey } },
-        },
-        select: { id: true },
-      })
+      const PAGE_SIZE = 10000
+      let cursor: string | undefined
+      for (;;) {
+        const page = await ctx.db.feedItem.findMany({
+          where: {
+            feedId: { in: feedIds },
+            readItems: { none: { userPubkey: ctx.nostrPubkey } },
+          },
+          select: { id: true },
+          orderBy: { id: 'asc' },
+          take: PAGE_SIZE,
+          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        })
 
-      if (unreadItems.length === 0) {
-        return { success: true }
-      }
+        if (page.length === 0) {
+          break
+        }
 
-      const CHUNK_SIZE = 10000
-      for (let i = 0; i < unreadItems.length; i += CHUNK_SIZE) {
         await ctx.db.readItem.createMany({
-          data: unreadItems.slice(i, i + CHUNK_SIZE).map((item: { id: string }) => ({
+          data: page.map((item: { id: string }) => ({
             userPubkey: ctx.nostrPubkey,
             itemId: item.id,
           })),
           skipDuplicates: true,
         })
+
+        if (page.length < PAGE_SIZE) {
+          break
+        }
+        cursor = page[page.length - 1]!.id
       }
 
       return { success: true }
