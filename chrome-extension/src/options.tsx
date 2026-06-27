@@ -5,7 +5,7 @@ import { isValidNsec } from './nostr';
 import { normalizeWebAppUrl } from './utils/webAppUrl';
 
 const DEFAULT_SYNC_SETTINGS: SyncSettings = {
-  webAppUrl: 'https://readstr.privkey.io:8444',
+  webAppUrl: 'https://readstr.privkey.io',
   pollIntervalMinutes: 5,
   notificationsEnabled: true,
   notifyOnNewItems: true,
@@ -657,7 +657,7 @@ function App() {
             value={syncSettings.webAppUrl}
             onChange={(e) => handleWebAppUrlChange(e.target.value)}
             onBlur={() => void handleWebAppUrlBlur()}
-            placeholder="https://readstr.privkey.io:8444"
+            placeholder="https://readstr.privkey.io"
           />
           <p className="form-hint">URL of your Readstr instance (for self-hosted)</p>
         </div>
