@@ -25,7 +25,7 @@ import { feedDatabase } from './db/feedDatabase';
 const ALARM_NAME = 'refresh-feeds';
 const DEFAULT_POLL_INTERVAL = 5;
 const MAX_SEEN_ITEMS = 1000;
-const DEFAULT_WEB_APP_URL = 'https://readstr.privkey.io:8444';
+const DEFAULT_WEB_APP_URL = 'https://readstr.privkey.io';
 
 const ALLOWED_PROTOCOLS = ['https:', 'http:'];
 
