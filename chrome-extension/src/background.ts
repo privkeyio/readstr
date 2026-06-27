@@ -576,7 +576,7 @@ async function tryRestoreAuthFromOpenTabs(): Promise<boolean> {
         };
         if (response?.session?.pubkey) {
           const nostrAuth: NostrAuthData = {
-            method: response.session.method === 'nip07' ? 'nip07' : 'nsec',
+            method: response.session.method === 'nip07' ? 'nip07' : 'none',
             pubkey: response.session.pubkey,
             npub: response.session.npub,
           };
@@ -852,7 +852,7 @@ async function handleMessage(
       }
 
       const nostrAuth: NostrAuthData = {
-        method: session.method === 'nip07' ? 'nip07' : 'nsec',
+        method: session.method === 'nip07' ? 'nip07' : 'none',
         pubkey: session.pubkey,
         npub: session.npub,
       };

@@ -1354,13 +1354,16 @@ export const feedRouter = createTRPCRouter({
         return { success: true }
       }
 
-      await ctx.db.readItem.createMany({
-        data: unreadItems.map((item: { id: string }) => ({
-          userPubkey: ctx.nostrPubkey,
-          itemId: item.id,
-        })),
-        skipDuplicates: true,
-      })
+      const CHUNK_SIZE = 10000
+      for (let i = 0; i < unreadItems.length; i += CHUNK_SIZE) {
+        await ctx.db.readItem.createMany({
+          data: unreadItems.slice(i, i + CHUNK_SIZE).map((item: { id: string }) => ({
+            userPubkey: ctx.nostrPubkey,
+            itemId: item.id,
+          })),
+          skipDuplicates: true,
+        })
+      }
 
       return { success: true }
     }),
