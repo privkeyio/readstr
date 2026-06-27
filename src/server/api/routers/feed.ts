@@ -1328,6 +1328,55 @@ export const feedRouter = createTRPCRouter({
       return { success: true }
     }),
 
+  // Mark all unread items across the user's subscriptions as read
+  markAllAsRead: protectedProcedure
+    .input(z.object({}).optional())
+    .mutation(async ({ ctx }) => {
+      const subscriptions = await ctx.db.subscription.findMany({
+        where: { userPubkey: ctx.nostrPubkey, deletedAt: null },
+        select: { feedId: true },
+      })
+
+      const feedIds = subscriptions.map((sub: { feedId: string }) => sub.feedId)
+      if (feedIds.length === 0) {
+        return { success: true }
+      }
+
+      const PAGE_SIZE = 10000
+      let cursor: string | undefined
+      for (;;) {
+        const page = await ctx.db.feedItem.findMany({
+          where: {
+            feedId: { in: feedIds },
+            readItems: { none: { userPubkey: ctx.nostrPubkey } },
+          },
+          select: { id: true },
+          orderBy: { id: 'asc' },
+          take: PAGE_SIZE,
+          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        })
+
+        if (page.length === 0) {
+          break
+        }
+
+        await ctx.db.readItem.createMany({
+          data: page.map((item: { id: string }) => ({
+            userPubkey: ctx.nostrPubkey,
+            itemId: item.id,
+          })),
+          skipDuplicates: true,
+        })
+
+        if (page.length < PAGE_SIZE) {
+          break
+        }
+        cursor = page[page.length - 1]!.id
+      }
+
+      return { success: true }
+    }),
+
   // Discover feed URLs from a website
   discoverFeeds: protectedProcedure
     .input(z.object({

@@ -576,7 +576,7 @@ async function tryRestoreAuthFromOpenTabs(): Promise<boolean> {
         };
         if (response?.session?.pubkey) {
           const nostrAuth: NostrAuthData = {
-            method: response.session.method === 'nip07' ? 'nip07' : 'nsec',
+            method: response.session.method === 'nip07' ? 'nip07' : 'none',
             pubkey: response.session.pubkey,
             npub: response.session.npub,
           };
@@ -834,12 +834,32 @@ async function handleMessage(
       }
 
       const existing = await getStorageData();
-      if (existing.nostrAuth?.method === 'nsec' && sessionPrivateKeyHex) {
+      const existingPubkey = existing.nostrAuth?.pubkey ?? null;
+      const hasActiveAccount =
+        !!existing.authToken ||
+        (existingPubkey != null && existing.nostrAuth?.method !== 'none');
+
+      // Never silently switch accounts: only adopt when the extension has no
+      // active account, or when the pubkeys already match.
+      if (hasActiveAccount && existingPubkey !== session.pubkey) {
+        return { success: true };
+      }
+
+      const resolvedMethod: NostrAuthData['method'] =
+        session.method === 'nip07' ? 'nip07' : 'none';
+
+      // Never downgrade a usable session (nsec or nip07) to a keyless one,
+      // even if the in-memory key was lost on a service-worker restart.
+      if (
+        resolvedMethod === 'none' &&
+        existing.nostrAuth?.method != null &&
+        existing.nostrAuth.method !== 'none'
+      ) {
         return { success: true };
       }
 
       const nostrAuth: NostrAuthData = {
-        method: session.method === 'nip07' ? 'nip07' : 'nsec',
+        method: resolvedMethod,
         pubkey: session.pubkey,
         npub: session.npub,
       };
