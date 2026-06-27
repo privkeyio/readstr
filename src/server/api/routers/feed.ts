@@ -1328,6 +1328,43 @@ export const feedRouter = createTRPCRouter({
       return { success: true }
     }),
 
+  // Mark all unread items across the user's subscriptions as read
+  markAllAsRead: protectedProcedure
+    .input(z.object({}).optional())
+    .mutation(async ({ ctx }) => {
+      const subscriptions = await ctx.db.subscription.findMany({
+        where: { userPubkey: ctx.nostrPubkey, deletedAt: null },
+        select: { feedId: true },
+      })
+
+      const feedIds = subscriptions.map((sub: { feedId: string }) => sub.feedId)
+      if (feedIds.length === 0) {
+        return { success: true }
+      }
+
+      const unreadItems = await ctx.db.feedItem.findMany({
+        where: {
+          feedId: { in: feedIds },
+          readItems: { none: { userPubkey: ctx.nostrPubkey } },
+        },
+        select: { id: true },
+      })
+
+      if (unreadItems.length === 0) {
+        return { success: true }
+      }
+
+      await ctx.db.readItem.createMany({
+        data: unreadItems.map((item: { id: string }) => ({
+          userPubkey: ctx.nostrPubkey,
+          itemId: item.id,
+        })),
+        skipDuplicates: true,
+      })
+
+      return { success: true }
+    }),
+
   // Discover feed URLs from a website
   discoverFeeds: protectedProcedure
     .input(z.object({

@@ -834,7 +834,20 @@ async function handleMessage(
       }
 
       const existing = await getStorageData();
-      if (existing.nostrAuth?.method === 'nsec' && sessionPrivateKeyHex) {
+      const existingPubkey = existing.nostrAuth?.pubkey ?? null;
+      const hasActiveAccount =
+        !!existing.authToken ||
+        (existingPubkey != null && existing.nostrAuth?.method !== 'none');
+
+      // Never silently switch accounts: only adopt when the extension has no
+      // active account, or when the pubkeys already match.
+      if (hasActiveAccount && existingPubkey !== session.pubkey) {
+        return { success: true };
+      }
+
+      // Never downgrade an nsec (root-key) session to a weaker/keyless one,
+      // even if the in-memory key was lost on a service-worker restart.
+      if (existing.nostrAuth?.method === 'nsec') {
         return { success: true };
       }
 
