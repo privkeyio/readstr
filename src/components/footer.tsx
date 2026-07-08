@@ -31,6 +31,13 @@ export function Footer() {
               Terms of Service
             </Link>
             <span className="text-white/20">•</span>
+            <Link
+              href="/legal/privacy"
+              className="transition-colors hover:text-[#27ae60]"
+            >
+              Privacy Policy
+            </Link>
+            <span className="text-white/20">•</span>
             <span>© {new Date().getFullYear()} PrivKey LLC</span>
           </div>
         </div>

@@ -1,0 +1,74 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_base.css">
+<style>
+.canvas { width: 1280px; height: 800px; display: flex; flex-direction: column; }
+.cap { padding: 46px 80px 0; }
+.cap .logo { font-size: 22px; font-weight: 800; }
+.cap h1 { font-size: 42px; font-weight: 800; letter-spacing: -.02em; margin-top: 12px; }
+.cap p { font-size: 19px; color: var(--muted); margin-top: 10px; }
+.stage { flex: 1; padding: 30px 80px 56px; }
+.opt { height: 100%; border-radius: 16px; border: 1px solid rgba(255,255,255,.09); background: #0f141a; box-shadow: 0 34px 80px rgba(0,0,0,.5); padding: 34px 40px; display: grid; grid-template-columns: 1.1fr 1fr; gap: 26px; }
+h3 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+.acct { padding: 20px; }
+.acct .conn { display: flex; align-items: center; gap: 12px; }
+.acct .av { width: 46px; height: 46px; border-radius: 50%; background: linear-gradient(120deg,var(--green),var(--green3)); }
+.acct .conn b { font-size: 16px; }
+.acct .conn small { display:block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.acct .npub { margin-top: 16px; font-family: ui-monospace, monospace; font-size: 12px; color: var(--green2); background: rgba(39,174,96,.1); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; word-break: break-all; }
+.acct .method { margin-top: 12px; font-size: 13px; color: var(--muted); }
+.acct .method b { color: var(--txt); }
+.set { padding: 20px; margin-top: 22px; }
+.srow { display: flex; align-items: center; justify-content: space-between; padding: 11px 0; font-size: 14px; }
+.srow + .srow { border-top: 1px solid rgba(255,255,255,.05); }
+.tog { width: 42px; height: 24px; border-radius: 999px; background: linear-gradient(120deg,var(--green),var(--green2)); position: relative; }
+.tog::after { content:""; position:absolute; top:3px; right:3px; width:18px; height:18px; border-radius:50%; background:#06210f; }
+.tog.off { background: rgba(255,255,255,.12); }
+.tog.off::after { left:3px; right:auto; background:#9aa7b4; }
+.feeds { padding: 20px; }
+.frow { display: flex; align-items: center; gap: 12px; padding: 11px 0; }
+.frow + .frow { border-top: 1px solid rgba(255,255,255,.05); }
+.frow .ic { width: 30px; height: 30px; border-radius: 8px; background: rgba(39,174,96,.14); color: var(--green2); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 11px; }
+.frow .t { flex: 1; }
+.frow .t b { display: block; font-size: 14px; }
+.frow .t small { color: var(--muted); font-size: 12px; }
+.frow .x { color: var(--muted); font-size: 18px; }
+.opml { margin-top: 14px; display: flex; gap: 10px; }
+.opml .btn { flex: 1; padding: 10px; font-size: 13px; }
+</style></head>
+<body>
+<div class="canvas">
+  <div class="cap">
+    <div class="logo">Read<span class="grad">str</span></div>
+    <h1>Full control in settings</h1>
+    <p>Sign in with your Nostr identity, manage feeds, tune notifications, and import or export OPML.</p>
+  </div>
+  <div class="stage">
+    <div class="opt">
+      <div>
+        <h3>Nostr account</h3>
+        <div class="card acct">
+          <div class="conn"><div class="av"></div><div><b>Connected</b><small>Signed in with NIP-07 signer</small></div></div>
+          <div class="npub">npub1q8s7f0readstr9zx4vk2m6h3jd0lp7yq5t8w2n4c6b8a0e2g4h6k8s0readstr</div>
+          <div class="method">Signing method: <b>NIP-07 (keyless)</b> · your key never leaves your device</div>
+        </div>
+        <div class="card set">
+          <h3 style="margin-bottom:6px">Notifications</h3>
+          <div class="srow"><span>Notify on new items</span><span class="tog"></span></div>
+          <div class="srow"><span>Sound on notification</span><span class="tog off"></span></div>
+          <div class="srow"><span>Max notifications per check</span><span style="color:var(--muted)">5</span></div>
+          <div class="srow"><span>Check interval</span><span style="color:var(--muted)">every 5 min</span></div>
+        </div>
+      </div>
+      <div>
+        <h3>Your feeds</h3>
+        <div class="card feeds">
+          <div class="frow"><div class="ic">RSS</div><div class="t"><b>Hacker News</b><small>news.ycombinator.com/rss</small></div><span class="x">×</span></div>
+          <div class="frow"><div class="ic" style="background:rgba(88,214,141,.16)">NOS</div><div class="t"><b>Nostr long-form</b><small>NIP-23 · relays</small></div><span class="x">×</span></div>
+          <div class="frow"><div class="ic">RSS</div><div class="t"><b>PrivKey Blog</b><small>privkey.io/blog/feed.xml</small></div><span class="x">×</span></div>
+          <div class="frow"><div class="ic">RSS</div><div class="t"><b>The Example Blog</b><small>example-blog.com/feed.xml</small></div><span class="x">×</span></div>
+          <div class="opml"><span class="btn btn-ghost">Import OPML</span><span class="btn btn-ghost">Export OPML</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>

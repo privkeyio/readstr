@@ -1,0 +1,24 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_base.css">
+<style>
+.canvas { width: 440px; height: 280px; display: flex; flex-direction: column; justify-content: center; padding: 30px 34px; }
+.logo { font-size: 46px; line-height: 1; }
+.dot { color: var(--green); }
+.tag { margin-top: 12px; font-size: 17px; font-weight: 600; color: var(--txt); }
+.sub { margin-top: 6px; font-size: 13px; color: var(--muted); }
+.chips { margin-top: 20px; display: flex; gap: 8px; }
+.chips .pill { font-size: 11px; padding: 5px 11px; }
+.glyph { position: absolute; right: -30px; bottom: -34px; width: 200px; height: 200px; opacity: .16; }
+</style></head>
+<body>
+<div class="canvas">
+  <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="#2ecc71" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.6" fill="#2ecc71"/></svg>
+  <div class="logo brandmark">Read<span class="grad">str</span><span class="dot">.</span></div>
+  <div class="tag">RSS + Nostr, synced everywhere</div>
+  <div class="sub">Detect feeds on any page · sign in with Nostr · read across devices</div>
+  <div class="chips">
+    <span class="pill">Feed detection</span>
+    <span class="pill">Nostr sync</span>
+    <span class="pill">Self-hostable</span>
+  </div>
+</div>
+</body></html>
