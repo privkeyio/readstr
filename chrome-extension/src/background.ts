@@ -27,6 +27,15 @@ const DEFAULT_POLL_INTERVAL = 5;
 const MAX_SEEN_ITEMS = 1000;
 const DEFAULT_WEB_APP_URL = 'https://readstr.privkey.io';
 
+// Installs from before the server moved off :8444 (see PR #88) have the dead
+// origin persisted in settings; the changed code default never rewrites stored
+// settings, so those requests fail and sync silently stalls. Rewrite the known
+// legacy default to the current one on startup.
+const LEGACY_WEB_APP_URLS = new Set([
+  'https://readstr.privkey.io:8444',
+  'https://readstr.privkey.io:8444/',
+]);
+
 const ALLOWED_PROTOCOLS = ['https:', 'http:'];
 
 class AuthUnavailableError extends Error {
@@ -1275,6 +1284,14 @@ function setupContextMenu(): void {
   });
 }
 
+async function migrateLegacyWebAppUrl(): Promise<void> {
+  const result = await chrome.storage.local.get('settings');
+  const settings = result['settings'] as ExtensionSettings | undefined;
+  if (settings?.webAppUrl && LEGACY_WEB_APP_URLS.has(settings.webAppUrl)) {
+    await saveStorageData({ settings: { ...settings, webAppUrl: DEFAULT_WEB_APP_URL } });
+  }
+}
+
 async function purgePersistedPrivateKey(): Promise<void> {
   const result = await chrome.storage.local.get('nostrAuth');
   const stored = result['nostrAuth'] as (NostrAuthData & { privateKeyHex?: unknown }) | undefined;
@@ -1424,6 +1441,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 void (async () => {
+  await migrateLegacyWebAppUrl();
   const alarm = await chrome.alarms.get(ALARM_NAME);
   if (!alarm) {
     await setupAlarm();
