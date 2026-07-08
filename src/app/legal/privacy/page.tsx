@@ -162,10 +162,10 @@ export default function PrivacyPage() {
               <p>
                 Questions about this policy or your data can be sent to{' '}
                 <a
-                  href="mailto:kyle@privkey.io"
+                  href="mailto:information@privkey.io"
                   className="font-medium text-[#27ae60] transition-colors hover:text-[#2ecc71]"
                 >
-                  kyle@privkey.io
+                  information@privkey.io
                 </a>
                 . Readstr is open source at{' '}
                 <a
