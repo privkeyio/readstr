@@ -1,0 +1,77 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_base.css">
+<style>
+.canvas { width: 1280px; height: 800px; display: flex; flex-direction: column; }
+.cap { padding: 46px 70px 0; }
+.cap .logo { font-size: 22px; font-weight: 800; color: var(--txt); }
+.cap h1 { font-size: 42px; font-weight: 800; letter-spacing: -.02em; margin-top: 14px; }
+.cap p { font-size: 19px; color: var(--muted); margin-top: 10px; }
+.stage { flex: 1; position: relative; padding: 34px 70px 60px; }
+.browser { height: 100%; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,.09);
+  background: #0f141a; box-shadow: 0 40px 90px rgba(0,0,0,.5); position: relative; }
+.chrome { height: 46px; background: #11161d; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-bottom: 1px solid rgba(255,255,255,.06); }
+.tl { width: 12px; height: 12px; border-radius: 50%; }
+.omni { margin-left: 14px; flex: 1; height: 26px; border-radius: 8px; background: rgba(255,255,255,.06); display: flex; align-items: center; padding: 0 12px; color: var(--muted); font-size: 13px; }
+.page { padding: 46px 60px; }
+.page .kicker { color: var(--green2); font-weight: 700; font-size: 14px; letter-spacing: .08em; text-transform: uppercase; }
+.page h2 { font-size: 34px; font-weight: 800; margin-top: 10px; color: #f2f6fa; max-width: 620px; }
+.sk { height: 13px; border-radius: 6px; background: rgba(255,255,255,.07); margin-top: 14px; }
+.cols { display: flex; gap: 40px; margin-top: 34px; }
+.cols > div { flex: 1; }
+/* floating widget */
+.fab-wrap { position: absolute; right: 40px; bottom: 40px; display: flex; flex-direction: column; align-items: flex-end; gap: 14px; }
+.menu { width: 340px; }
+.menu .card { padding: 14px; }
+.menu .mh { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px 12px; border-bottom: 1px solid var(--line); }
+.menu .mh span { font-weight: 700; font-size: 15px; }
+.feed { display: flex; align-items: center; gap: 12px; padding: 11px 6px; }
+.feed .ic { width: 30px; height: 30px; border-radius: 8px; background: rgba(39,174,96,.16); color: var(--green2); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 11px; }
+.feed .t { flex: 1; }
+.feed .t b { display: block; font-size: 14px; }
+.feed .t small { color: var(--muted); font-size: 12px; }
+.feed .add { font-size: 12px; padding: 6px 12px; }
+.addall { margin-top: 10px; width: 100%; padding: 11px; font-size: 14px; }
+.fab { width: 62px; height: 62px; border-radius: 50%; background: linear-gradient(120deg, var(--green), var(--green2)); display: flex; align-items: center; justify-content: center; box-shadow: 0 14px 34px rgba(39,174,96,.45); position: relative; }
+.fab svg { width: 30px; height: 30px; }
+.fab .badge { position: absolute; top: -6px; right: -6px; width: 26px; height: 26px; font-size: 13px; border: 3px solid #0f141a; }
+</style></head>
+<body>
+<div class="canvas">
+  <div class="cap">
+    <div class="logo">Read<span class="grad">str</span></div>
+    <h1>Automatic feed detection</h1>
+    <p>A button appears on any page that publishes RSS or Atom feeds — subscribe in one click.</p>
+  </div>
+  <div class="stage">
+    <div class="browser">
+      <div class="chrome">
+        <span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span>
+        <div class="omni">https://example-blog.com/latest</div>
+      </div>
+      <div class="page">
+        <div class="kicker">The Example Blog</div>
+        <h2>Notes on building a sovereign feed reader</h2>
+        <div class="sk" style="width:92%"></div>
+        <div class="sk" style="width:88%"></div>
+        <div class="sk" style="width:70%"></div>
+        <div class="cols">
+          <div><div class="sk" style="width:100%"></div><div class="sk" style="width:96%"></div><div class="sk" style="width:90%"></div><div class="sk" style="width:80%"></div></div>
+          <div><div class="sk" style="width:100%"></div><div class="sk" style="width:92%"></div><div class="sk" style="width:98%"></div><div class="sk" style="width:60%"></div></div>
+        </div>
+      </div>
+      <div class="fab-wrap">
+        <div class="menu"><div class="card">
+          <div class="mh"><span>Feeds on this page</span><span class="pill" style="font-size:11px;padding:3px 9px">3 found</span></div>
+          <div class="feed"><div class="ic">RSS</div><div class="t"><b>The Example Blog</b><small>/feed.xml</small></div><span class="btn btn-primary add">Add</span></div>
+          <div class="feed"><div class="ic">RSS</div><div class="t"><b>Comments feed</b><small>/comments/feed</small></div><span class="btn btn-primary add">Add</span></div>
+          <div class="feed"><div class="ic" style="background:rgba(88,214,141,.16)">ATOM</div><div class="t"><b>Atom feed</b><small>/atom.xml</small></div><span class="btn btn-primary add">Add</span></div>
+          <div class="btn btn-ghost addall">Add all feeds</div>
+        </div></div>
+        <div class="fab">
+          <span class="badge">3</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="#06210f" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.4" fill="#06210f" stroke="none"/></svg>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>

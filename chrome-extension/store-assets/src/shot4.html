@@ -1,0 +1,66 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_base.css">
+<style>
+.canvas { width: 1280px; height: 800px; display: flex; flex-direction: column; }
+.cap { padding: 46px 70px 0; }
+.cap .logo { font-size: 22px; font-weight: 800; }
+.cap h1 { font-size: 42px; font-weight: 800; letter-spacing: -.02em; margin-top: 12px; }
+.cap p { font-size: 19px; color: var(--muted); margin-top: 10px; }
+.stage { flex: 1; position: relative; padding: 32px 70px 60px; }
+.browser { height: 100%; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,.09); background: #0f141a; box-shadow: 0 40px 90px rgba(0,0,0,.5); position: relative; }
+.chrome { height: 46px; background: #11161d; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-bottom: 1px solid rgba(255,255,255,.06); }
+.tl { width: 12px; height: 12px; border-radius: 50%; }
+.omni { margin-left: 14px; flex: 1; height: 26px; border-radius: 8px; background: rgba(255,255,255,.06); display: flex; align-items: center; padding: 0 12px; color: var(--muted); font-size: 13px; }
+.page { padding: 54px 64px; }
+.page .kicker { color: var(--green2); font-weight: 700; font-size: 14px; letter-spacing: .08em; text-transform: uppercase; }
+.page h2 { font-size: 30px; font-weight: 800; margin-top: 10px; color: #f2f6fa; }
+.para { margin-top: 20px; max-width: 560px; }
+.sk { height: 13px; border-radius: 6px; background: rgba(255,255,255,.07); margin-top: 13px; }
+.link { color: var(--green2); text-decoration: underline; text-underline-offset: 3px; position: relative; }
+/* context menu */
+.ctx { position: absolute; left: 300px; top: 300px; width: 300px; background: #1b2129; border: 1px solid rgba(255,255,255,.12); border-radius: 12px; padding: 6px; box-shadow: 0 30px 70px rgba(0,0,0,.6); }
+.ci { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; font-size: 14px; color: var(--muted); }
+.ci.sep { border-top: 1px solid rgba(255,255,255,.07); margin: 4px 0; padding: 0; }
+.ci.brand { color: var(--txt); font-weight: 600; }
+.ci.hi { background: rgba(39,174,96,.16); color: var(--txt); font-weight: 600; }
+.ci .rk { width: 20px; height: 20px; border-radius: 5px; background: rgba(39,174,96,.2); color: var(--green2); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; }
+.ci .chev { margin-left: auto; color: var(--muted); }
+.sub { position: absolute; left: 296px; top: 44px; width: 280px; background: #1b2129; border: 1px solid rgba(255,255,255,.12); border-radius: 12px; padding: 6px; box-shadow: 0 30px 70px rgba(0,0,0,.6); }
+</style></head>
+<body>
+<div class="canvas">
+  <div class="cap">
+    <div class="logo">Read<span class="grad">str</span></div>
+    <h1>Right-click to subscribe</h1>
+    <p>Subscribe to any link as a feed, or see every feed detected on the page — straight from the context menu.</p>
+  </div>
+  <div class="stage">
+    <div class="browser">
+      <div class="chrome">
+        <span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span>
+        <div class="omni">https://example-blog.com/latest</div>
+      </div>
+      <div class="page">
+        <div class="kicker">The Example Blog</div>
+        <h2>Follow along</h2>
+        <div class="para">
+          <div class="sk" style="width:90%"></div>
+          <div class="sk" style="width:96%"></div>
+          <p style="margin-top:16px; font-size:16px; color:var(--muted)">Subscribe via our <span class="link">RSS feed</span> to get new posts.</p>
+          <div class="sk" style="width:70%; margin-top:16px"></div>
+        </div>
+      </div>
+      <div class="ctx">
+        <div class="ci">Open link in new tab</div>
+        <div class="ci">Copy link address</div>
+        <div class="ci sep"></div>
+        <div class="ci brand"><span class="rk">R</span>Readstr<span class="chev">›</span></div>
+        <div class="sub">
+          <div class="ci hi">Subscribe to this link as a feed</div>
+          <div class="ci">See feeds detected on this page</div>
+          <div class="ci">Open Readstr</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>

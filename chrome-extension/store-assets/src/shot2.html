@@ -1,0 +1,56 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="_base.css">
+<style>
+.canvas { width: 1280px; height: 800px; display: flex; align-items: center; gap: 20px; padding: 0 90px; }
+.left { flex: 1; }
+.left .logo { font-size: 22px; font-weight: 800; }
+.left h1 { font-size: 52px; font-weight: 800; letter-spacing: -.025em; margin-top: 16px; line-height: 1.05; }
+.left p { font-size: 21px; color: var(--muted); margin-top: 18px; max-width: 460px; }
+.left ul { list-style: none; margin-top: 26px; display: flex; flex-direction: column; gap: 14px; }
+.left li { display: flex; align-items: center; gap: 12px; font-size: 17px; color: var(--txt); }
+.left li svg { width: 22px; height: 22px; color: var(--green2); flex: none; }
+.right { flex: none; width: 400px; display: flex; justify-content: center; }
+/* popup */
+.popup { width: 372px; border-radius: 18px; overflow: hidden; background: #0f141a; border: 1px solid rgba(255,255,255,.09); box-shadow: 0 40px 90px rgba(0,0,0,.55); }
+.ph { padding: 16px 18px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: rgba(39,174,96,.06); }
+.ph .b { font-weight: 800; font-size: 18px; }
+.ph .badge { width: 30px; height: 26px; font-size: 13px; }
+.plist { padding: 8px 8px 4px; }
+.row { display: flex; align-items: center; gap: 12px; padding: 12px 12px; border-radius: 10px; }
+.row + .row { border-top: 1px solid rgba(255,255,255,.04); }
+.row .ic { width: 34px; height: 34px; border-radius: 9px; background: rgba(39,174,96,.14); color: var(--green2); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 12px; }
+.row .t { flex: 1; overflow: hidden; }
+.row .t b { display: block; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .t small { color: var(--muted); font-size: 12px; }
+.row .n { min-width: 24px; height: 22px; padding: 0 7px; font-size: 12px; }
+.row .n.zero { background: none; color: var(--muted); font-weight: 600; }
+.pfoot { padding: 12px; display: flex; gap: 10px; border-top: 1px solid var(--line); }
+.pfoot .btn { flex: 1; padding: 11px; font-size: 14px; }
+.sync { text-align: center; font-size: 12px; color: var(--muted); padding: 0 0 12px; }
+</style></head>
+<body>
+<div class="canvas">
+  <div class="left">
+    <div class="logo">Read<span class="grad">str</span></div>
+    <h1>Your feeds,<br>one click away</h1>
+    <p>Open the popup for unread counts across every subscription, refresh on demand, and jump into the app.</p>
+    <ul>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Live unread counts per feed</li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Synced with the Readstr web app</li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Background refresh &amp; notifications</li>
+    </ul>
+  </div>
+  <div class="right">
+    <div class="popup">
+      <div class="ph"><span class="b">Read<span class="grad">str</span></span><span class="badge">14</span></div>
+      <div class="plist">
+        <div class="row"><div class="ic">RSS</div><div class="t"><b>Hacker News</b><small>news.ycombinator.com</small></div><span class="badge n">5</span></div>
+        <div class="row"><div class="ic" style="background:rgba(88,214,141,.16)">NOS</div><div class="t"><b>Nostr long-form</b><small>NIP-23 · relays</small></div><span class="badge n">6</span></div>
+        <div class="row"><div class="ic">RSS</div><div class="t"><b>PrivKey Blog</b><small>privkey.io/blog</small></div><span class="badge n">3</span></div>
+        <div class="row"><div class="ic">RSS</div><div class="t"><b>The Example Blog</b><small>example-blog.com</small></div><span class="n zero">0</span></div>
+      </div>
+      <div class="sync">Last sync: 2 minutes ago</div>
+      <div class="pfoot"><span class="btn btn-ghost">Refresh</span><span class="btn btn-primary">Open app</span></div>
+    </div>
+  </div>
+</div>
+</body></html>

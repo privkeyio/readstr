@@ -99,10 +99,16 @@ export default function LegalPage() {
             </div>
           </section>
 
-          <div className="mt-8 text-center">
+          <div className="mt-8 flex justify-center gap-6 text-sm">
+            <Link
+              href="/legal/privacy"
+              className="font-medium text-[#27ae60] transition-colors hover:text-[#2ecc71]"
+            >
+              Privacy Policy
+            </Link>
             <Link
               href="/"
-              className="text-sm font-medium text-[#27ae60] transition-colors hover:text-[#2ecc71]"
+              className="font-medium text-[#27ae60] transition-colors hover:text-[#2ecc71]"
             >
               &larr; Back to Home
             </Link>

@@ -139,17 +139,31 @@ English
 
 ---
 
+## Generated Assets
+
+Listing images live in `store-assets/` (regenerate from `store-assets/src/` via headless Chrome):
+
+- `store-assets/promo-tile-440x280.png` — small promo tile
+- `store-assets/screenshot-1-feed-detection-1280x800.png`
+- `store-assets/screenshot-2-popup-1280x800.png`
+- `store-assets/screenshot-3-options-1280x800.png`
+- `store-assets/screenshot-4-context-menu-1280x800.png`
+
+## Privacy Policy URL
+
+https://readstr.privkey.io/legal/privacy
+
 ## Store Listing Checklist
 
-- [ ] Extension name (45 chars max): `Readstr - RSS & Atom Feed Reader`
-- [ ] Short description (132 chars max): See above
-- [ ] Detailed description: See above
-- [ ] Category: Productivity
-- [ ] Language: English
-- [ ] Screenshots: 5-6 at 1280x800 or 640x400
-- [ ] Small tile: 440x280 PNG
+- [x] Extension name (45 chars max): `Readstr - RSS & Atom Feed Reader`
+- [x] Short description (132 chars max): See above
+- [x] Detailed description: See above
+- [x] Category: Productivity
+- [x] Language: English
+- [x] Screenshots: 4 at 1280x800 (`store-assets/`)
+- [x] Small tile: 440x280 PNG (`store-assets/promo-tile-440x280.png`)
 - [ ] Large tile: 920x680 PNG (optional)
 - [ ] Marquee: 1400x560 PNG (optional)
-- [ ] Icon: Already included (128x128)
-- [ ] Privacy policy URL (if required)
-- [ ] Website URL (optional)
+- [x] Icon: Already included (128x128)
+- [x] Privacy policy URL: https://readstr.privkey.io/legal/privacy
+- [ ] Website URL (optional): https://readstr.privkey.io
