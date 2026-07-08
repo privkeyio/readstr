@@ -1285,10 +1285,14 @@ function setupContextMenu(): void {
 }
 
 async function migrateLegacyWebAppUrl(): Promise<void> {
-  const result = await chrome.storage.local.get('settings');
-  const settings = result['settings'] as ExtensionSettings | undefined;
-  if (settings?.webAppUrl && LEGACY_WEB_APP_URLS.has(settings.webAppUrl)) {
-    await saveStorageData({ settings: { ...settings, webAppUrl: DEFAULT_WEB_APP_URL } });
+  try {
+    const result = await chrome.storage.local.get('settings');
+    const settings = result['settings'] as ExtensionSettings | undefined;
+    if (settings?.webAppUrl && LEGACY_WEB_APP_URLS.has(settings.webAppUrl)) {
+      await saveStorageData({ settings: { ...settings, webAppUrl: DEFAULT_WEB_APP_URL } });
+    }
+  } catch (err) {
+    console.error('Legacy web app URL migration failed:', err);
   }
 }
 
