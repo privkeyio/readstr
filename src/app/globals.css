@@ -52,6 +52,12 @@
   
   --content-font: var(--font-sans);
   --heading-font: var(--font-sans);
+
+  /* Reading controls (device-local, overridable via inline style on <html>) */
+  --reading-scale: 1;
+  --reading-line-height: 1.75;
+  --reading-measure: 48rem;
+  --reading-para-gap: 1.25em;
 }
 
 /* Dark Theme */
@@ -118,6 +124,7 @@ html.theme-newspaper {
   --font-sans: 'Charter', 'Bitstream Charter', Georgia, serif;
   --content-font: 'Charter', 'Bitstream Charter', Georgia, serif;
   --heading-font: 'Playfair Display', Georgia, serif;
+  --reading-scale: 1.125;
 }
 
 /* Parchment Theme */
@@ -152,6 +159,7 @@ html.theme-parchment {
   --font-sans: 'Crimson Pro', 'Crimson Text', Georgia, serif;
   --content-font: 'Crimson Pro', 'Crimson Text', Georgia, serif;
   --heading-font: 'Playfair Display', Georgia, serif;
+  --reading-scale: 1.125;
 }
 
 /* Base html/body styles */
@@ -167,14 +175,16 @@ body {
 }
 
 @layer base {
-  /* Smooth transitions for theme switching */
-  * {
-    transition-property: background-color, border-color, color, box-shadow;
-    transition-duration: 0.15s;
-    transition-timing-function: ease-out;
+  /* Smooth transitions for theme switching (motion-safe only) */
+  @media (prefers-reduced-motion: no-preference) {
+    * {
+      transition-property: background-color, border-color, color, box-shadow;
+      transition-duration: 0.15s;
+      transition-timing-function: ease-out;
+    }
   }
 
-  /* Disable transitions during theme switch to prevent jank */
+  /* Disable transitions while applying theme/reading changes to prevent jank */
   .theme-transitioning * {
     transition: none !important;
   }
@@ -404,7 +414,8 @@ body {
   .prose-theme {
     color: rgb(var(--color-text-primary));
     font-family: var(--content-font);
-    line-height: 1.75;
+    font-size: calc(1rem * var(--reading-scale));
+    line-height: var(--reading-line-height);
   }
 
   .prose-theme h1,
@@ -427,7 +438,7 @@ body {
   .prose-theme h4 { font-size: 1.25em; }
 
   .prose-theme p {
-    margin-bottom: 1.25em;
+    margin-bottom: var(--reading-para-gap);
   }
 
   .prose-theme a {
@@ -550,7 +561,6 @@ body {
 
 .theme-newspaper {
   .prose-theme {
-    font-size: 1.125rem;
     letter-spacing: -0.01em;
   }
 
@@ -576,7 +586,6 @@ body {
 
 .theme-parchment {
   .prose-theme {
-    font-size: 1.125rem;
     letter-spacing: 0.01em;
   }
 

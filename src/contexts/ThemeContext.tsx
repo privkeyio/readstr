@@ -4,10 +4,99 @@ import { createContext, useContext, useEffect, useState, useCallback } from 'rea
 
 export type Theme = 'light' | 'dark' | 'newspaper' | 'parchment'
 
+export type FontKey =
+  | 'default'
+  | 'system'
+  | 'inter'
+  | 'georgia'
+  | 'charter'
+  | 'source-serif'
+  | 'playfair'
+
+// TODO(readstr-h39): add self-hosted woff2 for Charter / Source Serif / Playfair
+// via next/font/local so these options render their true faces instead of the
+// Georgia/Times fallbacks below. No CDN — files must be same-origin (CSP).
+export const FONT_STACKS: Record<FontKey, string> = {
+  default: '',
+  system: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  inter: 'var(--font-inter), system-ui, sans-serif',
+  georgia: 'Georgia, Cambria, "Times New Roman", Times, serif',
+  charter: 'Charter, "Bitstream Charter", Georgia, Cambria, serif',
+  'source-serif': '"Source Serif 4", "Source Serif Pro", Georgia, serif',
+  playfair: '"Playfair Display", Georgia, "Times New Roman", serif',
+}
+
+export const FONT_OPTIONS: { key: FontKey; label: string }[] = [
+  { key: 'default', label: 'Theme default' },
+  { key: 'system', label: 'System' },
+  { key: 'inter', label: 'Inter' },
+  { key: 'georgia', label: 'Georgia' },
+  { key: 'charter', label: 'Charter' },
+  { key: 'source-serif', label: 'Source Serif' },
+  { key: 'playfair', label: 'Playfair' },
+]
+
+export const MEASURES = ['40rem', '48rem', '60rem', 'none'] as const
+export const PARA_GAPS = ['0.75em', '1.25em', '1.75em'] as const
+
+export interface ReadingPrefs {
+  scale: number
+  contentFont: FontKey
+  headingFont: FontKey
+  lineHeight: number
+  measure: string
+  paraGap: string
+}
+
+const DEFAULT_READING: ReadingPrefs = {
+  scale: 1,
+  contentFont: 'default',
+  headingFont: 'default',
+  lineHeight: 1.75,
+  measure: '48rem',
+  paraGap: '1.25em',
+}
+
+const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n))
+
+function normalizeReading(p: Partial<ReadingPrefs>): ReadingPrefs {
+  const measure =
+    typeof p.measure === 'string' && (MEASURES as readonly string[]).includes(p.measure)
+      ? p.measure
+      : DEFAULT_READING.measure
+  const paraGap =
+    typeof p.paraGap === 'string' && (PARA_GAPS as readonly string[]).includes(p.paraGap)
+      ? p.paraGap
+      : DEFAULT_READING.paraGap
+  const contentFont =
+    typeof p.contentFont === 'string' && p.contentFont in FONT_STACKS
+      ? (p.contentFont as FontKey)
+      : DEFAULT_READING.contentFont
+  const headingFont =
+    typeof p.headingFont === 'string' && p.headingFont in FONT_STACKS
+      ? (p.headingFont as FontKey)
+      : DEFAULT_READING.headingFont
+  return {
+    scale: clamp(typeof p.scale === 'number' && Number.isFinite(p.scale) ? p.scale : 1, 0.85, 1.4),
+    lineHeight: clamp(
+      typeof p.lineHeight === 'number' && Number.isFinite(p.lineHeight) ? p.lineHeight : 1.75,
+      1.4,
+      2.0
+    ),
+    measure,
+    paraGap,
+    contentFont,
+    headingFont,
+  }
+}
+
 interface ThemeContextType {
   theme: Theme
   setTheme: (theme: Theme) => void
   cycleTheme: () => void
+  readingPrefs: ReadingPrefs
+  setReadingPref: (partial: Partial<ReadingPrefs>) => void
+  resetReading: () => void
 }
 
 const themeOrder: Theme[] = ['light', 'dark', 'newspaper', 'parchment']
@@ -39,6 +128,7 @@ const ThemeContext = createContext<ThemeContextType | undefined>(undefined)
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>('light')
+  const [readingPrefs, setReadingPrefs] = useState<ReadingPrefs>(DEFAULT_READING)
   const [mounted, setMounted] = useState(false)
 
   const applyTheme = useCallback((newTheme: Theme) => {
@@ -49,6 +139,24 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     root.classList.add(`theme-${newTheme}`)
     // Handle dark mode class for Tailwind
     root.classList.toggle('dark', newTheme === 'dark')
+  }, [])
+
+  const applyReading = useCallback((p: ReadingPrefs) => {
+    const root = document.documentElement
+    root.classList.add('theme-transitioning')
+    const setOrClear = (name: string, value: string | number, def: string | number) => {
+      if (value === def) root.style.removeProperty(name)
+      else root.style.setProperty(name, String(value))
+    }
+    setOrClear('--reading-scale', p.scale, DEFAULT_READING.scale)
+    setOrClear('--reading-line-height', p.lineHeight, DEFAULT_READING.lineHeight)
+    setOrClear('--reading-measure', p.measure, DEFAULT_READING.measure)
+    setOrClear('--reading-para-gap', p.paraGap, DEFAULT_READING.paraGap)
+    if (p.contentFont === 'default') root.style.removeProperty('--content-font')
+    else root.style.setProperty('--content-font', FONT_STACKS[p.contentFont])
+    if (p.headingFont === 'default') root.style.removeProperty('--heading-font')
+    else root.style.setProperty('--heading-font', FONT_STACKS[p.headingFont])
+    requestAnimationFrame(() => root.classList.remove('theme-transitioning'))
   }, [])
 
   /* eslint-disable react-hooks/set-state-in-effect --
@@ -66,7 +174,17 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       setThemeState(systemTheme)
       applyTheme(systemTheme)
     }
-  }, [applyTheme])
+    try {
+      const savedReading = localStorage.getItem('readstr_reading')
+      if (savedReading) {
+        const parsed = normalizeReading(JSON.parse(savedReading))
+        setReadingPrefs(parsed)
+        applyReading(parsed)
+      }
+    } catch {
+      // Corrupt/unavailable localStorage — fall back to defaults.
+    }
+  }, [applyTheme, applyReading])
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const setTheme = useCallback((newTheme: Theme) => {
@@ -74,6 +192,29 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem('theme', newTheme)
     applyTheme(newTheme)
   }, [applyTheme])
+
+  const setReadingPref = useCallback((partial: Partial<ReadingPrefs>) => {
+    setReadingPrefs(prev => {
+      const next = normalizeReading({ ...prev, ...partial })
+      try {
+        localStorage.setItem('readstr_reading', JSON.stringify(next))
+      } catch {
+        // Ignore persistence failures (private mode, quota).
+      }
+      applyReading(next)
+      return next
+    })
+  }, [applyReading])
+
+  const resetReading = useCallback(() => {
+    try {
+      localStorage.removeItem('readstr_reading')
+    } catch {
+      // Ignore persistence failures.
+    }
+    setReadingPrefs(DEFAULT_READING)
+    applyReading(DEFAULT_READING)
+  }, [applyReading])
 
   const cycleTheme = useCallback(() => {
     const currentIndex = themeOrder.indexOf(theme)
@@ -87,7 +228,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <ThemeContext.Provider value={{ theme, setTheme, cycleTheme }}>
+    <ThemeContext.Provider value={{ theme, setTheme, cycleTheme, readingPrefs, setReadingPref, resetReading }}>
       {children}
     </ThemeContext.Provider>
   )

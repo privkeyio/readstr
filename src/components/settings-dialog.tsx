@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { api } from '@/trpc/react'
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
+import { useTheme, FONT_OPTIONS, FONT_STACKS, type FontKey } from '@/contexts/ThemeContext'
 import {
   publishSubscriptionList,
   fetchSubscriptionList,
@@ -91,6 +92,53 @@ const MARK_READ_OPTIONS: { value: MarkReadBehavior; title: string; description: 
   },
 ]
 
+const LINE_HEIGHT_OPTIONS: { label: string; value: number }[] = [
+  { label: 'Compact', value: 1.5 },
+  { label: 'Normal', value: 1.75 },
+  { label: 'Relaxed', value: 2.0 },
+]
+
+const MEASURE_OPTIONS: { label: string; value: string }[] = [
+  { label: 'Narrow', value: '40rem' },
+  { label: 'Normal', value: '48rem' },
+  { label: 'Wide', value: '60rem' },
+  { label: 'Full', value: 'none' },
+]
+
+const PARA_GAP_OPTIONS: { label: string; value: string }[] = [
+  { label: 'Compact', value: '0.75em' },
+  { label: 'Normal', value: '1.25em' },
+  { label: 'Relaxed', value: '1.75em' },
+]
+
+function Segmented<T extends string | number>({
+  options,
+  value,
+  onChange,
+}: {
+  options: { label: string; value: T }[]
+  value: T
+  onChange: (value: T) => void
+}) {
+  return (
+    <div className="flex gap-2">
+      {options.map((option) => (
+        <button
+          key={String(option.value)}
+          onClick={() => onChange(option.value)}
+          className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border-2 transition-all duration-200 ${
+            value === option.value
+              ? 'border-theme-accent bg-theme-accent-light text-theme-primary shadow-theme-sm'
+              : 'border-theme-secondary bg-theme-primary text-theme-secondary hover:border-theme-accent/50'
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 interface SettingsDialogProps {
   isOpen: boolean
   onClose: () => void
@@ -119,6 +167,7 @@ const CATEGORY_ICONS = ['📁', '📰', '🎬', '🎵', '💼', '🎮', '📚', 
 
 export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds }: SettingsDialogProps) {
   const { user, canSign, signEventOrThrow } = useNostrAuth()
+  const { readingPrefs, setReadingPref, resetReading } = useTheme()
   const [activeTab, setActiveTab] = useState<SettingsTab>('relays')
   const [relays, setRelays] = useState<Relay[]>([])
   const [newRelayUrl, setNewRelayUrl] = useState('')
@@ -756,7 +805,134 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
             {/* Reading Tab */}
             {activeTab === 'reading' && (
               <div>
-                <h3 className="text-lg font-bold text-theme-primary mb-2">Reading Preferences</h3>
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-lg font-bold text-theme-primary">Typography</h3>
+                  <button
+                    onClick={resetReading}
+                    className="text-sm font-medium text-theme-accent hover:underline"
+                  >
+                    Reset to Defaults
+                  </button>
+                </div>
+                <p className="text-sm text-theme-secondary mb-4">
+                  Adjust how articles read on this device. Saved locally to your browser.
+                </p>
+
+                {/* Live preview */}
+                <div className="prose-theme mb-6 p-4 rounded-xl border-2 border-theme-secondary bg-theme-primary overflow-hidden">
+                  <h3 className="!mt-0">The quick brown fox</h3>
+                  <p className="!mb-0">
+                    Jumps over the lazy dog. This sample paragraph reflects your font, size,
+                    line height, and spacing choices as you make them.
+                  </p>
+                </div>
+
+                {/* Font scale */}
+                <div className="mb-6">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    Font Size
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <span className="text-theme-tertiary" style={{ fontSize: '0.85rem' }}>A</span>
+                    <input
+                      type="range"
+                      min={0.85}
+                      max={1.4}
+                      step={0.05}
+                      value={readingPrefs.scale}
+                      onChange={(e) => setReadingPref({ scale: parseFloat(e.target.value) })}
+                      className="flex-1 accent-[rgb(var(--color-accent))]"
+                    />
+                    <span className="text-theme-primary" style={{ fontSize: '1.4rem' }}>A</span>
+                    <span className="text-sm text-theme-tertiary w-10 text-right tabular-nums">
+                      {Math.round(readingPrefs.scale * 100)}%
+                    </span>
+                  </div>
+                </div>
+
+                {/* Content font */}
+                <div className="mb-6">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    Body Font
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {FONT_OPTIONS.map((option) => (
+                      <button
+                        key={option.key}
+                        onClick={() => setReadingPref({ contentFont: option.key })}
+                        style={option.key !== 'default' ? { fontFamily: FONT_STACKS[option.key as FontKey] } : undefined}
+                        className={`px-3 py-2 rounded-lg text-sm font-medium border-2 transition-all duration-200 ${
+                          readingPrefs.contentFont === option.key
+                            ? 'border-theme-accent bg-theme-accent-light text-theme-primary shadow-theme-sm'
+                            : 'border-theme-secondary bg-theme-primary text-theme-secondary hover:border-theme-accent/50'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Heading font */}
+                <div className="mb-6">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    Heading Font
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {FONT_OPTIONS.map((option) => (
+                      <button
+                        key={option.key}
+                        onClick={() => setReadingPref({ headingFont: option.key })}
+                        style={option.key !== 'default' ? { fontFamily: FONT_STACKS[option.key as FontKey] } : undefined}
+                        className={`px-3 py-2 rounded-lg text-sm font-medium border-2 transition-all duration-200 ${
+                          readingPrefs.headingFont === option.key
+                            ? 'border-theme-accent bg-theme-accent-light text-theme-primary shadow-theme-sm'
+                            : 'border-theme-secondary bg-theme-primary text-theme-secondary hover:border-theme-accent/50'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Line height */}
+                <div className="mb-6">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    Line Height
+                  </label>
+                  <Segmented
+                    options={LINE_HEIGHT_OPTIONS}
+                    value={readingPrefs.lineHeight}
+                    onChange={(value) => setReadingPref({ lineHeight: value })}
+                  />
+                </div>
+
+                {/* Measure */}
+                <div className="mb-6">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    Content Width
+                  </label>
+                  <Segmented
+                    options={MEASURE_OPTIONS}
+                    value={readingPrefs.measure}
+                    onChange={(value) => setReadingPref({ measure: value })}
+                  />
+                </div>
+
+                {/* Paragraph spacing */}
+                <div className="mb-8">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    Paragraph Spacing
+                  </label>
+                  <Segmented
+                    options={PARA_GAP_OPTIONS}
+                    value={readingPrefs.paraGap}
+                    onChange={(value) => setReadingPref({ paraGap: value })}
+                  />
+                </div>
+
+                <h3 className="text-lg font-bold text-theme-primary mb-2">Mark as Read</h3>
                 <p className="text-sm text-theme-secondary mb-6">
                   Choose when articles should be marked as read.
                 </p>

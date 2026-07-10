@@ -6,7 +6,7 @@ import { ThemeProvider } from '@/contexts/ThemeContext'
 import { Footer } from '@/components/footer'
 import { ServiceWorkerUpdater } from '@/components/service-worker-updater'
 
-const inter = Inter({ subsets: ['latin'] })
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
 const spaceGrotesk = Space_Grotesk({
   subsets: ['latin'],
   variable: '--font-brand',
@@ -42,7 +42,7 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" className={spaceGrotesk.variable}>
+    <html lang="en" className={`${spaceGrotesk.variable} ${inter.variable}`}>
       <head>
         <link rel="manifest" href="/manifest.json" />
         <link rel="icon" href="/privkey-favicon.png" type="image/png" />
