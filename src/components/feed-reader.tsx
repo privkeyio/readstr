@@ -2043,6 +2043,7 @@ export function FeedReader() {
         feeds={feeds.map((f: Feed) => ({
           type: f.type,
           url: f.url || f.npub || '',
+          title: f.title,
           tags: f.tags,
           category: f.category
         }))}

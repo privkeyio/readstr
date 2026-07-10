@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { api } from '@/trpc/react'
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
 import { useTheme, FONT_OPTIONS, FONT_STACKS, type FontKey } from '@/contexts/ThemeContext'
@@ -12,8 +12,11 @@ import {
   getLastSyncTime,
   setLastSyncTime,
   advanceSyncWatermarkIfFresh,
+  normalizeUrlForComparison,
+  normalizeNpub,
   type SubscriptionList,
 } from '@/lib/nostr-sync'
+import { parseOpml, buildOpml } from '@/lib/opml'
 
 export type MarkReadBehavior = 'on-open' | 'after-10s' | 'never'
 export type OrganizationMode = 'tags' | 'categories'
@@ -180,7 +183,7 @@ interface SettingsDialogProps {
   onChangeMarkReadBehavior: (behavior: MarkReadBehavior) => void
   organizationMode: OrganizationMode
   onChangeOrganizationMode: (mode: OrganizationMode) => void
-  feeds?: Array<{ type: 'RSS' | 'NOSTR' | 'NOSTR_VIDEO'; url: string; tags?: string[]; category?: { name: string; color?: string | null; icon?: string | null } | null }>
+  feeds?: Array<{ type: 'RSS' | 'NOSTR' | 'NOSTR_VIDEO'; url: string; title?: string; tags?: string[]; category?: { name: string; color?: string | null; icon?: string | null } | null }>
   userPubkey?: string
   onImportFeeds?: (feeds: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => Promise<void>
 }
@@ -408,6 +411,94 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
   // Cancel import
   const handleCancelImport = () => {
     setSyncState(prev => ({ ...prev, pendingImport: undefined }))
+  }
+
+  // OPML import/export
+  const opmlInputRef = useRef<HTMLInputElement>(null)
+  const [opmlResult, setOpmlResult] = useState<{ imported: number; skipped: number; failed: number } | null>(null)
+  const [opmlBusy, setOpmlBusy] = useState(false)
+
+  const handleExportOpml = () => {
+    const xml = buildOpml(feeds)
+    const blob = new Blob([xml], { type: 'text/x-opml' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'readstr-subscriptions.opml'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
+  const handleImportOpml = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file || !onImportFeeds) return
+
+    setOpmlResult(null)
+    setOpmlBusy(true)
+    try {
+      const parsed = parseOpml(await file.text())
+
+      const existingRss = new Set(
+        feeds.filter(f => f.type === 'RSS' && f.url).map(f => normalizeUrlForComparison(f.url))
+      )
+      const existingNpubs = new Set(
+        feeds
+          .filter(f => (f.type === 'NOSTR' || f.type === 'NOSTR_VIDEO') && f.url)
+          .map(f => normalizeNpub(f.url))
+      )
+
+      const toAdd: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }> = []
+      let skipped = 0
+
+      for (const pf of parsed) {
+        const isNostr = !!pf.npub
+        const url = isNostr ? pf.npub! : pf.xmlUrl
+        if (!url) continue
+
+        if (isNostr ? existingNpubs.has(normalizeNpub(url)) : existingRss.has(normalizeUrlForComparison(url))) {
+          skipped++
+          continue
+        }
+        if (isNostr) existingNpubs.add(normalizeNpub(url))
+        else existingRss.add(normalizeUrlForComparison(url))
+
+        const tags = [...pf.tags]
+        let category: { name: string; color?: string; icon?: string } | undefined
+        if (pf.folder) {
+          if (organizationMode === 'categories') {
+            category = { name: pf.folder }
+          } else if (!tags.includes(pf.folder)) {
+            tags.push(pf.folder)
+          }
+        }
+
+        toAdd.push({
+          type: isNostr ? 'NOSTR' : 'RSS',
+          url,
+          tags: tags.length > 0 ? tags : undefined,
+          category,
+        })
+      }
+
+      if (toAdd.length === 0) {
+        setOpmlResult({ imported: 0, skipped, failed: 0 })
+        return
+      }
+
+      try {
+        await onImportFeeds(toAdd)
+        setOpmlResult({ imported: toAdd.length, skipped, failed: 0 })
+      } catch (error) {
+        const match = /failed for (\d+) of/.exec(error instanceof Error ? error.message : String(error))
+        const failed = match ? parseInt(match[1]!, 10) : toAdd.length
+        setOpmlResult({ imported: toAdd.length - failed, skipped, failed })
+      }
+    } finally {
+      setOpmlBusy(false)
+    }
   }
 
   // Format timestamp for display
@@ -1038,6 +1129,15 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                   </div>
                 )}
 
+                {/* OPML import result */}
+                {opmlResult && (
+                  <div className="p-4 bg-yellow-50 rounded-xl mb-4">
+                    <p className="font-medium text-yellow-800">
+                      Imported {opmlResult.imported} · Skipped {opmlResult.skipped} (already subscribed) · Failed {opmlResult.failed}
+                    </p>
+                  </div>
+                )}
+
                 {/* Sync buttons */}
                 <div className="flex flex-wrap gap-3">
                   <button
@@ -1056,6 +1156,29 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                     <span>⬇</span>
                     Import from Nostr
                   </button>
+                  <button
+                    onClick={handleExportOpml}
+                    disabled={feeds.length === 0}
+                    className="flex items-center gap-2 px-4 py-2.5 border border-theme-accent text-theme-accent bg-transparent rounded-xl font-medium hover:bg-theme-accent-light disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                  >
+                    <span>📄</span>
+                    Export OPML
+                  </button>
+                  <button
+                    onClick={() => opmlInputRef.current?.click()}
+                    disabled={opmlBusy || !userPubkey}
+                    className="flex items-center gap-2 px-4 py-2.5 border border-theme-accent text-theme-accent bg-transparent rounded-xl font-medium hover:bg-theme-accent-light disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                  >
+                    <span>📥</span>
+                    Import OPML
+                  </button>
+                  <input
+                    ref={opmlInputRef}
+                    type="file"
+                    accept=".opml,.xml,text/x-opml,text/xml,application/xml"
+                    onChange={handleImportOpml}
+                    className="hidden"
+                  />
                 </div>
                 <p className="text-xs text-theme-tertiary mt-3">
                   Requires a Nostr browser extension (Alby, nos2x, etc.)
