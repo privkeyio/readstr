@@ -10,7 +10,7 @@ import { env } from '@/env.mjs'
 import { AddFeedModal } from './add-feed-modal'
 import { SettingsDialog, MarkReadBehavior, OrganizationMode } from './settings-dialog'
 import { FormattedContent } from './formatted-content'
-import { evaluateRules, loadFilterRules, type FilterRule, type FilterOutcome } from '@/lib/keyword-filter'
+import { applyFilters, loadFilterRules, type FilterRule } from '@/lib/keyword-filter'
 import { SimplePool } from 'nostr-tools'
 import { 
   fetchSubscriptionList,
@@ -144,6 +144,10 @@ export function FeedReader() {
     }
     setFilterRules(loadFilterRules())
   }, [])
+
+  useEffect(() => {
+    setShowHiddenByFilter(false)
+  }, [selectedFeed, viewFilter])
 
   const handleMarkReadBehaviorChange = (behavior: MarkReadBehavior) => {
     setMarkReadBehavior(behavior)
@@ -638,33 +642,19 @@ export function FeedReader() {
   
   // Filter and sort feed items based on view options
   const allFeedItems = feedItemsData?.items || []
-  let feedItems = allFeedItems
-  
-  // Apply read/unread filter
-  if (viewFilter === 'unread') {
-    feedItems = feedItems.filter((item: any) => !item.isRead)
-  } else if (viewFilter === 'read') {
-    feedItems = feedItems.filter((item: any) => item.isRead)
-  }
 
-  // Apply local keyword filter rules (client-side only)
-  const filterOutcomes = useMemo(() => {
-    const map = new Map<string, FilterOutcome>()
-    if (filterRules.length === 0) return map
-    for (const item of feedItems) {
-      map.set(item.id, evaluateRules(item, filterRules))
+  // Apply read/unread filter and local keyword filter rules (client-side only)
+  const { items: filteredItems, hiddenCount: hiddenByFilterCount, outcomes: filterOutcomes } = useMemo(() => {
+    let items = allFeedItems as FeedItem[]
+    if (viewFilter === 'unread') {
+      items = items.filter((item) => !item.isRead)
+    } else if (viewFilter === 'read') {
+      items = items.filter((item) => item.isRead)
     }
-    return map
-  }, [feedItems, filterRules])
+    return applyFilters(items, filterRules, showHiddenByFilter)
+  }, [allFeedItems, viewFilter, filterRules, showHiddenByFilter])
 
-  let hiddenByFilterCount = 0
-  if (filterRules.length > 0) {
-    feedItems = feedItems.filter((item: FeedItem) => {
-      const hidden = filterOutcomes.get(item.id)?.hidden
-      if (hidden) hiddenByFilterCount += 1
-      return showHiddenByFilter || !hidden
-    })
-  }
+  let feedItems = filteredItems
 
   // Apply sort order
   if (sortOrder === 'oldest') {

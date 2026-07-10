@@ -32,25 +32,21 @@ const MAX_RULES = 200
 const MATCH_TARGETS: MatchTarget[] = ['title', 'content', 'author', 'any']
 const MATCH_TYPES: MatchType[] = ['contains', 'word']
 const FILTER_ACTIONS: FilterAction[] = ['hide', 'highlight']
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/
+
+export function newRuleId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
 
 function stripHtml(value: string): string {
   return value.replace(/<[^>]*>/g, ' ')
 }
 
-function pickTarget(item: FilterableItem, target: MatchTarget): string {
+function buildHaystacks(item: FilterableItem): Record<MatchTarget, string> {
   const title = stripHtml(item.title ?? '')
   const content = stripHtml(item.content ?? '')
   const author = item.author ?? ''
-  switch (target) {
-    case 'title':
-      return title
-    case 'content':
-      return content
-    case 'author':
-      return author
-    case 'any':
-      return `${title} ${content} ${author}`
-  }
+  return { title, content, author, any: `${title} ${content} ${author}` }
 }
 
 function escapeRegExp(value: string): string {
@@ -77,17 +73,40 @@ function matches(haystack: string, rule: FilterRule): boolean {
 
 export function evaluateRules(item: FilterableItem, rules: FilterRule[]): FilterOutcome {
   const outcome: FilterOutcome = { hidden: false }
+  const haystacks = buildHaystacks(item)
   const sorted = [...rules].sort((a, b) => a.order - b.order)
   for (const rule of sorted) {
     if (!rule.enabled) continue
-    const haystack = pickTarget(item, rule.target)
-    if (!matches(haystack, rule)) continue
+    if (!matches(haystacks[rule.target], rule)) continue
     if (rule.action === 'hide') {
       return { hidden: true }
     }
     outcome.highlight = rule.color ?? outcome.highlight
   }
   return outcome
+}
+
+export function applyFilters<T extends FilterableItem & { id: string }>(
+  items: T[],
+  rules: FilterRule[],
+  showHidden: boolean
+): { items: T[]; hiddenCount: number; outcomes: Map<string, FilterOutcome> } {
+  const outcomes = new Map<string, FilterOutcome>()
+  if (rules.length === 0) {
+    return { items, hiddenCount: 0, outcomes }
+  }
+  const result: T[] = []
+  let hiddenCount = 0
+  for (const item of items) {
+    const outcome = evaluateRules(item, rules)
+    outcomes.set(item.id, outcome)
+    if (outcome.hidden) {
+      hiddenCount += 1
+      if (!showHidden) continue
+    }
+    result.push(item)
+  }
+  return { items: result, hiddenCount, outcomes }
 }
 
 function sanitizeRule(raw: unknown): FilterRule | null {
@@ -98,7 +117,7 @@ function sanitizeRule(raw: unknown): FilterRule | null {
   const target = MATCH_TARGETS.includes(r.target as MatchTarget) ? (r.target as MatchTarget) : 'any'
   const type = MATCH_TYPES.includes(r.type as MatchType) ? (r.type as MatchType) : 'contains'
   const action = FILTER_ACTIONS.includes(r.action as FilterAction) ? (r.action as FilterAction) : 'hide'
-  const id = typeof r.id === 'string' && r.id ? r.id : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const id = typeof r.id === 'string' && r.id ? r.id : newRuleId()
   return {
     id,
     enabled: r.enabled !== false,
@@ -108,7 +127,10 @@ function sanitizeRule(raw: unknown): FilterRule | null {
     pattern,
     caseSensitive: r.caseSensitive === true,
     action,
-    color: action === 'highlight' && typeof r.color === 'string' ? r.color : undefined,
+    color:
+      action === 'highlight' && typeof r.color === 'string' && HEX_COLOR.test(r.color)
+        ? r.color
+        : undefined,
   }
 }
 

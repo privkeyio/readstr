@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import {
+  applyFilters,
   evaluateRules,
   loadFilterRules,
   saveFilterRules,
@@ -87,7 +88,10 @@ describe('evaluateRules', () => {
 })
 
 describe('load/saveFilterRules', () => {
+  let originalWindow: typeof globalThis.window
+
   beforeEach(() => {
+    originalWindow = globalThis.window
     const store = new Map<string, string>()
     globalThis.window = {
       localStorage: {
@@ -96,6 +100,10 @@ describe('load/saveFilterRules', () => {
         removeItem: (k: string) => void store.delete(k),
       },
     } as unknown as Window & typeof globalThis
+  })
+
+  afterEach(() => {
+    globalThis.window = originalWindow
   })
 
   it('returns [] for missing storage', () => {
@@ -132,11 +140,55 @@ describe('load/saveFilterRules', () => {
   })
 
   it('round-trips valid rules', () => {
-    const r = rule({ id: 'x', pattern: 'spam', action: 'highlight', color: '#abc', target: 'title' })
+    const r = rule({ id: 'x', pattern: 'spam', action: 'highlight', color: '#aabbcc', target: 'title' })
     saveFilterRules([r])
     const loaded = loadFilterRules()
     expect(loaded).toHaveLength(1)
     expect(loaded[0]!.pattern).toBe('spam')
-    expect(loaded[0]!.color).toBe('#abc')
+    expect(loaded[0]!.color).toBe('#aabbcc')
+  })
+
+  it('drops colors that are not strict 6-digit hex', () => {
+    const bad = rule({ id: 'b', pattern: 'spam', action: 'highlight', color: '#abc', target: 'title' })
+    saveFilterRules([bad])
+    expect(loadFilterRules()[0]!.color).toBeUndefined()
+  })
+})
+
+describe('applyFilters', () => {
+  const item = (id: string, title: string) => ({ id, title })
+
+  it('hide removes matching items and reports hiddenCount', () => {
+    const rules = [rule({ id: 'h', pattern: 'spam', action: 'hide', target: 'title' })]
+    const { items, hiddenCount } = applyFilters(
+      [item('1', 'spam'), item('2', 'clean'), item('3', 'more spam')],
+      rules,
+      false
+    )
+    expect(items.map((i) => i.id)).toEqual(['2'])
+    expect(hiddenCount).toBe(2)
+  })
+
+  it('showHidden=true keeps hidden items but still counts them', () => {
+    const rules = [rule({ id: 'h', pattern: 'spam', action: 'hide', target: 'title' })]
+    const { items, hiddenCount } = applyFilters([item('1', 'spam'), item('2', 'clean')], rules, true)
+    expect(items.map((i) => i.id)).toEqual(['1', '2'])
+    expect(hiddenCount).toBe(1)
+  })
+
+  it('highlight items are retained with their outcome', () => {
+    const rules = [rule({ id: 'g', pattern: 'spam', action: 'highlight', color: '#112233', target: 'title' })]
+    const { items, hiddenCount, outcomes } = applyFilters([item('1', 'spam')], rules, false)
+    expect(items.map((i) => i.id)).toEqual(['1'])
+    expect(hiddenCount).toBe(0)
+    expect(outcomes.get('1')!.highlight).toBe('#112233')
+  })
+
+  it('empty rules is a passthrough', () => {
+    const input = [item('1', 'spam'), item('2', 'clean')]
+    const { items, hiddenCount, outcomes } = applyFilters(input, [], false)
+    expect(items).toBe(input)
+    expect(hiddenCount).toBe(0)
+    expect(outcomes.size).toBe(0)
   })
 })

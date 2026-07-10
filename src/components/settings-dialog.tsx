@@ -18,6 +18,7 @@ import { parseOpml, buildOpml, planOpmlImport, MAX_CONTENT_BYTES } from '@/lib/o
 import {
   loadFilterRules,
   saveFilterRules,
+  newRuleId,
   type FilterRule,
   type MatchTarget,
   type MatchType,
@@ -271,7 +272,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
       )
     } else {
       const newRule: FilterRule = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        id: newRuleId(),
         enabled: true,
         order: filterRules.length,
         target: ruleDraft.target,
@@ -1126,8 +1127,11 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
             {activeTab === 'filters' && (
               <div>
                 <h3 className="text-lg font-bold text-theme-primary mb-2">Keyword Filters</h3>
-                <p className="text-sm text-theme-secondary mb-6">
+                <p className="text-sm text-theme-secondary mb-2">
                   Hide or highlight items by keyword. Rules run entirely in your browser and are never sent to any server or relay.
+                </p>
+                <p className="text-xs text-theme-tertiary mb-6">
+                  Author matching uses the raw author identifier, which is a pubkey for Nostr feeds — not a display name.
                 </p>
 
                 {/* Add / Edit Rule */}
