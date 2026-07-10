@@ -1905,7 +1905,7 @@ export function FeedReader() {
         {selectedItemData ? (
           <>
             <div className="bg-theme-surface-raised p-6 md:p-8 border-b border-theme-primary flex-shrink-0 shadow-theme-sm">
-              <div className="max-w-3xl mx-auto">
+              <div className="mx-auto" style={{ maxWidth: 'var(--reading-measure)' }}>
                 <div className="flex items-start justify-between gap-4 mb-4">
                   <h1 className="text-2xl md:text-3xl font-bold text-theme-primary leading-tight" style={{ fontFamily: 'var(--heading-font)' }}>
                     {selectedItemData.title}
@@ -1994,7 +1994,7 @@ export function FeedReader() {
               </div>
             </div>
             <div className="flex-1 overflow-y-auto themed-scrollbar">
-              <div className="max-w-3xl mx-auto p-6 md:p-8">
+              <div className="mx-auto p-6 md:p-8" style={{ maxWidth: 'var(--reading-measure)' }}>
                 <article className="article-content-inner p-6 md:p-10 rounded-xl">
                   <FormattedContent 
                     content={selectedItemData.content}
