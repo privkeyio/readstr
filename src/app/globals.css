@@ -54,6 +54,7 @@
   --heading-font: var(--font-sans);
 
   /* Reading controls (device-local, overridable via inline style on <html>) */
+  --reading-scale-base: 1;
   --reading-scale: 1;
   --reading-line-height: 1.75;
   --reading-measure: 48rem;
@@ -124,7 +125,7 @@ html.theme-newspaper {
   --font-sans: 'Charter', 'Bitstream Charter', Georgia, serif;
   --content-font: 'Charter', 'Bitstream Charter', Georgia, serif;
   --heading-font: 'Playfair Display', Georgia, serif;
-  --reading-scale: 1.125;
+  --reading-scale-base: 1.125;
 }
 
 /* Parchment Theme */
@@ -159,7 +160,7 @@ html.theme-parchment {
   --font-sans: 'Crimson Pro', 'Crimson Text', Georgia, serif;
   --content-font: 'Crimson Pro', 'Crimson Text', Georgia, serif;
   --heading-font: 'Playfair Display', Georgia, serif;
-  --reading-scale: 1.125;
+  --reading-scale-base: 1.125;
 }
 
 /* Base html/body styles */
@@ -414,7 +415,7 @@ body {
   .prose-theme {
     color: rgb(var(--color-text-primary));
     font-family: var(--content-font);
-    font-size: calc(1rem * var(--reading-scale));
+    font-size: calc(1rem * var(--reading-scale-base, 1) * var(--reading-scale));
     line-height: var(--reading-line-height);
   }
 

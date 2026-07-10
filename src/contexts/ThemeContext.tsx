@@ -1,6 +1,6 @@
 'use client'
 
-import { createContext, useContext, useEffect, useState, useCallback } from 'react'
+import { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
 
 export type Theme = 'light' | 'dark' | 'newspaper' | 'parchment'
 
@@ -48,7 +48,12 @@ export interface ReadingPrefs {
   paraGap: string
 }
 
-const DEFAULT_READING: ReadingPrefs = {
+export const READING_BOUNDS = {
+  scale: [0.85, 1.4],
+  lineHeight: [1.4, 2.0],
+} as const
+
+export const DEFAULT_READING: ReadingPrefs = {
   scale: 1,
   contentFont: 'default',
   headingFont: 'default',
@@ -59,7 +64,7 @@ const DEFAULT_READING: ReadingPrefs = {
 
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n))
 
-function normalizeReading(p: Partial<ReadingPrefs>): ReadingPrefs {
+export function normalizeReading(p: Partial<ReadingPrefs>): ReadingPrefs {
   const measure =
     typeof p.measure === 'string' && (MEASURES as readonly string[]).includes(p.measure)
       ? p.measure
@@ -69,19 +74,23 @@ function normalizeReading(p: Partial<ReadingPrefs>): ReadingPrefs {
       ? p.paraGap
       : DEFAULT_READING.paraGap
   const contentFont =
-    typeof p.contentFont === 'string' && p.contentFont in FONT_STACKS
+    typeof p.contentFont === 'string' && Object.hasOwn(FONT_STACKS, p.contentFont)
       ? (p.contentFont as FontKey)
       : DEFAULT_READING.contentFont
   const headingFont =
-    typeof p.headingFont === 'string' && p.headingFont in FONT_STACKS
+    typeof p.headingFont === 'string' && Object.hasOwn(FONT_STACKS, p.headingFont)
       ? (p.headingFont as FontKey)
       : DEFAULT_READING.headingFont
   return {
-    scale: clamp(typeof p.scale === 'number' && Number.isFinite(p.scale) ? p.scale : 1, 0.85, 1.4),
+    scale: clamp(
+      typeof p.scale === 'number' && Number.isFinite(p.scale) ? p.scale : 1,
+      READING_BOUNDS.scale[0],
+      READING_BOUNDS.scale[1]
+    ),
     lineHeight: clamp(
       typeof p.lineHeight === 'number' && Number.isFinite(p.lineHeight) ? p.lineHeight : 1.75,
-      1.4,
-      2.0
+      READING_BOUNDS.lineHeight[0],
+      READING_BOUNDS.lineHeight[1]
     ),
     measure,
     paraGap,
@@ -129,6 +138,7 @@ const ThemeContext = createContext<ThemeContextType | undefined>(undefined)
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>('light')
   const [readingPrefs, setReadingPrefs] = useState<ReadingPrefs>(DEFAULT_READING)
+  const readingPrefsRef = useRef<ReadingPrefs>(DEFAULT_READING)
   const [mounted, setMounted] = useState(false)
 
   const applyTheme = useCallback((newTheme: Theme) => {
@@ -178,6 +188,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       const savedReading = localStorage.getItem('readstr_reading')
       if (savedReading) {
         const parsed = normalizeReading(JSON.parse(savedReading))
+        readingPrefsRef.current = parsed
         setReadingPrefs(parsed)
         applyReading(parsed)
       }
@@ -194,25 +205,25 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, [applyTheme])
 
   const setReadingPref = useCallback((partial: Partial<ReadingPrefs>) => {
-    setReadingPrefs(prev => {
-      const next = normalizeReading({ ...prev, ...partial })
-      try {
-        localStorage.setItem('readstr_reading', JSON.stringify(next))
-      } catch {
-        // Ignore persistence failures (private mode, quota).
-      }
-      applyReading(next)
-      return next
-    })
+    const next = normalizeReading({ ...readingPrefsRef.current, ...partial })
+    readingPrefsRef.current = next
+    setReadingPrefs(next)
+    try {
+      localStorage.setItem('readstr_reading', JSON.stringify(next))
+    } catch {
+      // Ignore persistence failures (private mode, quota).
+    }
+    applyReading(next)
   }, [applyReading])
 
   const resetReading = useCallback(() => {
+    readingPrefsRef.current = DEFAULT_READING
+    setReadingPrefs(DEFAULT_READING)
     try {
       localStorage.removeItem('readstr_reading')
     } catch {
       // Ignore persistence failures.
     }
-    setReadingPrefs(DEFAULT_READING)
     applyReading(DEFAULT_READING)
   }, [applyReading])
 

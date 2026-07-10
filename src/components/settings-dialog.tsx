@@ -139,6 +139,40 @@ function Segmented<T extends string | number>({
   )
 }
 
+function FontPicker({
+  label,
+  value,
+  onChange,
+}: {
+  label: string
+  value: FontKey
+  onChange: (key: FontKey) => void
+}) {
+  return (
+    <div className="mb-6">
+      <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+        {label}
+      </label>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        {FONT_OPTIONS.map((option) => (
+          <button
+            key={option.key}
+            onClick={() => onChange(option.key)}
+            style={option.key !== 'default' ? { fontFamily: FONT_STACKS[option.key as FontKey] } : undefined}
+            className={`px-3 py-2 rounded-lg text-sm font-medium border-2 transition-all duration-200 ${
+              value === option.key
+                ? 'border-theme-accent bg-theme-accent-light text-theme-primary shadow-theme-sm'
+                : 'border-theme-secondary bg-theme-primary text-theme-secondary hover:border-theme-accent/50'
+            }`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 interface SettingsDialogProps {
   isOpen: boolean
   onClose: () => void
@@ -851,50 +885,18 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                 </div>
 
                 {/* Content font */}
-                <div className="mb-6">
-                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
-                    Body Font
-                  </label>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    {FONT_OPTIONS.map((option) => (
-                      <button
-                        key={option.key}
-                        onClick={() => setReadingPref({ contentFont: option.key })}
-                        style={option.key !== 'default' ? { fontFamily: FONT_STACKS[option.key as FontKey] } : undefined}
-                        className={`px-3 py-2 rounded-lg text-sm font-medium border-2 transition-all duration-200 ${
-                          readingPrefs.contentFont === option.key
-                            ? 'border-theme-accent bg-theme-accent-light text-theme-primary shadow-theme-sm'
-                            : 'border-theme-secondary bg-theme-primary text-theme-secondary hover:border-theme-accent/50'
-                        }`}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <FontPicker
+                  label="Body Font"
+                  value={readingPrefs.contentFont}
+                  onChange={(key) => setReadingPref({ contentFont: key })}
+                />
 
                 {/* Heading font */}
-                <div className="mb-6">
-                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
-                    Heading Font
-                  </label>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    {FONT_OPTIONS.map((option) => (
-                      <button
-                        key={option.key}
-                        onClick={() => setReadingPref({ headingFont: option.key })}
-                        style={option.key !== 'default' ? { fontFamily: FONT_STACKS[option.key as FontKey] } : undefined}
-                        className={`px-3 py-2 rounded-lg text-sm font-medium border-2 transition-all duration-200 ${
-                          readingPrefs.headingFont === option.key
-                            ? 'border-theme-accent bg-theme-accent-light text-theme-primary shadow-theme-sm'
-                            : 'border-theme-secondary bg-theme-primary text-theme-secondary hover:border-theme-accent/50'
-                        }`}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <FontPicker
+                  label="Heading Font"
+                  value={readingPrefs.headingFont}
+                  onChange={(key) => setReadingPref({ headingFont: key })}
+                />
 
                 {/* Line height */}
                 <div className="mb-6">
