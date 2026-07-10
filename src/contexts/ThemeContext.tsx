@@ -74,11 +74,11 @@ export function normalizeReading(p: Partial<ReadingPrefs>): ReadingPrefs {
       ? p.paraGap
       : DEFAULT_READING.paraGap
   const contentFont =
-    typeof p.contentFont === 'string' && Object.hasOwn(FONT_STACKS, p.contentFont)
+    typeof p.contentFont === 'string' && Object.prototype.hasOwnProperty.call(FONT_STACKS, p.contentFont)
       ? (p.contentFont as FontKey)
       : DEFAULT_READING.contentFont
   const headingFont =
-    typeof p.headingFont === 'string' && Object.hasOwn(FONT_STACKS, p.headingFont)
+    typeof p.headingFont === 'string' && Object.prototype.hasOwnProperty.call(FONT_STACKS, p.headingFont)
       ? (p.headingFont as FontKey)
       : DEFAULT_READING.headingFont
   return {

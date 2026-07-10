@@ -158,7 +158,7 @@ function FontPicker({
           <button
             key={option.key}
             onClick={() => onChange(option.key)}
-            style={option.key !== 'default' ? { fontFamily: FONT_STACKS[option.key as FontKey] } : undefined}
+            style={option.key !== 'default' ? { fontFamily: FONT_STACKS[option.key] } : undefined}
             className={`px-3 py-2 rounded-lg text-sm font-medium border-2 transition-all duration-200 ${
               value === option.key
                 ? 'border-theme-accent bg-theme-accent-light text-theme-primary shadow-theme-sm'
