@@ -842,7 +842,11 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="text-lg font-bold text-theme-primary">Typography</h3>
                   <button
-                    onClick={resetReading}
+                    onClick={() => {
+                      if (confirm('Reset typography to defaults? This will discard your reading preferences.')) {
+                        resetReading()
+                      }
+                    }}
                     className="text-sm font-medium text-theme-accent hover:underline"
                   >
                     Reset to Defaults
