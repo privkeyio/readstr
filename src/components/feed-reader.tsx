@@ -879,7 +879,10 @@ export function FeedReader() {
         `First error: ${detail}\n\n` +
         `If this mentions authentication, your signer may not be approving requests — check your signer app and try again.`
       )
-      throw new Error(`Import failed for ${failures.length} of ${feedsToImport.length} feeds: ${detail}`)
+      throw Object.assign(
+        new Error(`Import failed for ${failures.length} of ${feedsToImport.length} feeds: ${detail}`),
+        { importFailure: { failed: failures.length, total: feedsToImport.length } }
+      )
     }
   }
   

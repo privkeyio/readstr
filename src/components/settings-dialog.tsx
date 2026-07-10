@@ -12,11 +12,9 @@ import {
   getLastSyncTime,
   setLastSyncTime,
   advanceSyncWatermarkIfFresh,
-  normalizeUrlForComparison,
-  normalizeNpub,
   type SubscriptionList,
 } from '@/lib/nostr-sync'
-import { parseOpml, buildOpml } from '@/lib/opml'
+import { parseOpml, buildOpml, planOpmlImport, MAX_CONTENT_BYTES } from '@/lib/opml'
 
 export type MarkReadBehavior = 'on-open' | 'after-10s' | 'never'
 export type OrganizationMode = 'tags' | 'categories'
@@ -437,51 +435,17 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
     if (!file || !onImportFeeds) return
 
     setOpmlResult(null)
+
+    if (file.size > MAX_CONTENT_BYTES) {
+      setOpmlResult({ imported: 0, skipped: 0, failed: 0 })
+      alert('That OPML file is too large to import (max 8 MB).')
+      return
+    }
+
     setOpmlBusy(true)
     try {
       const parsed = parseOpml(await file.text())
-
-      const existingRss = new Set(
-        feeds.filter(f => f.type === 'RSS' && f.url).map(f => normalizeUrlForComparison(f.url))
-      )
-      const existingNpubs = new Set(
-        feeds
-          .filter(f => (f.type === 'NOSTR' || f.type === 'NOSTR_VIDEO') && f.url)
-          .map(f => normalizeNpub(f.url))
-      )
-
-      const toAdd: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }> = []
-      let skipped = 0
-
-      for (const pf of parsed) {
-        const isNostr = !!pf.npub
-        const url = isNostr ? pf.npub! : pf.xmlUrl
-        if (!url) continue
-
-        if (isNostr ? existingNpubs.has(normalizeNpub(url)) : existingRss.has(normalizeUrlForComparison(url))) {
-          skipped++
-          continue
-        }
-        if (isNostr) existingNpubs.add(normalizeNpub(url))
-        else existingRss.add(normalizeUrlForComparison(url))
-
-        const tags = [...pf.tags]
-        let category: { name: string; color?: string; icon?: string } | undefined
-        if (pf.folder) {
-          if (organizationMode === 'categories') {
-            category = { name: pf.folder }
-          } else if (!tags.includes(pf.folder)) {
-            tags.push(pf.folder)
-          }
-        }
-
-        toAdd.push({
-          type: isNostr ? 'NOSTR' : 'RSS',
-          url,
-          tags: tags.length > 0 ? tags : undefined,
-          category,
-        })
-      }
+      const { toAdd, skipped } = planOpmlImport(parsed, feeds, organizationMode)
 
       if (toAdd.length === 0) {
         setOpmlResult({ imported: 0, skipped, failed: 0 })
@@ -492,8 +456,8 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
         await onImportFeeds(toAdd)
         setOpmlResult({ imported: toAdd.length, skipped, failed: 0 })
       } catch (error) {
-        const match = /failed for (\d+) of/.exec(error instanceof Error ? error.message : String(error))
-        const failed = match ? parseInt(match[1]!, 10) : toAdd.length
+        const failure = (error as { importFailure?: { failed: number; total: number } })?.importFailure
+        const failed = failure?.failed ?? toAdd.length
         setOpmlResult({ imported: toAdd.length - failed, skipped, failed })
       }
     } finally {

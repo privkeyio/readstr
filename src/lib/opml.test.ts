@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseOpml, buildOpml, type OpmlExportFeed } from './opml'
+import { parseOpml, buildOpml, planOpmlImport, type OpmlExportFeed, type OpmlFeed } from './opml'
 
 describe('parseOpml', () => {
   it('assigns folder from nested outline', () => {
@@ -86,5 +86,57 @@ describe('buildOpml', () => {
       { type: 'NOSTR_VIDEO', url: 'npub1dup', title: 'A video' },
     ])
     expect(parseOpml(xml).filter(f => f.npub === 'npub1dup')).toHaveLength(1)
+  })
+})
+
+describe('planOpmlImport', () => {
+  const feed = (f: Partial<OpmlFeed>): OpmlFeed => ({ tags: [], ...f })
+
+  it('dedupes against existing RSS and npub subscriptions', () => {
+    const parsed: OpmlFeed[] = [
+      feed({ xmlUrl: 'https://a.com/feed/' }),
+      feed({ xmlUrl: 'https://new.com/feed' }),
+      feed({ npub: 'npub1abc' }),
+      feed({ npub: 'npub1new' }),
+    ]
+    const existing = [
+      { type: 'RSS' as const, url: 'https://a.com/feed' },
+      { type: 'NOSTR_VIDEO' as const, url: 'npub1abc' },
+    ]
+    const { toAdd, skipped } = planOpmlImport(parsed, existing, 'tags')
+    expect(skipped).toBe(2)
+    expect(toAdd.map(f => f.url).sort()).toEqual(['https://new.com/feed', 'npub1new'])
+  })
+
+  it('collapses intra-file duplicates', () => {
+    const parsed: OpmlFeed[] = [
+      feed({ xmlUrl: 'https://a.com/feed' }),
+      feed({ xmlUrl: 'https://a.com/feed/' }),
+      feed({ npub: 'npub1abc' }),
+      feed({ npub: 'npub1abc' }),
+    ]
+    const { toAdd, skipped } = planOpmlImport(parsed, [], 'tags')
+    expect(toAdd).toHaveLength(2)
+    expect(skipped).toBe(2)
+  })
+
+  it('maps folder to category in categories mode', () => {
+    const parsed: OpmlFeed[] = [feed({ xmlUrl: 'https://a.com/feed', folder: 'News' })]
+    const { toAdd } = planOpmlImport(parsed, [], 'categories')
+    expect(toAdd[0]!.category).toEqual({ name: 'News' })
+    expect(toAdd[0]!.tags).toBeUndefined()
+  })
+
+  it('maps folder to tag in tags mode', () => {
+    const parsed: OpmlFeed[] = [feed({ xmlUrl: 'https://a.com/feed', folder: 'News' })]
+    const { toAdd } = planOpmlImport(parsed, [], 'tags')
+    expect(toAdd[0]!.category).toBeUndefined()
+    expect(toAdd[0]!.tags).toEqual(['News'])
+  })
+
+  it('carries category-attr tags through to the plan', () => {
+    const parsed: OpmlFeed[] = [feed({ xmlUrl: 'https://a.com/feed', tags: ['tech', 'news'] })]
+    const { toAdd } = planOpmlImport(parsed, [], 'tags')
+    expect(toAdd[0]!.tags).toEqual(['tech', 'news'])
   })
 })

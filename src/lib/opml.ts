@@ -1,6 +1,6 @@
 import * as cheerio from 'cheerio'
 import type { Element } from 'domhandler'
-import { normalizeNpub } from './nostr-sync'
+import { normalizeNpub, normalizeUrlForComparison } from './nostr-sync'
 
 export interface OpmlFeed {
   title?: string
@@ -18,8 +18,9 @@ export interface OpmlExportFeed {
   category?: { name: string; color?: string | null; icon?: string | null } | null
 }
 
-const MAX_CONTENT_BYTES = 8 * 1024 * 1024
+export const MAX_CONTENT_BYTES = 8 * 1024 * 1024
 const MAX_OUTLINES = 5000
+const MAX_DEPTH = 64
 
 function parseCategory(value?: string): string[] {
   if (!value) return []
@@ -40,8 +41,8 @@ export function parseOpml(xml: string): OpmlFeed[] {
   let count = 0
   let capped = false
 
-  const walk = (parent: Element, folder?: string) => {
-    if (capped) return
+  const walk = (parent: Element, folder: string | undefined, depth: number) => {
+    if (capped || depth > MAX_DEPTH) return
     $(parent).children('outline').each((_, child) => {
       if (capped) return
       count++
@@ -71,19 +72,83 @@ export function parseOpml(xml: string): OpmlFeed[] {
 
       if (xmlUrl) {
         feeds.push({ title, xmlUrl, folder, tags })
+        if ($child.children('outline').length > 0) {
+          walk(child, folder, depth + 1)
+        }
         return
       }
 
       if ($child.children('outline').length > 0) {
-        walk(child, title ?? folder)
+        walk(child, title ?? folder, depth + 1)
       }
     })
   }
 
-  const root = $('body').get(0) ?? $('opml').get(0)
-  if (root) walk(root)
+  try {
+    const root = $('body').get(0) ?? $('opml').get(0)
+    if (root) walk(root, undefined, 0)
+  } catch {
+    return []
+  }
 
   return feeds
+}
+
+export interface OpmlImportItem {
+  type: 'RSS' | 'NOSTR'
+  url: string
+  tags?: string[]
+  category?: { name: string; color?: string; icon?: string }
+}
+
+export function planOpmlImport(
+  parsedFeeds: OpmlFeed[],
+  existingFeeds: Array<{ type: 'RSS' | 'NOSTR' | 'NOSTR_VIDEO'; url: string }>,
+  organizationMode: 'tags' | 'categories'
+): { toAdd: OpmlImportItem[]; skipped: number } {
+  const existingRss = new Set(
+    existingFeeds.filter(f => f.type === 'RSS' && f.url).map(f => normalizeUrlForComparison(f.url))
+  )
+  const existingNpubs = new Set(
+    existingFeeds
+      .filter(f => (f.type === 'NOSTR' || f.type === 'NOSTR_VIDEO') && f.url)
+      .map(f => normalizeNpub(f.url))
+  )
+
+  const toAdd: OpmlImportItem[] = []
+  let skipped = 0
+
+  for (const pf of parsedFeeds) {
+    const isNostr = !!pf.npub
+    const url = isNostr ? pf.npub! : pf.xmlUrl
+    if (!url) continue
+
+    if (isNostr ? existingNpubs.has(normalizeNpub(url)) : existingRss.has(normalizeUrlForComparison(url))) {
+      skipped++
+      continue
+    }
+    if (isNostr) existingNpubs.add(normalizeNpub(url))
+    else existingRss.add(normalizeUrlForComparison(url))
+
+    const tags = [...pf.tags]
+    let category: { name: string; color?: string; icon?: string } | undefined
+    if (pf.folder) {
+      if (organizationMode === 'categories') {
+        category = { name: pf.folder }
+      } else if (!tags.includes(pf.folder)) {
+        tags.push(pf.folder)
+      }
+    }
+
+    toAdd.push({
+      type: isNostr ? 'NOSTR' : 'RSS',
+      url,
+      tags: tags.length > 0 ? tags : undefined,
+      category,
+    })
+  }
+
+  return { toAdd, skipped }
 }
 
 function xmlEscape(value: string): string {
