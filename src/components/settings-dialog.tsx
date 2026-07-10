@@ -15,17 +15,26 @@ import {
   type SubscriptionList,
 } from '@/lib/nostr-sync'
 import { parseOpml, buildOpml, planOpmlImport, MAX_CONTENT_BYTES } from '@/lib/opml'
+import {
+  loadFilterRules,
+  saveFilterRules,
+  type FilterRule,
+  type MatchTarget,
+  type MatchType,
+  type FilterAction,
+} from '@/lib/keyword-filter'
 
 export type MarkReadBehavior = 'on-open' | 'after-10s' | 'never'
 export type OrganizationMode = 'tags' | 'categories'
 
 // Settings tabs
-type SettingsTab = 'relays' | 'organization' | 'reading' | 'sync' | 'about'
+type SettingsTab = 'relays' | 'organization' | 'reading' | 'filters' | 'sync' | 'about'
 
 const SETTINGS_TABS: { id: SettingsTab; label: string; icon: string }[] = [
   { id: 'relays', label: 'Nostr Relays', icon: '🔌' },
   { id: 'organization', label: 'Feed Organization', icon: '📁' },
   { id: 'reading', label: 'Reading', icon: '📖' },
+  { id: 'filters', label: 'Filters', icon: '🧹' },
   { id: 'sync', label: 'Sync', icon: '🔄' },
   { id: 'about', label: 'About', icon: 'ℹ️' },
 ]
@@ -184,6 +193,7 @@ interface SettingsDialogProps {
   feeds?: Array<{ type: 'RSS' | 'NOSTR' | 'NOSTR_VIDEO'; url: string; title?: string; tags?: string[]; category?: { name: string; color?: string | null; icon?: string | null } | null }>
   userPubkey?: string
   onImportFeeds?: (feeds: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => Promise<void>
+  onFilterRulesChange?: () => void
 }
 
 // Default category colors/icons
@@ -200,7 +210,7 @@ const CATEGORY_COLORS = [
 
 const CATEGORY_ICONS = ['📁', '📰', '🎬', '🎵', '💼', '🎮', '📚', '🔬', '💡', '🌍', '⚡', '🎯']
 
-export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds }: SettingsDialogProps) {
+export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds, onFilterRulesChange }: SettingsDialogProps) {
   const { user, canSign, signEventOrThrow } = useNostrAuth()
   const { readingPrefs, setReadingPref, resetReading } = useTheme()
   const [activeTab, setActiveTab] = useState<SettingsTab>('relays')
@@ -218,6 +228,93 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
   const [newCategoryIcon, setNewCategoryIcon] = useState('📁')
   const [editingCategory, setEditingCategory] = useState<Category | null>(null)
   const [categoryError, setCategoryError] = useState('')
+
+  // Local keyword filter state
+  const [filterRules, setFilterRulesState] = useState<FilterRule[]>([])
+  const [editingRuleId, setEditingRuleId] = useState<string | null>(null)
+  const emptyRuleDraft = {
+    target: 'any' as MatchTarget,
+    type: 'contains' as MatchType,
+    pattern: '',
+    caseSensitive: false,
+    action: 'hide' as FilterAction,
+    color: CATEGORY_COLORS[0]!,
+  }
+  const [ruleDraft, setRuleDraft] = useState(emptyRuleDraft)
+
+  useEffect(() => {
+    if (isOpen) setFilterRulesState(loadFilterRules())
+  }, [isOpen])
+
+  const persistFilterRules = (rules: FilterRule[]) => {
+    const reordered = rules.map((r, i) => ({ ...r, order: i }))
+    saveFilterRules(reordered)
+    setFilterRulesState(reordered)
+    onFilterRulesChange?.()
+  }
+
+  const resetRuleDraft = () => {
+    setRuleDraft(emptyRuleDraft)
+    setEditingRuleId(null)
+  }
+
+  const handleSaveRule = () => {
+    const pattern = ruleDraft.pattern.trim()
+    if (!pattern) return
+    if (editingRuleId) {
+      persistFilterRules(
+        filterRules.map((r) =>
+          r.id === editingRuleId
+            ? { ...r, ...ruleDraft, pattern, color: ruleDraft.action === 'highlight' ? ruleDraft.color : undefined }
+            : r
+        )
+      )
+    } else {
+      const newRule: FilterRule = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        enabled: true,
+        order: filterRules.length,
+        target: ruleDraft.target,
+        type: ruleDraft.type,
+        pattern,
+        caseSensitive: ruleDraft.caseSensitive,
+        action: ruleDraft.action,
+        color: ruleDraft.action === 'highlight' ? ruleDraft.color : undefined,
+      }
+      persistFilterRules([...filterRules, newRule])
+    }
+    resetRuleDraft()
+  }
+
+  const handleEditRule = (rule: FilterRule) => {
+    setEditingRuleId(rule.id)
+    setRuleDraft({
+      target: rule.target,
+      type: rule.type,
+      pattern: rule.pattern,
+      caseSensitive: rule.caseSensitive,
+      action: rule.action,
+      color: rule.color ?? CATEGORY_COLORS[0]!,
+    })
+  }
+
+  const handleToggleRule = (id: string) => {
+    persistFilterRules(filterRules.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)))
+  }
+
+  const handleDeleteRule = (id: string) => {
+    persistFilterRules(filterRules.filter((r) => r.id !== id))
+    if (editingRuleId === id) resetRuleDraft()
+  }
+
+  const handleMoveRule = (index: number, direction: -1 | 1) => {
+    const target = index + direction
+    if (target < 0 || target >= filterRules.length) return
+    const next = [...filterRules]
+    const [moved] = next.splice(index, 1)
+    next.splice(target, 0, moved!)
+    persistFilterRules(next)
+  }
   
   // tRPC for categories
   const utils = api.useUtils()
@@ -1021,6 +1118,186 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                       </div>
                     </label>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {/* Filters Tab */}
+            {activeTab === 'filters' && (
+              <div>
+                <h3 className="text-lg font-bold text-theme-primary mb-2">Keyword Filters</h3>
+                <p className="text-sm text-theme-secondary mb-6">
+                  Hide or highlight items by keyword. Rules run entirely in your browser and are never sent to any server or relay.
+                </p>
+
+                {/* Add / Edit Rule */}
+                <div className="mb-6 p-4 bg-theme-tertiary rounded-xl">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    {editingRuleId ? 'Edit Rule' : 'New Rule'}
+                  </label>
+
+                  <input
+                    type="text"
+                    value={ruleDraft.pattern}
+                    onChange={(e) => setRuleDraft({ ...ruleDraft, pattern: e.target.value })}
+                    placeholder="Keyword or phrase"
+                    maxLength={200}
+                    className="input-theme w-full mb-3"
+                  />
+
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    <div>
+                      <label className="block text-xs text-theme-tertiary mb-1 uppercase tracking-wider">Match in</label>
+                      <select
+                        value={ruleDraft.target}
+                        onChange={(e) => setRuleDraft({ ...ruleDraft, target: e.target.value as MatchTarget })}
+                        className="input-theme w-full"
+                      >
+                        <option value="any">Anywhere</option>
+                        <option value="title">Title</option>
+                        <option value="content">Content</option>
+                        <option value="author">Author</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-theme-tertiary mb-1 uppercase tracking-wider">Match type</label>
+                      <select
+                        value={ruleDraft.type}
+                        onChange={(e) => setRuleDraft({ ...ruleDraft, type: e.target.value as MatchType })}
+                        className="input-theme w-full"
+                      >
+                        <option value="contains">Contains</option>
+                        <option value="word">Whole word</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-theme-tertiary mb-1 uppercase tracking-wider">Action</label>
+                      <select
+                        value={ruleDraft.action}
+                        onChange={(e) => setRuleDraft({ ...ruleDraft, action: e.target.value as FilterAction })}
+                        className="input-theme w-full"
+                      >
+                        <option value="hide">Hide</option>
+                        <option value="highlight">Highlight</option>
+                      </select>
+                    </div>
+                    <label className="flex items-end gap-2 pb-2 text-sm text-theme-secondary cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={ruleDraft.caseSensitive}
+                        onChange={(e) => setRuleDraft({ ...ruleDraft, caseSensitive: e.target.checked })}
+                      />
+                      Case sensitive
+                    </label>
+                  </div>
+
+                  {ruleDraft.action === 'highlight' && (
+                    <div className="mb-3">
+                      <label className="block text-xs text-theme-tertiary mb-1 uppercase tracking-wider">Color</label>
+                      <div className="flex gap-2">
+                        {CATEGORY_COLORS.map((color) => (
+                          <button
+                            key={color}
+                            onClick={() => setRuleDraft({ ...ruleDraft, color })}
+                            className={`w-7 h-7 rounded-full transition-all ${
+                              ruleDraft.color === color ? 'ring-2 ring-offset-2 ring-theme-accent scale-110' : 'hover:scale-110'
+                            }`}
+                            style={{ backgroundColor: color }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleSaveRule}
+                      disabled={!ruleDraft.pattern.trim()}
+                      className="btn-theme-primary text-sm disabled:opacity-50"
+                    >
+                      {editingRuleId ? 'Save Changes' : 'Add Rule'}
+                    </button>
+                    {editingRuleId && (
+                      <button onClick={resetRuleDraft} className="btn-theme-secondary text-sm">
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Rules List */}
+                <div>
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    Your Rules ({filterRules.length})
+                  </label>
+                  {filterRules.length === 0 ? (
+                    <div className="text-center py-6 text-theme-tertiary text-sm">
+                      No filter rules yet. Add one above to hide or highlight items.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {filterRules.map((rule, index) => (
+                        <div
+                          key={rule.id}
+                          className="flex items-center justify-between gap-3 p-3 bg-theme-tertiary rounded-xl"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={rule.enabled}
+                              onChange={() => handleToggleRule(rule.id)}
+                              title={rule.enabled ? 'Enabled' : 'Disabled'}
+                            />
+                            {rule.action === 'highlight' && (
+                              <span
+                                className="w-4 h-4 rounded-full flex-shrink-0"
+                                style={{ backgroundColor: rule.color ?? '#94a3b8' }}
+                              />
+                            )}
+                            <div className="min-w-0">
+                              <div className="font-medium text-theme-primary truncate">{rule.pattern}</div>
+                              <div className="text-xs text-theme-tertiary">
+                                {rule.action === 'hide' ? 'Hide' : 'Highlight'} · {rule.type === 'word' ? 'whole word' : 'contains'} · {rule.target}
+                                {rule.caseSensitive ? ' · case' : ''}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex gap-1 flex-shrink-0">
+                            <button
+                              onClick={() => handleMoveRule(index, -1)}
+                              disabled={index === 0}
+                              className="p-2 text-theme-secondary hover:bg-theme-hover rounded-lg transition-colors disabled:opacity-30"
+                              title="Move up"
+                            >
+                              ↑
+                            </button>
+                            <button
+                              onClick={() => handleMoveRule(index, 1)}
+                              disabled={index === filterRules.length - 1}
+                              className="p-2 text-theme-secondary hover:bg-theme-hover rounded-lg transition-colors disabled:opacity-30"
+                              title="Move down"
+                            >
+                              ↓
+                            </button>
+                            <button
+                              onClick={() => handleEditRule(rule)}
+                              className="p-2 text-theme-secondary hover:bg-theme-hover rounded-lg transition-colors"
+                              title="Edit rule"
+                            >
+                              ✏️
+                            </button>
+                            <button
+                              onClick={() => handleDeleteRule(rule.id)}
+                              className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                              title="Delete rule"
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

@@ -10,6 +10,7 @@ import { env } from '@/env.mjs'
 import { AddFeedModal } from './add-feed-modal'
 import { SettingsDialog, MarkReadBehavior, OrganizationMode } from './settings-dialog'
 import { FormattedContent } from './formatted-content'
+import { evaluateRules, loadFilterRules, type FilterRule, type FilterOutcome } from '@/lib/keyword-filter'
 import { SimplePool } from 'nostr-tools'
 import { 
   fetchSubscriptionList,
@@ -79,6 +80,8 @@ export function FeedReader() {
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest')
   const [tagSortOrder, setTagSortOrder] = useState<'alphabetical' | 'unread'>('alphabetical')
   const [markReadBehavior, setMarkReadBehavior] = useState<MarkReadBehavior>('on-open')
+  const [filterRules, setFilterRules] = useState<FilterRule[]>([])
+  const [showHiddenByFilter, setShowHiddenByFilter] = useState(false)
   const [isSharing, setIsSharing] = useState(false)
   const [shareSuccess, setShareSuccess] = useState(false)
   const [showSyncPrompt, setShowSyncPrompt] = useState(false)
@@ -139,6 +142,7 @@ export function FeedReader() {
     if (storedRefreshTime) {
       setLastRefreshTime(parseInt(storedRefreshTime, 10))
     }
+    setFilterRules(loadFilterRules())
   }, [])
 
   const handleMarkReadBehaviorChange = (behavior: MarkReadBehavior) => {
@@ -642,7 +646,26 @@ export function FeedReader() {
   } else if (viewFilter === 'read') {
     feedItems = feedItems.filter((item: any) => item.isRead)
   }
-  
+
+  // Apply local keyword filter rules (client-side only)
+  const filterOutcomes = useMemo(() => {
+    const map = new Map<string, FilterOutcome>()
+    if (filterRules.length === 0) return map
+    for (const item of feedItems) {
+      map.set(item.id, evaluateRules(item, filterRules))
+    }
+    return map
+  }, [feedItems, filterRules])
+
+  let hiddenByFilterCount = 0
+  if (filterRules.length > 0) {
+    feedItems = feedItems.filter((item: FeedItem) => {
+      const hidden = filterOutcomes.get(item.id)?.hidden
+      if (hidden) hiddenByFilterCount += 1
+      return showHiddenByFilter || !hidden
+    })
+  }
+
   // Apply sort order
   if (sortOrder === 'oldest') {
     feedItems = [...feedItems].reverse()
@@ -1802,6 +1825,18 @@ export function FeedReader() {
           </div>
         </div>
 
+        {hiddenByFilterCount > 0 && (
+          <div className="flex items-center justify-between gap-3 px-4 py-2 text-sm bg-theme-tertiary border-b border-theme-primary text-theme-secondary">
+            <span>{hiddenByFilterCount} hidden by filters</span>
+            <button
+              onClick={() => setShowHiddenByFilter(v => !v)}
+              className="flex-shrink-0 underline font-medium text-theme-accent"
+            >
+              {showHiddenByFilter ? 'Hide' : 'Show'}
+            </button>
+          </div>
+        )}
+
         <div className="flex-1 overflow-y-auto themed-scrollbar">
           {itemsLoading ? (
             <div className="p-6 space-y-4">
@@ -1829,12 +1864,18 @@ export function FeedReader() {
               </p>
             </div>
           ) : (
-            feedItems.map((item: FeedItem) => (
+            feedItems.map((item: FeedItem) => {
+              const outcome = filterOutcomes.get(item.id)
+              return (
               <div
                 key={item.id}
                 className={`article-card relative group ${
                   selectedItem === item.id ? 'active' : ''
                 } ${item.isRead ? 'read' : ''}`}
+                style={{
+                  ...(outcome?.highlight ? { boxShadow: `inset 3px 0 0 ${outcome.highlight}` } : {}),
+                  ...(outcome?.hidden ? { opacity: 0.4 } : {}),
+                }}
               >
                 <button
                   onClick={() => {
@@ -1882,7 +1923,8 @@ export function FeedReader() {
                   </span>
                 </button>
               </div>
-            ))
+              )
+            })
           )}
         </div>
       </div>
@@ -2041,6 +2083,7 @@ export function FeedReader() {
         onClose={() => setShowSettings(false)}
         markReadBehavior={markReadBehavior}
         onChangeMarkReadBehavior={handleMarkReadBehaviorChange}
+        onFilterRulesChange={() => setFilterRules(loadFilterRules())}
         organizationMode={organizationMode}
         onChangeOrganizationMode={handleOrganizationModeChange}
         feeds={feeds.map((f: Feed) => ({
