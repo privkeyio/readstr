@@ -1,5 +1,5 @@
 import './globals.css'
-import { Inter, Space_Grotesk } from 'next/font/google'
+import { Inter, Space_Grotesk, Source_Serif_4, Playfair_Display, Crimson_Pro } from 'next/font/google'
 import { TRPCReactProvider } from '@/trpc/react'
 import { NostrAuthProvider } from '@/contexts/NostrAuthContext'
 import { ThemeProvider } from '@/contexts/ThemeContext'
@@ -12,6 +12,21 @@ const spaceGrotesk = Space_Grotesk({
   subsets: ['latin'],
   variable: '--font-brand',
   weight: ['400', '500', '600', '700'],
+})
+const sourceSerif = Source_Serif_4({
+  subsets: ['latin'],
+  display: 'swap',
+  variable: '--font-source-serif',
+})
+const playfair = Playfair_Display({
+  subsets: ['latin'],
+  display: 'swap',
+  variable: '--font-playfair',
+})
+const crimson = Crimson_Pro({
+  subsets: ['latin'],
+  display: 'swap',
+  variable: '--font-crimson',
 })
 
 export const metadata = {
@@ -43,7 +58,7 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" className={`${spaceGrotesk.variable} ${inter.variable}`}>
+    <html lang="en" className={`${spaceGrotesk.variable} ${inter.variable} ${sourceSerif.variable} ${playfair.variable} ${crimson.variable}`}>
       <head>
         <link rel="manifest" href="/manifest.json" />
         <link rel="icon" href="/privkey-favicon.png" type="image/png" />
