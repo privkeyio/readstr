@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from 'rea
 export interface AiFeatureToggles {
   summarize: boolean
   insights: boolean
+  translate: boolean
 }
 
 export interface AiConfig {
@@ -26,6 +27,7 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
   features: {
     summarize: true,
     insights: true,
+    translate: true,
   },
   targetLang: 'auto',
 }
@@ -58,6 +60,7 @@ export function normalizeAiConfig(input: Partial<AiConfig> | null | undefined): 
     features: {
       summarize: features.summarize !== false,
       insights: features.insights !== false,
+      translate: features.translate !== false,
     },
     targetLang:
       typeof p.targetLang === 'string' && p.targetLang.trim()

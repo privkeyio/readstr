@@ -1565,6 +1565,15 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                       />
                       Insights
                     </label>
+                    <label className="flex items-center gap-3 text-sm text-theme-secondary cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={aiConfig.features.translate}
+                        onChange={(e) => setAiConfig({ features: { ...aiConfig.features, translate: e.target.checked } })}
+                        className="accent-[rgb(var(--color-accent))]"
+                      />
+                      Translate
+                    </label>
                   </div>
                 </div>
 

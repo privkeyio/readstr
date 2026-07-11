@@ -1,6 +1,6 @@
 import type { ChatMessage } from './client'
 
-export type AiFeature = 'summarize' | 'insights'
+export type AiFeature = 'summarize' | 'insights' | 'translate'
 
 interface PromptInput {
   title: string
@@ -24,6 +24,22 @@ function articleBlock({ title, text }: PromptInput): string {
 
 export function buildPrompt(feature: AiFeature, input: PromptInput): ChatMessage[] {
   const lang = langInstruction(input.targetLang)
+
+  if (feature === 'translate') {
+    const targetLang =
+      input.targetLang && input.targetLang !== 'auto' ? input.targetLang : 'the article language'
+    return [
+      {
+        role: 'system',
+        content:
+          'You are a precise translator. Translate the article into the requested language, preserving its structure, formatting, and markdown. Output only the translation in markdown, with no summary, no commentary, and no preamble.',
+      },
+      {
+        role: 'user',
+        content: `Translate the article into ${targetLang}.\n\n${articleBlock(input)}`,
+      },
+    ]
+  }
 
   if (feature === 'insights') {
     return [
