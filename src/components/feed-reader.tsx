@@ -124,7 +124,7 @@ export function FeedReader() {
   const [tagSortOrder, setTagSortOrder] = useState<'alphabetical' | 'unread'>('alphabetical')
   const [markReadBehavior, setMarkReadBehavior] = useState<MarkReadBehavior>('on-open')
   const { config: aiConfig } = useAiConfig()
-  const aiEnabled = aiConfig.enabled && (aiConfig.features.summarize || aiConfig.features.insights)
+  const aiEnabled = aiConfig.enabled && (aiConfig.features.summarize || aiConfig.features.insights || aiConfig.features.translate)
   const [showAiPanel, setShowAiPanel] = useState(false)
   const [filterRules, setFilterRules] = useState<FilterRule[]>([])
   const [showHiddenByFilter, setShowHiddenByFilter] = useState(false)

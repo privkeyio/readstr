@@ -18,13 +18,15 @@ interface AiSummaryPanelProps {
 const FEATURE_LABELS: Record<AiFeature, string> = {
   summarize: 'Summary',
   insights: 'Insights',
+  translate: 'Translate',
 }
 
 export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: AiSummaryPanelProps) {
-  const availableFeatures = (['summarize', 'insights'] as AiFeature[]).filter(
+  const availableFeatures = (['summarize', 'insights', 'translate'] as AiFeature[]).filter(
     (f) => config.features[f]
   )
-  const [feature, setFeature] = useState<AiFeature>(availableFeatures[0] ?? 'summarize')
+  const defaultFeature = availableFeatures[0] ?? 'summarize'
+  const [feature, setFeature] = useState<AiFeature>(defaultFeature)
   const [lang, setLang] = useState(config.targetLang)
   const [output, setOutput] = useState('')
   const [status, setStatus] = useState<'idle' | 'loading' | 'streaming' | 'done' | 'error'>('idle')
@@ -32,9 +34,19 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
   const [fromCache, setFromCache] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
 
+  const activeFeature = availableFeatures.includes(feature) ? feature : defaultFeature
+
   useEffect(() => {
     return () => abortRef.current?.abort()
   }, [])
+
+  const resetOutput = () => {
+    abortRef.current?.abort()
+    setOutput('')
+    setError('')
+    setFromCache(false)
+    setStatus('idle')
+  }
 
   const run = async () => {
     abortRef.current?.abort()
@@ -46,7 +58,7 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
     setError('')
     setFromCache(false)
 
-    const key = cacheKey(articleKey, feature, lang, config.model, config.baseUrl)
+    const key = cacheKey(articleKey, activeFeature, lang, config.model, config.baseUrl)
 
     const cached = await getCachedSummary(key)
     if (controller.signal.aborted) return
@@ -58,7 +70,7 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
     }
 
     try {
-      const messages = buildPrompt(feature, { title, text, targetLang: lang })
+      const messages = buildPrompt(activeFeature, { title, text, targetLang: lang })
       let acc = ''
       setStatus('streaming')
       for await (const token of streamChat({
@@ -84,6 +96,7 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
   }
 
   const busy = status === 'loading' || status === 'streaming'
+  const needsTargetLang = activeFeature === 'translate' && lang === 'auto'
 
   return (
     <div className="mb-6 rounded-xl border border-theme-primary bg-theme-surface-raised p-4 shadow-theme-sm">
@@ -93,9 +106,12 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
             {availableFeatures.map((f) => (
               <button
                 key={f}
-                onClick={() => setFeature(f)}
+                onClick={() => {
+                  resetOutput()
+                  setFeature(f)
+                }}
                 className={`px-3 py-1.5 rounded-lg text-sm font-medium border-2 transition-all ${
-                  feature === f
+                  activeFeature === f
                     ? 'border-theme-accent bg-theme-accent-light text-theme-primary'
                     : 'border-theme-secondary bg-theme-primary text-theme-secondary hover:border-theme-accent/50'
                 }`}
@@ -107,7 +123,10 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
         )}
         <select
           value={lang}
-          onChange={(e) => setLang(e.target.value)}
+          onChange={(e) => {
+            resetOutput()
+            setLang(e.target.value)
+          }}
           className="input-theme text-sm py-1.5"
           title="Output language"
         >
@@ -119,7 +138,7 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
         </select>
         <button
           onClick={run}
-          disabled={busy || availableFeatures.length === 0}
+          disabled={busy || availableFeatures.length === 0 || needsTargetLang}
           className="btn-theme-primary text-sm flex items-center gap-2 disabled:opacity-50"
         >
           {busy ? (
@@ -131,11 +150,17 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
               {status === 'loading' ? 'Loading…' : 'Generating…'}
             </>
           ) : (
-            <>✨ {output ? 'Regenerate' : `Generate ${FEATURE_LABELS[feature]}`}</>
+            <>✨ {output ? 'Regenerate' : `Generate ${FEATURE_LABELS[activeFeature]}`}</>
           )}
         </button>
         <span className="ml-auto text-xs text-theme-tertiary">{feedTitle}</span>
       </div>
+
+      {needsTargetLang && (
+        <div className="text-sm text-theme-tertiary mb-2">
+          Pick a target language to translate into.
+        </div>
+      )}
 
       {error && (
         <div className="text-sm text-red-600 flex items-start gap-2">
