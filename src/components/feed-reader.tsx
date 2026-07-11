@@ -147,6 +147,7 @@ export function FeedReader() {
   const markReadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const viewsExportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hasCheckedSyncRef = useRef(false)
+  const hasSyncedViewsRef = useRef(false)
   const hasRefreshedOnLoginRef = useRef(false)
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   
@@ -287,26 +288,6 @@ export function FeedReader() {
       if (feedsQueryError) return
       hasCheckedSyncRef.current = true
 
-      // Views sync (kind 30406): only for signers. Read-only npub stays purely
-      // local (no fetch/merge/publish). Silent localStorage merge, no import dialog.
-      if (canSign) {
-        try {
-          const viewsResult = await fetchViewList(user.npub)
-          if (
-            viewsResult.success &&
-            viewsResult.data &&
-            isSyncEventFresh('readstr-views', viewsResult.createdAt)
-          ) {
-            const merged = mergeViewLists(loadViews(), viewsResult.data.views)
-            saveViews(merged)
-            setViews(loadViews())
-            advanceSyncWatermarkIfFresh('readstr-views', viewsResult.createdAt)
-          }
-        } catch (error) {
-          console.error('Views sync check failed:', error)
-        }
-      }
-
       // Skip if synced recently (within last hour)
       const lastSync = getLastSyncTime()
       if (lastSync && Date.now() / 1000 - lastSync < 3600) return
@@ -355,7 +336,7 @@ export function FeedReader() {
     // 'feeds' is derived from feedsData each render (new reference); depending on
     // feedsData here is the stable proxy and the check is guarded to run once per session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.npub, canSign, feedsData, isFeedsFetched, isFeedsLoading, feedsQueryError])
+  }, [user?.npub, feedsData, isFeedsFetched, isFeedsLoading, feedsQueryError])
   
   const { data: userTags = [] } = api.feed.getUserTags.useQuery(undefined, {
     enabled: !!user && !!user.npub,
@@ -961,11 +942,53 @@ export function FeedReader() {
   const autoExportViewsToNostr = useCallback(async (viewsToExport: SavedView[]) => {
     if (!canSign || !user?.npub) return
     try {
-      await publishViewList(viewsToExport, signEventOrThrow)
+      const result = await publishViewList(viewsToExport, signEventOrThrow)
+      if (!result.success) {
+        console.warn('⚠️ Views auto-export failed:', result.error)
+      }
     } catch {
       // Silently fail - don't interrupt user experience
     }
   }, [user?.npub, canSign, signEventOrThrow])
+
+  // Views sync (kind 30406): only for signers. Read-only npub stays purely local.
+  // Runs once per session but guards before setting the ref so a canSign false→true
+  // transition still triggers the one-time sync.
+  useEffect(() => {
+    if (hasSyncedViewsRef.current) return
+    if (!user?.npub || !canSign) return
+    hasSyncedViewsRef.current = true
+
+    const syncViews = async () => {
+      try {
+        const viewsResult = await fetchViewList(user.npub)
+        if (!viewsResult.success || !viewsResult.data) return
+        const remoteViews = viewsResult.data.views
+        const hasRemoteEvent = viewsResult.createdAt != null
+
+        if (hasRemoteEvent && isSyncEventFresh('readstr-views', viewsResult.createdAt)) {
+          const merged = mergeViewLists(loadViews(), remoteViews)
+          saveViews(merged)
+          setViews(loadViews())
+          advanceSyncWatermarkIfFresh('readstr-views', viewsResult.createdAt)
+        }
+
+        // Publish local additions the remote lacks, or seed the first event when
+        // none exists. One-shot; do not advance the watermark here (next login
+        // converges) and only publish on a real delta so this can't loop.
+        const localViews = loadViews()
+        const remoteIds = new Set(remoteViews.map((v) => v.id))
+        const hasLocalOnly = localViews.some((v) => !remoteIds.has(v.id))
+        if (localViews.length > 0 && (!hasRemoteEvent || hasLocalOnly)) {
+          void autoExportViewsToNostr(localViews)
+        }
+      } catch (error) {
+        console.error('Views sync check failed:', error)
+      }
+    }
+    syncViews()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.npub, canSign])
 
   // Handle importing feeds from Nostr sync
   const handleImportFeeds = async (feedsToImport: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => {

@@ -144,13 +144,16 @@ export function mergeViewLists(local: SavedView[], remote: SavedView[]): SavedVi
   // Remote is authoritative for shared fields, but keywords.exclude is local-only:
   // strip whatever the remote carries and re-attach the local mute words by id.
   for (const r of remote) {
+    if (seen.has(r.id)) continue
     seen.add(r.id)
     merged.push(reattachExclude(r, localById.get(r.id)?.keywords?.exclude))
   }
 
   // Additive merge: keep local-only views (no deletion-sync).
   for (const l of local) {
-    if (!seen.has(l.id)) merged.push(l)
+    if (seen.has(l.id)) continue
+    seen.add(l.id)
+    merged.push(l)
   }
 
   return normalizeViews(merged)
