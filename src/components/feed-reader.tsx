@@ -13,6 +13,18 @@ import { FormattedContent } from './formatted-content'
 import { AiSummaryPanel } from './ai-summary-panel'
 import { useAiConfig } from '@/lib/ai/config'
 import { applyFilters, loadFilterRules, type FilterRule } from '@/lib/keyword-filter'
+import { SavedViewsBar } from './saved-views-bar'
+import {
+  loadViews,
+  saveViews,
+  loadActiveViewId,
+  saveActiveViewId,
+  newViewId,
+  matchesView,
+  reorderViews,
+  type SavedView,
+  type ViewSource,
+} from '@/lib/saved-views'
 import { SimplePool } from 'nostr-tools'
 import { 
   fetchSubscriptionList,
@@ -111,6 +123,11 @@ export function FeedReader() {
   const [showAiPanel, setShowAiPanel] = useState(false)
   const [filterRules, setFilterRules] = useState<FilterRule[]>([])
   const [showHiddenByFilter, setShowHiddenByFilter] = useState(false)
+  const [views, setViews] = useState<SavedView[]>([])
+  const [activeViewId, setActiveViewId] = useState<string | null>(null)
+  const [showSaveViewModal, setShowSaveViewModal] = useState(false)
+  const [newViewName, setNewViewName] = useState('')
+  const [newViewIcon, setNewViewIcon] = useState('')
   const [isSharing, setIsSharing] = useState(false)
   const [shareSuccess, setShareSuccess] = useState(false)
   const [showSyncPrompt, setShowSyncPrompt] = useState(false)
@@ -145,6 +162,13 @@ export function FeedReader() {
     // Switch to tags sidebar view when changing organization mode
     setSidebarView('tags')
   }
+
+  const handleOrganizationModeChangeRef = useRef(handleOrganizationModeChange)
+  const organizationModeRef = useRef(organizationMode)
+  useEffect(() => {
+    handleOrganizationModeChangeRef.current = handleOrganizationModeChange
+    organizationModeRef.current = organizationMode
+  })
   
   // Categories query
   const { data: categories = [] } = api.feed.getCategories.useQuery(undefined, {
@@ -672,6 +696,8 @@ export function FeedReader() {
   // Filter and sort feed items based on view options
   const allFeedItems = useMemo(() => feedItemsData?.items ?? [], [feedItemsData])
 
+  const activeView = activeViewId ? views.find((v) => v.id === activeViewId) : undefined
+
   // Apply read/unread filter and local keyword filter rules (client-side only)
   const { items: filteredItems, hiddenCount: hiddenByFilterCount, outcomes: filterOutcomes } = useMemo(() => {
     let items = allFeedItems as FeedItem[]
@@ -680,8 +706,12 @@ export function FeedReader() {
     } else if (viewFilter === 'read') {
       items = items.filter((item) => item.isRead)
     }
-    return applyFilters(items, filterRules, showHiddenByFilter)
-  }, [allFeedItems, viewFilter, filterRules, showHiddenByFilter])
+    const result = applyFilters(items, filterRules, showHiddenByFilter)
+    if (activeView?.keywords) {
+      return { ...result, items: result.items.filter((item) => matchesView(item, activeView)) }
+    }
+    return result
+  }, [allFeedItems, viewFilter, filterRules, showHiddenByFilter, activeView])
 
   let feedItems = filteredItems
 
@@ -950,10 +980,15 @@ export function FeedReader() {
     setOpenMenuFeedId(null)
   }
 
+  const clearActiveView = () => {
+    setActiveViewId(null)
+    saveActiveViewId(null)
+  }
+
   // Handle tag selection
   const handleToggleTag = (tag: string) => {
-    setSelectedTags(prev => 
-      prev.includes(tag) 
+    setSelectedTags(prev =>
+      prev.includes(tag)
         ? prev.filter(t => t !== tag)
         : [...prev, tag]
     )
@@ -961,9 +996,11 @@ export function FeedReader() {
     setSelectedFeed('all')
     // Close sidebar on mobile when tag is selected
     setShowSidebar(false)
+    clearActiveView()
   }
 
   const handleClearTags = () => {
+    clearActiveView()
     setSelectedTags([])
   }
 
@@ -999,6 +1036,116 @@ export function FeedReader() {
     setEditingFeedId(null)
     setEditTags([])
     setEditTagInput('')
+  }
+
+  // Saved views (localStorage only)
+  const applyView = useCallback((view: SavedView) => {
+    const source = view.source
+    switch (source.kind) {
+      case 'all':
+        setSidebarView('feeds')
+        setSelectedFeed('all')
+        setSelectedTags([])
+        setSelectedCategoryId(null)
+        break
+      case 'feed':
+        setSidebarView('feeds')
+        setSelectedFeed(source.feedId)
+        setSelectedTags([])
+        setSelectedCategoryId(null)
+        break
+      case 'tags':
+        setSidebarView('tags')
+        setSelectedTags(source.tags)
+        setSelectedFeed('all')
+        setSelectedCategoryId(null)
+        break
+      case 'category':
+        setSidebarView('tags')
+        setSelectedCategoryId(source.categoryId)
+        setSelectedFeed('all')
+        setSelectedTags([])
+        break
+      case 'favorites':
+        setSidebarView('favorites')
+        setSelectedTags([])
+        setSelectedCategoryId(null)
+        break
+    }
+    if (
+      view.organizationMode &&
+      (source.kind === 'tags' || source.kind === 'category') &&
+      view.organizationMode !== organizationModeRef.current
+    ) {
+      handleOrganizationModeChangeRef.current(view.organizationMode)
+    }
+    setViewFilter(view.readState)
+    setSortOrder(view.sort)
+    setActiveViewId(view.id)
+    saveActiveViewId(view.id)
+  }, [])
+
+  useEffect(() => {
+    const loaded = loadViews()
+    setViews(loaded)
+    const active = loadActiveViewId()
+    const match = active ? loaded.find((v) => v.id === active) : undefined
+    if (match) applyView(match)
+    else setActiveViewId(null)
+  }, [applyView])
+
+  const persistViews = (next: SavedView[]) => {
+    saveViews(next)
+    setViews(loadViews())
+  }
+
+  const captureCurrentSource = (): ViewSource => {
+    if (sidebarView === 'favorites') return { kind: 'favorites' }
+    if (organizationMode === 'categories' && selectedCategoryId) {
+      return { kind: 'category', categoryId: selectedCategoryId }
+    }
+    if (selectedTags.length > 0) return { kind: 'tags', tags: [...selectedTags] }
+    if (selectedFeed && selectedFeed !== 'all') return { kind: 'feed', feedId: selectedFeed }
+    return { kind: 'all' }
+  }
+
+  const handleSaveCurrentView = () => {
+    const name = newViewName.trim()
+    if (!name) return
+    const source = captureCurrentSource()
+    const view: SavedView = {
+      id: newViewId(),
+      name,
+      order: views.length,
+      source,
+      readState: viewFilter,
+      sort: sortOrder,
+    }
+    if (source.kind === 'tags' || source.kind === 'category') {
+      view.organizationMode = organizationMode
+    }
+    if (newViewIcon.trim()) view.icon = newViewIcon.trim()
+    persistViews([...views, view])
+    setActiveViewId(view.id)
+    saveActiveViewId(view.id)
+    setShowSaveViewModal(false)
+    setNewViewName('')
+    setNewViewIcon('')
+  }
+
+  const handleRenameView = (id: string, name: string) => {
+    persistViews(views.map((v) => (v.id === id ? { ...v, name } : v)))
+  }
+
+  const handleDeleteView = (id: string) => {
+    persistViews(views.filter((v) => v.id !== id))
+    if (activeViewId === id) clearActiveView()
+  }
+
+  const handleMoveView = (index: number, direction: -1 | 1) => {
+    const next = reorderViews(views, index, direction)
+    if (next === views) return
+    persistViews(next)
   }
 
   return (
@@ -1068,6 +1215,7 @@ export function FeedReader() {
                 setSidebarView('feeds')
                 setSelectedTags([])
                 setShowSidebar(true)
+                clearActiveView()
               }}
               className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
                 sidebarView === 'feeds'
@@ -1095,6 +1243,7 @@ export function FeedReader() {
                 setSidebarView('favorites')
                 setSelectedTags([])
                 setShowSidebar(true)
+                clearActiveView()
               }}
               className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
                 sidebarView === 'favorites'
@@ -1181,6 +1330,7 @@ export function FeedReader() {
                 setSidebarView('feeds')
                 setSelectedTags([])
                 setSelectedCategoryId(null)
+                clearActiveView()
               }}
               className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
                 sidebarView === 'feeds'
@@ -1205,6 +1355,7 @@ export function FeedReader() {
                 setSidebarView('favorites')
                 setSelectedTags([])
                 setSelectedCategoryId(null)
+                clearActiveView()
               }}
               className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
                 sidebarView === 'favorites'
@@ -1264,6 +1415,7 @@ export function FeedReader() {
                 onClick={() => {
                   setSelectedFeed(feed.id)
                   setShowSidebar(false)
+                  clearActiveView()
                 }}
                 className="w-full px-4 py-3"
               >
@@ -1517,7 +1669,10 @@ export function FeedReader() {
                   <div className="flex-1 overflow-y-auto themed-scrollbar">
                     {/* All Items option */}
                     <button
-                      onClick={() => setSelectedCategoryId(null)}
+                      onClick={() => {
+                        setSelectedCategoryId(null)
+                        clearActiveView()
+                      }}
                       className={`w-full px-4 py-3 text-left transition-all duration-150 ${
                         !selectedCategoryId 
                           ? 'bg-theme-accent-light border-l-4 border-l-[rgb(var(--color-accent))]' 
@@ -1536,7 +1691,10 @@ export function FeedReader() {
                     {categoriesWithUnread.map((cat: Category & { unreadCount: number; feedCount: number }) => (
                       <button
                         key={cat.id}
-                        onClick={() => setSelectedCategoryId(cat.id)}
+                        onClick={() => {
+                          setSelectedCategoryId(cat.id)
+                          clearActiveView()
+                        }}
                         className={`w-full px-4 py-3 text-left transition-all duration-150 ${
                           selectedCategoryId === cat.id 
                             ? 'bg-theme-accent-light border-l-4 border-l-[rgb(var(--color-accent))]' 
@@ -1758,6 +1916,7 @@ export function FeedReader() {
                         e.stopPropagation()
                         setViewFilter('all')
                         setShowViewOptions(false)
+                        clearActiveView()
                       }}
                       className={`dropdown-item ${viewFilter === 'all' ? 'active' : ''}`}
                     >
@@ -1768,6 +1927,7 @@ export function FeedReader() {
                         e.stopPropagation()
                         setViewFilter('unread')
                         setShowViewOptions(false)
+                        clearActiveView()
                       }}
                       className={`dropdown-item ${viewFilter === 'unread' ? 'active' : ''}`}
                     >
@@ -1778,6 +1938,7 @@ export function FeedReader() {
                         e.stopPropagation()
                         setViewFilter('read')
                         setShowViewOptions(false)
+                        clearActiveView()
                       }}
                       className={`dropdown-item ${viewFilter === 'read' ? 'active' : ''}`}
                     >
@@ -1791,6 +1952,7 @@ export function FeedReader() {
                           e.stopPropagation()
                           setSortOrder('newest')
                           setShowViewOptions(false)
+                          clearActiveView()
                         }}
                         className={`dropdown-item ${sortOrder === 'newest' ? 'active' : ''}`}
                       >
@@ -1801,6 +1963,7 @@ export function FeedReader() {
                           e.stopPropagation()
                           setSortOrder('oldest')
                           setShowViewOptions(false)
+                          clearActiveView()
                         }}
                         className={`dropdown-item ${sortOrder === 'oldest' ? 'active' : ''}`}
                       >
@@ -1833,7 +1996,19 @@ export function FeedReader() {
             </div>
           </div>
           
-          <div className="flex items-center gap-2 text-sm text-theme-secondary">
+          <SavedViewsBar
+            views={views}
+            activeViewId={activeViewId}
+            onSelectCurrent={clearActiveView}
+            onSelectView={applyView}
+            onSaveCurrent={() => {
+              setNewViewName('')
+              setNewViewIcon('')
+              setShowSaveViewModal(true)
+            }}
+          />
+
+          <div className="mt-3 flex items-center gap-2 text-sm text-theme-secondary">
             <span className="font-medium">{allFeedItems.filter(item => !item.isRead).length}</span>
             <span>unread</span>
             {viewFilter !== 'all' && (
@@ -2125,15 +2300,76 @@ export function FeedReader() {
         categories={categories}
       />
 
-      {/* Settings Dialog */}
+      {/* Save Current View Modal */}
+      {showSaveViewModal && (
+        <div className="modal-overlay">
+          <div className="modal-content w-96 max-w-[90vw] animate-slide-in">
+            <div className="p-6 border-b border-theme-primary">
+              <h2 className="text-xl font-bold text-theme-primary">Save current as view</h2>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-xs text-theme-tertiary mb-1 uppercase tracking-wider">Name</label>
+                <input
+                  type="text"
+                  value={newViewName}
+                  autoFocus
+                  onChange={(e) => setNewViewName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleSaveCurrentView()
+                  }}
+                  placeholder="e.g. Unread tech"
+                  maxLength={60}
+                  className="input-theme w-full"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-theme-tertiary mb-1 uppercase tracking-wider">Emoji (optional)</label>
+                <input
+                  type="text"
+                  value={newViewIcon}
+                  onChange={(e) => setNewViewIcon(e.target.value)}
+                  placeholder="⭐"
+                  maxLength={8}
+                  className="input-theme w-24"
+                />
+              </div>
+            </div>
+            <div className="p-6 border-t border-theme-primary flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  setShowSaveViewModal(false)
+                  setNewViewName('')
+                  setNewViewIcon('')
+                }}
+                className="btn-theme-secondary"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveCurrentView}
+                disabled={!newViewName.trim()}
+                className="btn-theme-primary disabled:opacity-50"
+              >
+                Save View
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <SettingsDialog
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
         markReadBehavior={markReadBehavior}
         onChangeMarkReadBehavior={handleMarkReadBehaviorChange}
         onFilterRulesChange={() => setFilterRules(loadFilterRules())}
+        views={views}
+        onRenameView={handleRenameView}
+        onDeleteView={handleDeleteView}
+        onMoveView={handleMoveView}
         organizationMode={organizationMode}
-        onChangeOrganizationMode={handleOrganizationModeChange}
+        onChangeOrganizationMode={(mode) => { clearActiveView(); handleOrganizationModeChange(mode) }}
         feeds={feeds.map((f: Feed) => ({
           type: f.type,
           url: f.url || f.npub || '',

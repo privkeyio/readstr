@@ -25,18 +25,20 @@ import {
   type MatchType,
   type FilterAction,
 } from '@/lib/keyword-filter'
+import type { SavedView } from '@/lib/saved-views'
 
 export type MarkReadBehavior = 'on-open' | 'after-10s' | 'never'
 export type OrganizationMode = 'tags' | 'categories'
 
 // Settings tabs
-type SettingsTab = 'relays' | 'organization' | 'reading' | 'filters' | 'ai' | 'sync' | 'about'
+type SettingsTab = 'relays' | 'organization' | 'reading' | 'filters' | 'views' | 'ai' | 'sync' | 'about'
 
 const SETTINGS_TABS: { id: SettingsTab; label: string; icon: string }[] = [
   { id: 'relays', label: 'Nostr Relays', icon: '🔌' },
   { id: 'organization', label: 'Feed Organization', icon: '📁' },
   { id: 'reading', label: 'Reading', icon: '📖' },
   { id: 'filters', label: 'Filters', icon: '🧹' },
+  { id: 'views', label: 'Views', icon: '🗂️' },
   { id: 'ai', label: 'AI', icon: '✨' },
   { id: 'sync', label: 'Sync', icon: '🔄' },
   { id: 'about', label: 'About', icon: 'ℹ️' },
@@ -212,6 +214,10 @@ interface SettingsDialogProps {
   userPubkey?: string
   onImportFeeds?: (feeds: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => Promise<void>
   onFilterRulesChange?: () => void
+  views?: SavedView[]
+  onRenameView?: (id: string, name: string) => void
+  onDeleteView?: (id: string) => void
+  onMoveView?: (index: number, direction: -1 | 1) => void
 }
 
 // Default category colors/icons
@@ -228,7 +234,7 @@ const CATEGORY_COLORS = [
 
 const CATEGORY_ICONS = ['📁', '📰', '🎬', '🎵', '💼', '🎮', '📚', '🔬', '💡', '🌍', '⚡', '🎯']
 
-export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds, onFilterRulesChange }: SettingsDialogProps) {
+export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds, onFilterRulesChange, views = [], onRenameView, onDeleteView, onMoveView }: SettingsDialogProps) {
   const { user, canSign, signEventOrThrow } = useNostrAuth()
   const { readingPrefs, setReadingPref, resetReading } = useTheme()
   const { config: aiConfig, setConfig: setAiConfig } = useAiConfig()
@@ -247,6 +253,25 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
   const [newCategoryIcon, setNewCategoryIcon] = useState('📁')
   const [editingCategory, setEditingCategory] = useState<Category | null>(null)
   const [categoryError, setCategoryError] = useState('')
+
+  // Saved views management state
+  const [editingViewId, setEditingViewId] = useState<string | null>(null)
+  const [editViewName, setEditViewName] = useState('')
+
+  const sourceLabel = (source: SavedView['source']): string => {
+    switch (source.kind) {
+      case 'all':
+        return 'All items'
+      case 'feed':
+        return 'Single feed'
+      case 'tags':
+        return `Tags: ${source.tags.join(', ')}`
+      case 'category':
+        return 'Category'
+      case 'favorites':
+        return 'Saved'
+    }
+  }
 
   // Local keyword filter state
   const [filterRules, setFilterRulesState] = useState<FilterRule[]>([])
@@ -1320,6 +1345,122 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                     </div>
                   )}
                 </div>
+              </div>
+            )}
+
+            {activeTab === 'views' && (
+              <div>
+                <h3 className="text-lg font-bold text-theme-primary mb-2">Smart Views</h3>
+                <p className="text-sm text-theme-secondary mb-6">
+                  Saved filters shown as chips above your item list. Views are stored only in this browser and are never sent to any server or relay.
+                </p>
+
+                <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                  Your Views ({views.length})
+                </label>
+                {views.length === 0 ? (
+                  <div className="text-center py-6 text-theme-tertiary text-sm">
+                    No views yet. Use the “+” chip above your item list to save your current filter.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {views.map((view, index) => (
+                      <div
+                        key={view.id}
+                        className="flex items-center justify-between gap-3 p-3 bg-theme-tertiary rounded-xl"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          {view.icon && <span className="flex-shrink-0">{view.icon}</span>}
+                          <div className="min-w-0">
+                            {editingViewId === view.id ? (
+                              <input
+                                type="text"
+                                value={editViewName}
+                                autoFocus
+                                maxLength={60}
+                                onChange={(e) => setEditViewName(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' && editViewName.trim()) {
+                                    onRenameView?.(view.id, editViewName.trim())
+                                    setEditingViewId(null)
+                                  }
+                                  if (e.key === 'Escape') setEditingViewId(null)
+                                }}
+                                className="input-theme w-full"
+                              />
+                            ) : (
+                              <>
+                                <div className="font-medium text-theme-primary truncate">{view.name}</div>
+                                <div className="text-xs text-theme-tertiary truncate">
+                                  {sourceLabel(view.source)} · {view.readState} · {view.sort}
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex gap-1 flex-shrink-0">
+                          {editingViewId === view.id ? (
+                            <>
+                              <button
+                                onClick={() => {
+                                  if (editViewName.trim()) onRenameView?.(view.id, editViewName.trim())
+                                  setEditingViewId(null)
+                                }}
+                                className="p-2 text-theme-secondary hover:bg-theme-hover rounded-lg transition-colors"
+                                title="Save name"
+                              >
+                                ✓
+                              </button>
+                              <button
+                                onClick={() => setEditingViewId(null)}
+                                className="p-2 text-theme-secondary hover:bg-theme-hover rounded-lg transition-colors"
+                                title="Cancel"
+                              >
+                                ✕
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => onMoveView?.(index, -1)}
+                                disabled={index === 0}
+                                className="p-2 text-theme-secondary hover:bg-theme-hover rounded-lg transition-colors disabled:opacity-30"
+                                title="Move up"
+                              >
+                                ↑
+                              </button>
+                              <button
+                                onClick={() => onMoveView?.(index, 1)}
+                                disabled={index === views.length - 1}
+                                className="p-2 text-theme-secondary hover:bg-theme-hover rounded-lg transition-colors disabled:opacity-30"
+                                title="Move down"
+                              >
+                                ↓
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setEditingViewId(view.id)
+                                  setEditViewName(view.name)
+                                }}
+                                className="p-2 text-theme-secondary hover:bg-theme-hover rounded-lg transition-colors"
+                                title="Rename view"
+                              >
+                                ✏️
+                              </button>
+                              <button
+                                onClick={() => onDeleteView?.(view.id)}
+                                className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                title="Delete view"
+                              >
+                                🗑️
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
