@@ -1312,6 +1312,7 @@ export function FeedReader() {
                 setSidebarView('history')
                 setSelectedTags([])
                 setShowSidebar(true)
+                clearActiveView()
               }}
               className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
                 sidebarView === 'history'
@@ -1438,6 +1439,7 @@ export function FeedReader() {
                 setSidebarView('history')
                 setSelectedTags([])
                 setSelectedCategoryId(null)
+                clearActiveView()
               }}
               className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
                 sidebarView === 'history'
