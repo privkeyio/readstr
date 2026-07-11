@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { FormattedContent } from './formatted-content'
 import { streamChat } from '@/lib/ai/client'
+import { isWebGpuAvailable, streamOnDevice } from '@/lib/ai/on-device'
 import { buildPrompt, type AiFeature } from '@/lib/ai/prompts'
 import { cacheKey, getCachedSummary, setCachedSummary } from '@/lib/ai/summary-cache'
 import { AI_LANG_OPTIONS, type AiConfig } from '@/lib/ai/config'
@@ -29,12 +30,21 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
   const [feature, setFeature] = useState<AiFeature>(defaultFeature)
   const [lang, setLang] = useState(config.targetLang)
   const [output, setOutput] = useState('')
-  const [status, setStatus] = useState<'idle' | 'loading' | 'streaming' | 'done' | 'error'>('idle')
+  const [status, setStatus] = useState<'idle' | 'loading' | 'downloading' | 'streaming' | 'done' | 'error'>('idle')
+  const [progress, setProgress] = useState('')
   const [error, setError] = useState('')
   const [fromCache, setFromCache] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
 
+  const [webGpuOk, setWebGpuOk] = useState(true)
+
   const activeFeature = availableFeatures.includes(feature) ? feature : defaultFeature
+  const onDevice = config.provider === 'on-device'
+  const webGpuMissing = onDevice && !webGpuOk
+
+  useEffect(() => {
+    setWebGpuOk(isWebGpuAvailable())
+  }, [])
 
   useEffect(() => {
     return () => abortRef.current?.abort()
@@ -44,6 +54,7 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
     abortRef.current?.abort()
     setOutput('')
     setError('')
+    setProgress('')
     setFromCache(false)
     setStatus('idle')
   }
@@ -56,9 +67,12 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
     setStatus('loading')
     setOutput('')
     setError('')
+    setProgress('')
     setFromCache(false)
 
-    const key = cacheKey(articleKey, activeFeature, lang, config.model, config.baseUrl)
+    const keyModel = onDevice ? config.deviceModel : config.model
+    const keyProvider = onDevice ? config.provider : config.baseUrl
+    const key = cacheKey(articleKey, activeFeature, lang, keyModel, keyProvider)
 
     const cached = await getCachedSummary(key)
     if (controller.signal.aborted) return
@@ -72,20 +86,42 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
     try {
       const messages = buildPrompt(activeFeature, { title, text, targetLang: lang })
       let acc = ''
-      setStatus('streaming')
-      for await (const token of streamChat({
-        baseUrl: config.baseUrl,
-        apiKey: config.apiKey || undefined,
-        model: config.model,
-        messages,
-        signal: controller.signal,
-      })) {
+      const stream = onDevice
+        ? streamOnDevice({
+            model: config.deviceModel,
+            messages,
+            signal: controller.signal,
+            onProgress: ({ progress, text }) => {
+              if (controller.signal.aborted) return
+              setStatus('downloading')
+              setProgress(`Loading model… ${Math.round(progress * 100)}%${text ? ` — ${text}` : ''}`)
+            },
+          })
+        : streamChat({
+            baseUrl: config.baseUrl,
+            apiKey: config.apiKey || undefined,
+            model: config.model,
+            messages,
+            signal: controller.signal,
+          })
+      setStatus(onDevice ? 'loading' : 'streaming')
+      let streaming = false
+      for await (const token of stream) {
+        if (!streaming) {
+          streaming = true
+          setStatus('streaming')
+        }
         acc += token
         setOutput(acc)
       }
       if (controller.signal.aborted) return
+      if (!acc.trim()) {
+        setError('The model returned no output.')
+        setStatus('error')
+        return
+      }
       setStatus('done')
-      if (acc.trim()) void setCachedSummary(key, acc)
+      void setCachedSummary(key, acc)
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return
@@ -95,7 +131,7 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
     }
   }
 
-  const busy = status === 'loading' || status === 'streaming'
+  const busy = status === 'loading' || status === 'downloading' || status === 'streaming'
   const needsTargetLang = activeFeature === 'translate' && lang === 'auto'
 
   return (
@@ -138,7 +174,7 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
         </select>
         <button
           onClick={run}
-          disabled={busy || availableFeatures.length === 0 || needsTargetLang}
+          disabled={busy || availableFeatures.length === 0 || needsTargetLang || webGpuMissing}
           className="btn-theme-primary text-sm flex items-center gap-2 disabled:opacity-50"
         >
           {busy ? (
@@ -147,7 +183,7 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
-              {status === 'loading' ? 'Loading…' : 'Generating…'}
+              {status === 'downloading' ? 'Loading model…' : status === 'loading' ? 'Loading…' : 'Generating…'}
             </>
           ) : (
             <>✨ {output ? 'Regenerate' : `Generate ${FEATURE_LABELS[activeFeature]}`}</>
@@ -160,6 +196,16 @@ export function AiSummaryPanel({ articleKey, title, text, feedTitle, config }: A
         <div className="text-sm text-theme-tertiary mb-2">
           Pick a target language to translate into.
         </div>
+      )}
+
+      {webGpuMissing && (
+        <div className="text-sm text-theme-tertiary mb-2">
+          On-device AI requires a browser with WebGPU (Chrome, Edge, or recent Safari/Firefox).
+        </div>
+      )}
+
+      {status === 'downloading' && progress && (
+        <div className="text-sm text-theme-tertiary mb-2">{progress}</div>
       )}
 
       {error && (
