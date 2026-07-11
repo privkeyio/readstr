@@ -537,7 +537,7 @@ export const feedRouter = createTRPCRouter({
   getFeedItems: protectedProcedure
     .input(z.object({
       feedId: z.string().optional(),
-      feedIds: z.array(z.string()).optional(), // Array of feed IDs for tag filtering
+      feedIds: z.array(z.string()).max(500).optional(), // Array of feed IDs for tag filtering
       limit: z.number().min(1).max(100).default(50),
       cursor: z.string().optional(),
       unreadOnly: z.boolean().optional(),
@@ -550,32 +550,31 @@ export const feedRouter = createTRPCRouter({
         ? input.feedIds.filter((id): id is string => !!id && typeof id === 'string' && id !== 'undefined')
         : []
 
+      // Scope any client-supplied feedId/feedIds to the caller's subscriptions
+      const subscriptions = await ctx.db.subscription.findMany({
+        where: { userPubkey: ctx.nostrPubkey, deletedAt: null },
+        select: { feedId: true },
+      })
+      const subscribedFeedIds = new Set(subscriptions.map((s: { feedId: string }) => s.feedId))
+
+      let scopedFeedIds: string[]
       if (input.feedId) {
-        whereClause.feedId = input.feedId
+        scopedFeedIds = subscribedFeedIds.has(input.feedId) ? [input.feedId] : []
+      } else if (sanitizedFeedIds.length > 0) {
+        scopedFeedIds = sanitizedFeedIds.filter((id) => subscribedFeedIds.has(id))
       } else {
-        let derivedFeedIds: string[] = []
+        scopedFeedIds = [...subscribedFeedIds]
+      }
 
-        if (sanitizedFeedIds.length > 0) {
-          derivedFeedIds = sanitizedFeedIds
-        } else {
-          // Only show items from feeds the user is subscribed to
-          const subscriptions = await ctx.db.subscription.findMany({
-            where: { userPubkey: ctx.nostrPubkey },
-            select: { feedId: true },
-          })
-          derivedFeedIds = subscriptions.map((s: { feedId: string }) => s.feedId)
+      if (scopedFeedIds.length === 0) {
+        return {
+          items: [],
+          nextCursor: undefined,
         }
+      }
 
-        if (derivedFeedIds.length === 0) {
-          return {
-            items: [],
-            nextCursor: undefined,
-          }
-        }
-
-        whereClause.feedId = {
-          in: derivedFeedIds,
-        }
+      whereClause.feedId = {
+        in: scopedFeedIds,
       }
 
       if (input.unreadOnly) {
