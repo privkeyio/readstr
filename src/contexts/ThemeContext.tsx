@@ -13,17 +13,17 @@ export type FontKey =
   | 'source-serif'
   | 'playfair'
 
-// TODO(readstr-h39): add self-hosted woff2 for Charter / Source Serif / Playfair
-// via next/font/local so these options render their true faces instead of the
-// Georgia/Times fallbacks below. No CDN — files must be same-origin (CSP).
+// Source Serif 4 and Playfair Display are loaded via next/font/google
+// (self-hosted at build time, served same-origin), so their CSS vars come first.
+// Charter intentionally stays a system serif — real Charter on Apple, Georgia elsewhere.
 export const FONT_STACKS: Record<FontKey, string> = {
   default: '',
   system: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
   inter: 'var(--font-inter), system-ui, sans-serif',
   georgia: 'Georgia, Cambria, "Times New Roman", Times, serif',
   charter: 'Charter, "Bitstream Charter", Georgia, Cambria, serif',
-  'source-serif': '"Source Serif 4", "Source Serif Pro", Georgia, serif',
-  playfair: '"Playfair Display", Georgia, "Times New Roman", serif',
+  'source-serif': 'var(--font-source-serif), "Source Serif 4", "Source Serif Pro", Georgia, serif',
+  playfair: 'var(--font-playfair), "Playfair Display", Georgia, "Times New Roman", serif',
 }
 
 export const FONT_OPTIONS: { key: FontKey; label: string }[] = [

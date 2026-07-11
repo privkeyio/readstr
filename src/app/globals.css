@@ -124,7 +124,7 @@ html.theme-newspaper {
   
   --font-sans: 'Charter', 'Bitstream Charter', Georgia, serif;
   --content-font: 'Charter', 'Bitstream Charter', Georgia, serif;
-  --heading-font: 'Playfair Display', Georgia, serif;
+  --heading-font: var(--font-playfair), 'Playfair Display', Georgia, serif;
   --reading-scale-base: 1.125;
 }
 
@@ -157,9 +157,9 @@ html.theme-parchment {
   --shadow-md: 0 2px 4px 0 rgb(101 67 33 / 0.08);
   --shadow-lg: 0 4px 8px 0 rgb(101 67 33 / 0.1);
   
-  --font-sans: 'Crimson Pro', 'Crimson Text', Georgia, serif;
-  --content-font: 'Crimson Pro', 'Crimson Text', Georgia, serif;
-  --heading-font: 'Playfair Display', Georgia, serif;
+  --font-sans: var(--font-crimson), 'Crimson Pro', 'Crimson Text', Georgia, serif;
+  --content-font: var(--font-crimson), 'Crimson Pro', 'Crimson Text', Georgia, serif;
+  --heading-font: var(--font-playfair), 'Playfair Display', Georgia, serif;
   --reading-scale-base: 1.125;
 }
 
