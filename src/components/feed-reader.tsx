@@ -641,7 +641,7 @@ export function FeedReader() {
       : userTags
   
   // Filter and sort feed items based on view options
-  const allFeedItems = feedItemsData?.items || []
+  const allFeedItems = useMemo(() => feedItemsData?.items ?? [], [feedItemsData])
 
   // Apply read/unread filter and local keyword filter rules (client-side only)
   const { items: filteredItems, hiddenCount: hiddenByFilterCount, outcomes: filterOutcomes } = useMemo(() => {

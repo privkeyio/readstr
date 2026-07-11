@@ -262,12 +262,11 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
   const handleSaveRule = () => {
     const pattern = ruleDraft.pattern.trim()
     if (!pattern) return
+    const color = ruleDraft.action === 'highlight' ? ruleDraft.color : undefined
     if (editingRuleId) {
       persistFilterRules(
         filterRules.map((r) =>
-          r.id === editingRuleId
-            ? { ...r, ...ruleDraft, pattern, color: ruleDraft.action === 'highlight' ? ruleDraft.color : undefined }
-            : r
+          r.id === editingRuleId ? { ...r, ...ruleDraft, pattern, color } : r
         )
       )
     } else {
@@ -280,7 +279,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
         pattern,
         caseSensitive: ruleDraft.caseSensitive,
         action: ruleDraft.action,
-        color: ruleDraft.action === 'highlight' ? ruleDraft.color : undefined,
+        color,
       }
       persistFilterRules([...filterRules, newRule])
     }
