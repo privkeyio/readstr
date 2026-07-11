@@ -8,22 +8,37 @@ export interface AiFeatureToggles {
   translate: boolean
 }
 
+export type AiProvider = 'endpoint' | 'on-device'
+
 export interface AiConfig {
   enabled: boolean
+  provider: AiProvider
   baseUrl: string
   apiKey: string
   model: string
+  deviceModel: string
   features: AiFeatureToggles
   targetLang: string
 }
 
 export const AI_CONFIG_KEY = 'readstr_ai_config'
 
+export const ON_DEVICE_MODELS: { id: string; label: string; sizeLabel: string }[] = [
+  { id: 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC', label: 'Qwen2.5 0.5B', sizeLabel: '~0.5 GB' },
+  { id: 'Llama-3.2-1B-Instruct-q4f16_1-MLC', label: 'Llama 3.2 1B', sizeLabel: '~0.9 GB' },
+  { id: 'Llama-3.2-3B-Instruct-q4f16_1-MLC', label: 'Llama 3.2 3B', sizeLabel: '~1.9 GB' },
+]
+
+const ON_DEVICE_MODEL_IDS = new Set(ON_DEVICE_MODELS.map((m) => m.id))
+const DEFAULT_DEVICE_MODEL = ON_DEVICE_MODELS[0].id
+
 export const DEFAULT_AI_CONFIG: AiConfig = {
   enabled: false,
+  provider: 'endpoint',
   baseUrl: 'http://localhost:11434/v1',
   apiKey: '',
   model: 'llama3.2',
+  deviceModel: DEFAULT_DEVICE_MODEL,
   features: {
     summarize: true,
     insights: true,
@@ -48,6 +63,7 @@ export function normalizeAiConfig(input: Partial<AiConfig> | null | undefined): 
   const features = (p.features ?? {}) as Partial<AiFeatureToggles>
   return {
     enabled: p.enabled === true,
+    provider: p.provider === 'on-device' ? 'on-device' : 'endpoint',
     baseUrl:
       typeof p.baseUrl === 'string' && p.baseUrl.trim()
         ? p.baseUrl.trim().replace(/\/+$/, '')
@@ -57,6 +73,10 @@ export function normalizeAiConfig(input: Partial<AiConfig> | null | undefined): 
       typeof p.model === 'string' && p.model.trim()
         ? p.model.trim()
         : DEFAULT_AI_CONFIG.model,
+    deviceModel:
+      typeof p.deviceModel === 'string' && ON_DEVICE_MODEL_IDS.has(p.deviceModel)
+        ? p.deviceModel
+        : DEFAULT_DEVICE_MODEL,
     features: {
       summarize: features.summarize !== false,
       insights: features.insights !== false,
