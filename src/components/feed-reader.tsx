@@ -1,7 +1,8 @@
 'use client'
 
 import { useNostrAuth, getLastSigningError } from '@/contexts/NostrAuthContext'
-import { useTheme, themeConfig } from '@/contexts/ThemeContext'
+import { useTheme, themeConfig, normalizeReading } from '@/contexts/ThemeContext'
+import type { ReadingPrefs, Theme } from '@/contexts/ThemeContext'
 import { ThemeToggleButton } from './theme-selector'
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
@@ -35,12 +36,18 @@ import {
   buildSubscriptionListFromFeeds,
   fetchViewList,
   publishViewList,
+  fetchReadingPrefs,
+  publishReadingPrefs,
+  getPrefsSyncEnabled,
 } from '@/lib/nostr-sync'
 import type { UnsignedEvent } from 'nostr-tools'
 import { ArticlePane } from './reader/ArticlePane'
 import { ItemList } from './reader/ItemList'
 import { ReaderSidebar } from './reader/ReaderSidebar'
 import type { Category, Feed, FeedItem, FavoriteItem } from './reader/types'
+
+const serializePrefs = (reading: Partial<ReadingPrefs>, themeVal: Theme) =>
+  JSON.stringify({ reading: normalizeReading(reading), theme: themeVal })
 
 const FAVORITES_QUERY_INPUT = { limit: 50 } as const
 const QUICK_MARK_READ_OPTIONS: { value: MarkReadBehavior; label: string; helper: string }[] = [
@@ -51,7 +58,7 @@ const QUICK_MARK_READ_OPTIONS: { value: MarkReadBehavior; label: string; helper:
 
 export function FeedReader() {
   const { user, disconnect, canSign, signEventOrThrow } = useNostrAuth()
-  const { theme } = useTheme()
+  const { theme, setTheme, readingPrefs, setReadingPref } = useTheme()
   const router = useRouter()
   const utils = api.useUtils()
   
@@ -100,6 +107,10 @@ export function FeedReader() {
   const autoMarkedRef = useRef<Set<string>>(new Set())
   const hasCheckedSyncRef = useRef(false)
   const hasSyncedViewsRef = useRef(false)
+  const hasSyncedPrefsRef = useRef(false)
+  const prefsSyncReadyRef = useRef(false)
+  const prefsExportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastSyncedPrefsRef = useRef<string>('')
   const hasRefreshedOnLoginRef = useRef(false)
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   
@@ -986,6 +997,75 @@ export function FeedReader() {
     syncViews()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.npub, canSign])
+
+  // Reading + theme prefs sync (kind 30407): opt-in, signers only. Read-only npub
+  // and sync-off users stay purely local. Guards before setting the ref so a
+  // canSign false→true transition still triggers the one-time fetch-apply.
+  // getPrefsSyncEnabled() is read imperatively, so enabling sync mid-session takes
+  // effect (pull) on the next login/canSign change (publish still fires on the next pref change).
+  useEffect(() => {
+    if (hasSyncedPrefsRef.current) return
+    if (!user?.npub || !canSign || !getPrefsSyncEnabled()) return
+    hasSyncedPrefsRef.current = true
+
+    const syncPrefs = async () => {
+      try {
+        const result = await fetchReadingPrefs(user.npub)
+        if (!result.success || !result.data) return
+        if (!isSyncEventFresh('readstr-prefs', result.createdAt)) return
+        const { reading, theme: remoteTheme } = result.data
+        const mergedReading = normalizeReading({ ...readingPrefs, ...(reading ?? {}) })
+        // setReadingPref runs normalizeReading on the merged partial, so an
+        // untrusted/partial blob is clamped safely before it is applied.
+        if (reading) setReadingPref(reading)
+        if (remoteTheme) setTheme(remoteTheme)
+        // Echo-guard: record what is now local so the publish effect below no-ops
+        // on the just-fetched value instead of re-publishing it.
+        lastSyncedPrefsRef.current = serializePrefs(mergedReading, remoteTheme ?? theme)
+        advanceSyncWatermarkIfFresh('readstr-prefs', result.createdAt)
+      } catch (error) {
+        console.error('Reading prefs sync check failed:', error)
+      } finally {
+        prefsSyncReadyRef.current = true
+      }
+    }
+    syncPrefs()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.npub, canSign])
+
+  // Debounced publish of reading + theme prefs on change (kind 30407).
+  useEffect(() => {
+    if (!canSign || !user?.npub || !getPrefsSyncEnabled()) return
+    if (!prefsSyncReadyRef.current) return
+    const serialized = serializePrefs(readingPrefs, theme)
+    if (prefsExportTimerRef.current) {
+      clearTimeout(prefsExportTimerRef.current)
+      prefsExportTimerRef.current = null
+    }
+    // Echo/no-op guard: skip re-publishing a just-fetched value or redundant state.
+    if (serialized === lastSyncedPrefsRef.current) return
+    prefsExportTimerRef.current = setTimeout(() => {
+      publishReadingPrefs({ reading: normalizeReading(readingPrefs), theme }, signEventOrThrow)
+        .then((result) => {
+          if (result.success) {
+            lastSyncedPrefsRef.current = serialized
+          } else {
+            console.warn('⚠️ Reading prefs auto-export failed:', result.error)
+          }
+        })
+        .catch(() => {})
+    }, 500)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readingPrefs, theme])
+
+  useEffect(() => {
+    return () => {
+      if (prefsExportTimerRef.current) {
+        clearTimeout(prefsExportTimerRef.current)
+        prefsExportTimerRef.current = null
+      }
+    }
+  }, [])
 
   // Handle importing feeds from Nostr sync
   const handleImportFeeds = async (feedsToImport: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => {
