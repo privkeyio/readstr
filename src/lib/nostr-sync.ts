@@ -1,18 +1,26 @@
 import { SimplePool, Event, nip19 } from 'nostr-tools'
 import type { UnsignedEvent } from 'nostr-tools'
 import { z } from 'zod'
+import { normalizeViews, type SavedView } from './saved-views'
 
-// Privacy note: sync events (kinds 30404 and 30405) are published to public
-// relays in cleartext by design. The subscription list must stay readable by
-// the server-side sync path (fetchSubscriptionListFromServer), which holds no
-// private key under the keyless NIP-07 model and therefore cannot decrypt it.
-// Do not put anything in these events that should not be public, and treat a
-// user's pubkey as permanently linkable to their subscriptions and read status.
+// Privacy note: sync events (kinds 30404, 30405 and 30406) are published to
+// public relays in cleartext by design. The subscription list must stay
+// readable by the server-side sync path (fetchSubscriptionListFromServer),
+// which holds no private key under the keyless NIP-07 model and therefore
+// cannot decrypt it. Do not put anything in these events that should not be
+// public, and treat a user's pubkey as permanently linkable to their
+// subscriptions, read status and saved views.
+// Carve-out for kind 30406 (saved views): keywords.exclude (mute words) is
+// stripped before publish and never leaves the device; the remaining view
+// fields (name, icon, keywords.include, source ids) are published in cleartext
+// like the other kinds.
 
 // Kind 30404 for subscription list sync
 const SUBSCRIPTION_LIST_KIND = 30404
 // Kind 30405 for read status sync
 const READ_STATUS_KIND = 30405
+// Kind 30406 for saved smart-views sync
+const VIEW_LIST_KIND = 30406
 
 const debugLog = (...args: unknown[]) => {
   if (process.env.NODE_ENV === 'development') console.log(...args)
@@ -47,6 +55,7 @@ const MAX_URL_LEN = 2048 // max length of a feed URL / npub
 const SYNC_QUERY_TIMEOUT_MS = 8000 // max time to wait for relays when fetching sync events
 const MAX_GUID_LEN = 256 // max length of a read-status itemGuid
 const MAX_TAGS_PER_FEED = 100 // max tags attached to a single feed
+const MAX_VIEWS_SYNC = 100 // max saved views accepted from a relay payload
 
 const subscriptionListSchema: z.ZodType<SubscriptionList> = z.object({
   rss: z.array(z.string().max(MAX_URL_LEN)).max(MAX_SYNC_FEEDS),
@@ -75,6 +84,42 @@ const subscriptionListSchema: z.ZodType<SubscriptionList> = z.object({
 
 const readStatusListSchema: z.ZodType<ReadStatusList> = z.object({
   itemGuids: z.array(z.string().max(MAX_GUID_LEN)).max(MAX_READ_ITEMS),
+  lastUpdated: z.number().int().nonnegative().optional(),
+})
+
+// Saved smart-views sync (kind 30406). Caps mirror the subscription schema's
+// defensive style; final canonical shaping (cap/reorder/sanitize) is delegated to
+// normalizeViews, so the schema stays permissive on extra/unknown fields.
+const syncViewSchema = z
+  .object({
+    id: z.string().max(256).optional(),
+    name: z.string().max(64),
+    icon: z.string().max(8).optional(),
+    order: z.number().optional(),
+    source: z
+      .object({
+        kind: z.string().max(32),
+        feedId: z.string().max(256).optional(),
+        categoryId: z.string().max(256).optional(),
+        tags: z.array(z.string().max(256)).max(MAX_SYNC_FEEDS).optional(),
+      })
+      .passthrough()
+      .optional(),
+    readState: z.string().max(16).optional(),
+    sort: z.string().max(16).optional(),
+    keywords: z
+      .object({
+        include: z.array(z.string().max(256)).max(MAX_SYNC_FEEDS).optional(),
+        exclude: z.array(z.string().max(256)).max(MAX_SYNC_FEEDS).optional(),
+      })
+      .passthrough()
+      .optional(),
+    organizationMode: z.string().max(16).optional(),
+  })
+  .passthrough()
+
+const viewListSchema = z.object({
+  views: z.array(syncViewSchema).max(MAX_VIEWS_SYNC),
   lastUpdated: z.number().int().nonnegative().optional(),
 })
 
@@ -735,9 +780,122 @@ export async function fetchReadStatus(
     }
   } catch (error) {
     console.error('Failed to fetch read status:', error)
-    return { 
-      success: false, 
-      error: error instanceof Error ? error.message : 'Unknown error' 
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }
+  } finally {
+    pool.close(relays)
+  }
+}
+
+// Strip keywords.exclude from a view for publishing. The mute words are sensitive
+// and must NEVER appear in the cleartext event; only include-keywords sync.
+function stripViewForPublish(view: SavedView): SavedView {
+  if (!view.keywords?.exclude) return view
+  const keywords = { ...view.keywords }
+  delete keywords.exclude
+  const out = { ...view }
+  if (keywords.include && keywords.include.length > 0) out.keywords = keywords
+  else delete out.keywords
+  return out
+}
+
+/**
+ * Publish saved smart-views to Nostr relays using kind 30406
+ * This is a replaceable event (kind 30000-39999), so newer versions replace older ones
+ */
+export async function publishViewList(
+  views: SavedView[],
+  signEvent: (event: UnsignedEvent) => Promise<Event>
+): Promise<{ success: boolean; eventId?: string; error?: string }> {
+  const pool = new SimplePool()
+  const relays = getSyncRelays()
+
+  try {
+    // Privacy: strip mute words (keywords.exclude) from every view before it
+    // ever leaves the device — they must not be published in cleartext.
+    const publishable = views.map(stripViewForPublish)
+
+    const unsignedEvent: UnsignedEvent = {
+      kind: VIEW_LIST_KIND,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['d', 'readstr-views'],
+        ['client', 'readstr'],
+      ],
+      content: JSON.stringify({
+        views: publishable,
+        lastUpdated: Math.floor(Date.now() / 1000),
+      }),
+      pubkey: '',
+    }
+
+    const signedEvent = await signEvent(unsignedEvent)
+    const publishPromises = pool.publish(relays, signedEvent)
+    await Promise.race(publishPromises)
+
+    debugLog('Published view list to Nostr:', signedEvent.id)
+
+    return { success: true, eventId: signedEvent.id }
+  } catch (error) {
+    console.error('Failed to publish view list:', error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    }
+  } finally {
+    pool.close(relays)
+  }
+}
+
+/**
+ * Fetch the user's saved smart-views from Nostr relays
+ */
+export async function fetchViewList(
+  userPubkey: string
+): Promise<{ success: boolean; data?: { views: SavedView[] }; eventId?: string; createdAt?: number; error?: string }> {
+  const pool = new SimplePool()
+  const relays = getSyncRelays()
+
+  try {
+    const pubkeyHex = getPubkeyHex(userPubkey)
+
+    const event = await getNewestReplaceableEvent(
+      pool,
+      relays,
+      pubkeyHex,
+      VIEW_LIST_KIND,
+      'readstr-views'
+    )
+
+    if (!event) {
+      return {
+        success: true,
+        data: { views: [] },
+      }
+    }
+
+    const parsed = viewListSchema.safeParse(JSON.parse(event.content))
+    if (!parsed.success) {
+      console.error('Rejected malformed view list payload:', parsed.error.message)
+      return {
+        success: true,
+        data: { views: [] },
+      }
+    }
+
+    return {
+      success: true,
+      data: { views: normalizeViews(parsed.data.views) },
+      eventId: event.id,
+      createdAt: event.created_at,
+    }
+  } catch (error) {
+    console.error('Failed to fetch view list:', error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
     }
   } finally {
     pool.close(relays)

@@ -22,6 +22,7 @@ import {
   newViewId,
   matchesView,
   reorderViews,
+  mergeViewLists,
   type SavedView,
   type ViewSource,
 } from '@/lib/saved-views'
@@ -36,6 +37,8 @@ import {
   advanceSyncWatermarkIfFresh,
   publishSubscriptionList,
   buildSubscriptionListFromFeeds,
+  fetchViewList,
+  publishViewList,
 } from '@/lib/nostr-sync'
 import { useNostrProfile } from '@/lib/nostr-profile'
 import type { UnsignedEvent } from 'nostr-tools'
@@ -142,6 +145,7 @@ export function FeedReader() {
   const [lastRefreshTime, setLastRefreshTime] = useState<number | null>(null)
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null)
   const markReadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const viewsExportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hasCheckedSyncRef = useRef(false)
   const hasRefreshedOnLoginRef = useRef(false)
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -283,6 +287,26 @@ export function FeedReader() {
       if (feedsQueryError) return
       hasCheckedSyncRef.current = true
 
+      // Views sync (kind 30406): only for signers. Read-only npub stays purely
+      // local (no fetch/merge/publish). Silent localStorage merge, no import dialog.
+      if (canSign) {
+        try {
+          const viewsResult = await fetchViewList(user.npub)
+          if (
+            viewsResult.success &&
+            viewsResult.data &&
+            isSyncEventFresh('readstr-views', viewsResult.createdAt)
+          ) {
+            const merged = mergeViewLists(loadViews(), viewsResult.data.views)
+            saveViews(merged)
+            setViews(loadViews())
+            advanceSyncWatermarkIfFresh('readstr-views', viewsResult.createdAt)
+          }
+        } catch (error) {
+          console.error('Views sync check failed:', error)
+        }
+      }
+
       // Skip if synced recently (within last hour)
       const lastSync = getLastSyncTime()
       if (lastSync && Date.now() / 1000 - lastSync < 3600) return
@@ -331,7 +355,7 @@ export function FeedReader() {
     // 'feeds' is derived from feedsData each render (new reference); depending on
     // feedsData here is the stable proxy and the check is guarded to run once per session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.npub, feedsData, isFeedsFetched, isFeedsLoading, feedsQueryError])
+  }, [user?.npub, canSign, feedsData, isFeedsFetched, isFeedsLoading, feedsQueryError])
   
   const { data: userTags = [] } = api.feed.getUserTags.useQuery(undefined, {
     enabled: !!user && !!user.npub,
@@ -933,6 +957,16 @@ export function FeedReader() {
     }
   }, [user?.npub, canSign, signEventOrThrow, utils.feed])
 
+  // Auto-export saved views to Nostr (kind 30406) after changes
+  const autoExportViewsToNostr = useCallback(async (viewsToExport: SavedView[]) => {
+    if (!canSign || !user?.npub) return
+    try {
+      await publishViewList(viewsToExport, signEventOrThrow)
+    } catch {
+      // Silently fail - don't interrupt user experience
+    }
+  }, [user?.npub, canSign, signEventOrThrow])
+
   // Handle importing feeds from Nostr sync
   const handleImportFeeds = async (feedsToImport: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => {
     // First, create a map of category names to IDs for existing categories
@@ -1148,9 +1182,25 @@ export function FeedReader() {
     else setActiveViewId(null)
   }, [applyView])
 
+  useEffect(() => {
+    return () => {
+      if (viewsExportTimerRef.current) {
+        clearTimeout(viewsExportTimerRef.current)
+        viewsExportTimerRef.current = null
+      }
+    }
+  }, [])
+
   const persistViews = (next: SavedView[]) => {
     saveViews(next)
-    setViews(loadViews())
+    const saved = loadViews()
+    setViews(saved)
+    if (viewsExportTimerRef.current) {
+      clearTimeout(viewsExportTimerRef.current)
+    }
+    viewsExportTimerRef.current = setTimeout(() => {
+      void autoExportViewsToNostr(saved)
+    }, 500)
   }
 
   const captureCurrentSource = (): ViewSource => {
