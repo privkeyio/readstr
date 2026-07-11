@@ -21,6 +21,7 @@ import {
   publishSubscriptionList,
   buildSubscriptionListFromFeeds,
 } from '@/lib/nostr-sync'
+import { useNostrProfile } from '@/lib/nostr-profile'
 import type { UnsignedEvent } from 'nostr-tools'
 import type { inferRouterOutputs } from '@trpc/server'
 import type { AppRouter } from '@/server/api/root'
@@ -56,6 +57,29 @@ const QUICK_MARK_READ_OPTIONS: { value: MarkReadBehavior; label: string; helper:
   { value: 'after-10s', label: 'After 10 seconds', helper: 'Give me a short buffer before marking read' },
   { value: 'never', label: 'Never automatically', helper: 'Only change when I click Mark as Read' },
 ]
+
+function AuthorByline({
+  author,
+  feedType,
+  feedTitle,
+  className,
+}: {
+  author: string | null
+  feedType: 'RSS' | 'NOSTR' | 'NOSTR_VIDEO'
+  feedTitle: string
+  className: string
+}) {
+  const isNostr = feedType === 'NOSTR' || feedType === 'NOSTR_VIDEO'
+  const { profile } = useNostrProfile(isNostr ? author : null)
+
+  if (!isNostr) {
+    return <span className={className}>{author}</span>
+  }
+
+  const label = profile?.name || feedTitle || author
+
+  return <span className={className}>{label}</span>
+}
 
 export function FeedReader() {
   const { user, disconnect, canSign, signEventOrThrow } = useNostrAuth()
@@ -1886,7 +1910,12 @@ export function FeedReader() {
                       )}
                     </div>
                     <div className="flex items-center gap-2 text-xs text-theme-tertiary">
-                      <span className="font-medium">{item.author}</span>
+                      <AuthorByline
+                        author={item.author}
+                        feedType={item.feedType}
+                        feedTitle={item.feedTitle}
+                        className="font-medium"
+                      />
                       <span>•</span>
                       <span>{item.publishedAt.toLocaleDateString()}</span>
                     </div>
@@ -1999,7 +2028,12 @@ export function FeedReader() {
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-theme-secondary">
-                  <span className="font-medium">{selectedItemData.author}</span>
+                  <AuthorByline
+                    author={selectedItemData.author}
+                    feedType={selectedItemData.feedType}
+                    feedTitle={selectedItemData.feedTitle}
+                    className="font-medium"
+                  />
                   <span className="text-theme-muted">•</span>
                   <span>{selectedItemData.publishedAt.toLocaleDateString('en-US', { 
                     weekday: 'long', 
