@@ -124,6 +124,41 @@ export function normalizeViews(raw: unknown): SavedView[] {
     .map((v, i) => ({ ...v, order: i }))
 }
 
+function reattachExclude(view: SavedView, exclude?: string[]): SavedView {
+  // Strip any exclude the input carries and re-attach the caller-supplied local
+  // exclude (mute words are never carried over the wire, only locally).
+  const keywords: ViewKeywords = { ...view.keywords }
+  delete keywords.exclude
+  if (exclude && exclude.length > 0) keywords.exclude = exclude
+  const out = { ...view }
+  if (keywords.include || keywords.exclude) out.keywords = keywords
+  else delete out.keywords
+  return out
+}
+
+export function mergeViewLists(local: SavedView[], remote: SavedView[]): SavedView[] {
+  const localById = new Map(local.map((v) => [v.id, v]))
+  const seen = new Set<string>()
+  const merged: SavedView[] = []
+
+  // Remote is authoritative for shared fields, but keywords.exclude is local-only:
+  // strip whatever the remote carries and re-attach the local mute words by id.
+  for (const r of remote) {
+    if (seen.has(r.id)) continue
+    seen.add(r.id)
+    merged.push(reattachExclude(r, localById.get(r.id)?.keywords?.exclude))
+  }
+
+  // Additive merge: keep local-only views (no deletion-sync).
+  for (const l of local) {
+    if (seen.has(l.id)) continue
+    seen.add(l.id)
+    merged.push(l)
+  }
+
+  return normalizeViews(merged)
+}
+
 export function reorderViews(views: SavedView[], index: number, direction: -1 | 1): SavedView[] {
   const target = index + direction
   if (index < 0 || index >= views.length || target < 0 || target >= views.length) {

@@ -19,6 +19,7 @@ import {
   newViewId,
   matchesView,
   reorderViews,
+  mergeViewLists,
   type SavedView,
   type ViewSource,
 } from '@/lib/saved-views'
@@ -32,6 +33,8 @@ import {
   advanceSyncWatermarkIfFresh,
   publishSubscriptionList,
   buildSubscriptionListFromFeeds,
+  fetchViewList,
+  publishViewList,
 } from '@/lib/nostr-sync'
 import type { UnsignedEvent } from 'nostr-tools'
 import { ArticlePane } from './reader/ArticlePane'
@@ -91,7 +94,9 @@ export function FeedReader() {
   const [lastRefreshTime, setLastRefreshTime] = useState<number | null>(null)
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null)
   const markReadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const viewsExportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hasCheckedSyncRef = useRef(false)
+  const hasSyncedViewsRef = useRef(false)
   const hasRefreshedOnLoginRef = useRef(false)
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   
@@ -882,6 +887,58 @@ export function FeedReader() {
     }
   }, [user?.npub, canSign, signEventOrThrow, utils.feed])
 
+  // Auto-export saved views to Nostr (kind 30406) after changes
+  const autoExportViewsToNostr = useCallback(async (viewsToExport: SavedView[]) => {
+    if (!canSign || !user?.npub) return
+    try {
+      const result = await publishViewList(viewsToExport, signEventOrThrow)
+      if (!result.success) {
+        console.warn('⚠️ Views auto-export failed:', result.error)
+      }
+    } catch {
+      // Silently fail - don't interrupt user experience
+    }
+  }, [user?.npub, canSign, signEventOrThrow])
+
+  // Views sync (kind 30406): only for signers. Read-only npub stays purely local.
+  // Runs once per session but guards before setting the ref so a canSign false→true
+  // transition still triggers the one-time sync.
+  useEffect(() => {
+    if (hasSyncedViewsRef.current) return
+    if (!user?.npub || !canSign) return
+    hasSyncedViewsRef.current = true
+
+    const syncViews = async () => {
+      try {
+        const viewsResult = await fetchViewList(user.npub)
+        if (!viewsResult.success || !viewsResult.data) return
+        const remoteViews = viewsResult.data.views
+        const hasRemoteEvent = viewsResult.createdAt != null
+
+        if (hasRemoteEvent && isSyncEventFresh('readstr-views', viewsResult.createdAt)) {
+          const merged = mergeViewLists(loadViews(), remoteViews)
+          saveViews(merged)
+          setViews(loadViews())
+          advanceSyncWatermarkIfFresh('readstr-views', viewsResult.createdAt)
+        }
+
+        // Publish local additions the remote lacks, or seed the first event when
+        // none exists. One-shot; do not advance the watermark here (next login
+        // converges) and only publish on a real delta so this can't loop.
+        const localViews = loadViews()
+        const remoteIds = new Set(remoteViews.map((v) => v.id))
+        const hasLocalOnly = localViews.some((v) => !remoteIds.has(v.id))
+        if (localViews.length > 0 && (!hasRemoteEvent || hasLocalOnly)) {
+          void autoExportViewsToNostr(localViews)
+        }
+      } catch (error) {
+        console.error('Views sync check failed:', error)
+      }
+    }
+    syncViews()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.npub, canSign])
+
   // Handle importing feeds from Nostr sync
   const handleImportFeeds = async (feedsToImport: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => {
     // First, create a map of category names to IDs for existing categories
@@ -1097,9 +1154,25 @@ export function FeedReader() {
     else setActiveViewId(null)
   }, [applyView])
 
+  useEffect(() => {
+    return () => {
+      if (viewsExportTimerRef.current) {
+        clearTimeout(viewsExportTimerRef.current)
+        viewsExportTimerRef.current = null
+      }
+    }
+  }, [])
+
   const persistViews = (next: SavedView[]) => {
     saveViews(next)
-    setViews(loadViews())
+    const saved = loadViews()
+    setViews(saved)
+    if (viewsExportTimerRef.current) {
+      clearTimeout(viewsExportTimerRef.current)
+    }
+    viewsExportTimerRef.current = setTimeout(() => {
+      void autoExportViewsToNostr(saved)
+    }, 500)
   }
 
   const captureCurrentSource = (): ViewSource => {
