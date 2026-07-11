@@ -42,7 +42,7 @@ function stripHtml(value: string): string {
   return value.replace(/<[^>]*>/g, ' ')
 }
 
-function buildHaystacks(item: FilterableItem): Record<MatchTarget, string> {
+export function buildHaystacks(item: FilterableItem): Record<MatchTarget, string> {
   const title = stripHtml(item.title ?? '')
   const content = stripHtml(item.content ?? '')
   const author = item.author ?? ''
