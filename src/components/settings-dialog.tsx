@@ -12,6 +12,8 @@ import {
   getLastSyncTime,
   setLastSyncTime,
   advanceSyncWatermarkIfFresh,
+  getPrefsSyncEnabled,
+  setPrefsSyncEnabled,
   type SubscriptionList,
 } from '@/lib/nostr-sync'
 import { parseOpml, buildOpml, planOpmlImport, MAX_CONTENT_BYTES } from '@/lib/opml'
@@ -256,7 +258,8 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
     status: 'idle',
     lastSync: null,
   })
-  
+  const [prefsSyncEnabled, setPrefsSyncEnabledState] = useState(false)
+
   // Category management state
   const [newCategoryName, setNewCategoryName] = useState('')
   const [newCategoryColor, setNewCategoryColor] = useState(CATEGORY_COLORS[0])
@@ -442,6 +445,8 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
     if (lastSync) {
       setSyncState(prev => ({ ...prev, lastSync }))
     }
+
+    setPrefsSyncEnabledState(getPrefsSyncEnabled())
   }, [])
 
   // Save relays to localStorage whenever they change
@@ -1782,6 +1787,27 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                 <p className="text-xs text-theme-tertiary mt-3">
                   Requires a Nostr browser extension (Alby, nos2x, etc.)
                 </p>
+
+                <div className="mt-8 pt-6 border-t border-theme-primary">
+                  <label className="flex items-center gap-3 text-sm font-medium text-theme-secondary cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={prefsSyncEnabled}
+                      onChange={(e) => {
+                        const next = e.target.checked
+                        setPrefsSyncEnabled(next)
+                        setPrefsSyncEnabledState(next)
+                      }}
+                      className="accent-[rgb(var(--color-accent))]"
+                    />
+                    Sync reading &amp; theme preferences across devices
+                  </label>
+                  <p className="text-xs text-theme-tertiary mt-2">
+                    When on, your reading and theme preferences are published to your
+                    Nostr relays (public, kind 30407) and applied on your other devices.
+                    Local-only when off.
+                  </p>
+                </div>
               </div>
             )}
 

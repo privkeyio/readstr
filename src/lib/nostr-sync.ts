@@ -2,6 +2,7 @@ import { SimplePool, Event, nip19 } from 'nostr-tools'
 import type { UnsignedEvent } from 'nostr-tools'
 import { z } from 'zod'
 import { normalizeViews, type SavedView } from './saved-views'
+import type { ReadingPrefs, Theme } from '@/contexts/ThemeContext'
 
 // Privacy note: sync events (kinds 30404, 30405 and 30406) are published to
 // public relays in cleartext by design. The subscription list must stay
@@ -21,6 +22,8 @@ const SUBSCRIPTION_LIST_KIND = 30404
 const READ_STATUS_KIND = 30405
 // Kind 30406 for saved smart-views sync
 const VIEW_LIST_KIND = 30406
+// Kind 30407 for reading + theme preferences sync
+const READING_PREFS_KIND = 30407
 
 const debugLog = (...args: unknown[]) => {
   if (process.env.NODE_ENV === 'development') console.log(...args)
@@ -120,6 +123,24 @@ const syncViewSchema = z
 
 const viewListSchema = z.object({
   views: z.array(syncViewSchema).max(MAX_VIEWS_SYNC),
+  lastUpdated: z.number().int().nonnegative().optional(),
+})
+
+// Reading + theme preferences sync (kind 30407). Permissive on shape; final
+// clamping is delegated to normalizeReading in the consumer (feed-reader).
+const readingPrefsSyncSchema = z.object({
+  reading: z
+    .object({
+      scale: z.number().optional(),
+      contentFont: z.string().max(64).optional(),
+      headingFont: z.string().max(64).optional(),
+      lineHeight: z.number().optional(),
+      measure: z.string().max(16).optional(),
+      paraGap: z.string().max(16).optional(),
+    })
+    .partial()
+    .optional(),
+  theme: z.enum(['light', 'dark', 'newspaper', 'parchment']).optional(),
   lastUpdated: z.number().int().nonnegative().optional(),
 })
 
@@ -641,6 +662,24 @@ export function setLastSyncTime(timestamp: number): void {
   }
 }
 
+/**
+ * Whether cross-device sync of reading + theme preferences is enabled.
+ * Opt-in, defaults to false (local-only).
+ */
+export function getPrefsSyncEnabled(): boolean {
+  if (typeof window === 'undefined') return false
+  return localStorage.getItem('readstr_prefs_sync') === 'true'
+}
+
+/**
+ * Enable or disable cross-device sync of reading + theme preferences.
+ */
+export function setPrefsSyncEnabled(v: boolean): void {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('readstr_prefs_sync', v ? 'true' : 'false')
+  }
+}
+
 const APPLIED_CREATEDAT_PREFIX = 'readstr_applied_createdat:'
 
 /**
@@ -893,6 +932,107 @@ export async function fetchViewList(
     }
   } catch (error) {
     console.error('Failed to fetch view list:', error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    }
+  } finally {
+    pool.close(relays)
+  }
+}
+
+/**
+ * Publish reading + theme preferences to Nostr relays using kind 30407
+ * This is a replaceable event (kind 30000-39999), so newer versions replace older ones
+ */
+export async function publishReadingPrefs(
+  payload: { reading: ReadingPrefs; theme: Theme },
+  signEvent: (event: UnsignedEvent) => Promise<Event>
+): Promise<{ success: boolean; eventId?: string; error?: string }> {
+  const pool = new SimplePool()
+  const relays = getSyncRelays()
+
+  try {
+    const unsignedEvent: UnsignedEvent = {
+      kind: READING_PREFS_KIND,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['d', 'readstr-prefs'],
+        ['client', 'readstr'],
+      ],
+      content: JSON.stringify({
+        reading: payload.reading,
+        theme: payload.theme,
+        lastUpdated: Math.floor(Date.now() / 1000),
+      }),
+      pubkey: '',
+    }
+
+    const signedEvent = await signEvent(unsignedEvent)
+    const publishPromises = pool.publish(relays, signedEvent)
+    await Promise.race(publishPromises)
+
+    debugLog('Published reading prefs to Nostr:', signedEvent.id)
+
+    return { success: true, eventId: signedEvent.id }
+  } catch (error) {
+    console.error('Failed to publish reading prefs:', error)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    }
+  } finally {
+    pool.close(relays)
+  }
+}
+
+/**
+ * Fetch the user's reading + theme preferences from Nostr relays
+ */
+export async function fetchReadingPrefs(
+  userPubkey: string
+): Promise<{ success: boolean; data?: { reading?: Partial<ReadingPrefs>; theme?: Theme }; eventId?: string; createdAt?: number; error?: string }> {
+  const pool = new SimplePool()
+  const relays = getSyncRelays()
+
+  try {
+    const pubkeyHex = getPubkeyHex(userPubkey)
+
+    const event = await getNewestReplaceableEvent(
+      pool,
+      relays,
+      pubkeyHex,
+      READING_PREFS_KIND,
+      'readstr-prefs'
+    )
+
+    if (!event) {
+      return {
+        success: true,
+        data: {},
+      }
+    }
+
+    const parsed = readingPrefsSyncSchema.safeParse(JSON.parse(event.content))
+    if (!parsed.success) {
+      console.error('Rejected malformed reading prefs payload:', parsed.error.message)
+      return {
+        success: true,
+        data: {},
+      }
+    }
+
+    return {
+      success: true,
+      data: {
+        reading: parsed.data.reading as Partial<ReadingPrefs> | undefined,
+        theme: parsed.data.theme,
+      },
+      eventId: event.id,
+      createdAt: event.created_at,
+    }
+  } catch (error) {
+    console.error('Failed to fetch reading prefs:', error)
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error',
