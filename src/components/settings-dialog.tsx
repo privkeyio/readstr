@@ -20,6 +20,7 @@ import {
   loadFilterRules,
   saveFilterRules,
   newRuleId,
+  isValidRegex,
   type FilterRule,
   type MatchTarget,
   type MatchType,
@@ -285,6 +286,9 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
     color: CATEGORY_COLORS[0]!,
   }
   const [ruleDraft, setRuleDraft] = useState(emptyRuleDraft)
+  const [dragRuleIndex, setDragRuleIndex] = useState<number | null>(null)
+  const draftRegexInvalid =
+    ruleDraft.type === 'regex' && !isValidRegex(ruleDraft.pattern.trim(), ruleDraft.caseSensitive)
 
   useEffect(() => {
     if (isOpen) setFilterRulesState(loadFilterRules())
@@ -305,6 +309,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
   const handleSaveRule = () => {
     const pattern = ruleDraft.pattern.trim()
     if (!pattern) return
+    if (ruleDraft.type === 'regex' && !isValidRegex(pattern, ruleDraft.caseSensitive)) return
     const color = ruleDraft.action === 'highlight' ? ruleDraft.color : undefined
     if (editingRuleId) {
       persistFilterRules(
@@ -358,7 +363,17 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
     next.splice(target, 0, moved!)
     persistFilterRules(next)
   }
-  
+
+  const handleDropRule = (targetIndex: number) => {
+    const from = dragRuleIndex
+    setDragRuleIndex(null)
+    if (from === null || from === targetIndex) return
+    const next = [...filterRules]
+    const [moved] = next.splice(from, 1)
+    next.splice(from < targetIndex ? targetIndex - 1 : targetIndex, 0, moved!)
+    persistFilterRules(next)
+  }
+
   // tRPC for categories
   const utils = api.useUtils()
   const { data: categories = [] } = api.feed.getCategories.useQuery(undefined, {
@@ -1214,6 +1229,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                       >
                         <option value="contains">Contains</option>
                         <option value="word">Whole word</option>
+                        <option value="regex">Regex</option>
                       </select>
                     </div>
                     <div>
@@ -1225,6 +1241,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                       >
                         <option value="hide">Hide</option>
                         <option value="highlight">Highlight</option>
+                        <option value="mark-read">Auto-mark read</option>
                       </select>
                     </div>
                     <label className="flex items-end gap-2 pb-2 text-sm text-theme-secondary cursor-pointer">
@@ -1236,6 +1253,19 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                       Case sensitive
                     </label>
                   </div>
+
+                  {ruleDraft.type === 'regex' && ruleDraft.pattern.trim() && draftRegexInvalid && (
+                    <p className="mb-3 text-sm text-red-500">
+                      Invalid or unsafe regex — this pattern will never match. Avoid nested quantifiers like (a+)+.
+                    </p>
+                  )}
+
+                  {ruleDraft.action === 'mark-read' && (
+                    <p className="mb-3 text-xs text-amber-600 dark:text-amber-400 bg-amber-500/10 rounded-lg p-2">
+                      ⚠️ Auto-mark read marks matching items as read. Unlike hide and highlight (local-only),
+                      read status SYNCS to a PUBLIC Nostr event (kind 30405) across your devices.
+                    </p>
+                  )}
 
                   {ruleDraft.action === 'highlight' && (
                     <div className="mb-3">
@@ -1258,7 +1288,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                   <div className="flex gap-2">
                     <button
                       onClick={handleSaveRule}
-                      disabled={!ruleDraft.pattern.trim()}
+                      disabled={!ruleDraft.pattern.trim() || draftRegexInvalid}
                       className="btn-theme-primary text-sm disabled:opacity-50"
                     >
                       {editingRuleId ? 'Save Changes' : 'Add Rule'}
@@ -1285,9 +1315,17 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                       {filterRules.map((rule, index) => (
                         <div
                           key={rule.id}
-                          className="flex items-center justify-between gap-3 p-3 bg-theme-tertiary rounded-xl"
+                          draggable
+                          onDragStart={() => setDragRuleIndex(index)}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={() => handleDropRule(index)}
+                          onDragEnd={() => setDragRuleIndex(null)}
+                          className={`flex items-center justify-between gap-3 p-3 bg-theme-tertiary rounded-xl ${
+                            dragRuleIndex === index ? 'opacity-50' : ''
+                          }`}
                         >
                           <div className="flex items-center gap-3 min-w-0">
+                            <span className="text-theme-tertiary cursor-grab select-none flex-shrink-0" title="Drag to reorder">⋮⋮</span>
                             <input
                               type="checkbox"
                               checked={rule.enabled}
@@ -1301,9 +1339,14 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                               />
                             )}
                             <div className="min-w-0">
-                              <div className="font-medium text-theme-primary truncate">{rule.pattern}</div>
+                              <div className="font-medium text-theme-primary truncate">
+                                {rule.pattern}
+                                {rule.type === 'regex' && !isValidRegex(rule.pattern, rule.caseSensitive) && (
+                                  <span className="ml-2 text-xs text-red-500">(invalid)</span>
+                                )}
+                              </div>
                               <div className="text-xs text-theme-tertiary">
-                                {rule.action === 'hide' ? 'Hide' : 'Highlight'} · {rule.type === 'word' ? 'whole word' : 'contains'} · {rule.target}
+                                {rule.action === 'hide' ? 'Hide' : rule.action === 'mark-read' ? 'Auto-mark read' : 'Highlight'} · {rule.type === 'word' ? 'whole word' : rule.type === 'regex' ? 'regex' : 'contains'} · {rule.target}
                                 {rule.caseSensitive ? ' · case' : ''}
                               </div>
                             </div>

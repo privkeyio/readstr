@@ -95,6 +95,8 @@ export function FeedReader() {
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null)
   const markReadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const viewsExportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const autoMarkReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const autoMarkedRef = useRef<Set<string>>(new Set())
   const hasCheckedSyncRef = useRef(false)
   const hasSyncedViewsRef = useRef(false)
   const hasRefreshedOnLoginRef = useRef(false)
@@ -732,7 +734,41 @@ export function FeedReader() {
       }
     }
   }, [selectedItem, markReadBehavior, selectedItemIsRead, markAsReadMutation])
-  
+
+  useEffect(() => {
+    autoMarkedRef.current.clear()
+  }, [filterRules])
+
+  // Auto-mark-read filter action: applied post-render (never in the pure
+  // predicate), debounced to coalesce. Marking syncs to a public Nostr event,
+  // so this only runs for rules the user explicitly opted into.
+  useEffect(() => {
+    if (autoMarkReadTimerRef.current) {
+      clearTimeout(autoMarkReadTimerRef.current)
+      autoMarkReadTimerRef.current = null
+    }
+    const pending = filteredItems.filter(
+      (item) =>
+        filterOutcomes.get(item.id)?.markRead &&
+        !item.isRead &&
+        !autoMarkedRef.current.has(item.id)
+    )
+    if (pending.length === 0) return
+    autoMarkReadTimerRef.current = setTimeout(() => {
+      for (const item of pending) {
+        if (autoMarkedRef.current.has(item.id)) continue
+        autoMarkedRef.current.add(item.id)
+        markAsReadMutation.mutate({ itemId: item.id })
+      }
+    }, 500)
+    return () => {
+      if (autoMarkReadTimerRef.current) {
+        clearTimeout(autoMarkReadTimerRef.current)
+        autoMarkReadTimerRef.current = null
+      }
+    }
+  }, [filteredItems, filterOutcomes, markAsReadMutation])
+
   // Handle adding new feed
   const handleAddFeed = async (type: 'RSS' | 'NOSTR', url?: string, npub?: string, title?: string, tags?: string[], categoryId?: string) => {
     try {

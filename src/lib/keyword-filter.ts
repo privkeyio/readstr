@@ -1,6 +1,6 @@
 export type MatchTarget = 'title' | 'content' | 'author' | 'any'
-export type MatchType = 'contains' | 'word'
-export type FilterAction = 'hide' | 'highlight'
+export type MatchType = 'contains' | 'word' | 'regex'
+export type FilterAction = 'hide' | 'highlight' | 'mark-read'
 
 export interface FilterRule {
   id: string
@@ -17,6 +17,7 @@ export interface FilterRule {
 export interface FilterOutcome {
   hidden: boolean
   highlight?: string
+  markRead?: boolean
 }
 
 export interface FilterableItem {
@@ -30,9 +31,49 @@ const MAX_PATTERN_LENGTH = 200
 const MAX_RULES = 200
 
 const MATCH_TARGETS: MatchTarget[] = ['title', 'content', 'author', 'any']
-const MATCH_TYPES: MatchType[] = ['contains', 'word']
-const FILTER_ACTIONS: FilterAction[] = ['hide', 'highlight']
+const MATCH_TYPES: MatchType[] = ['contains', 'word', 'regex']
+const FILTER_ACTIONS: FilterAction[] = ['hide', 'highlight', 'mark-read']
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/
+
+// ReDoS guard: best-effort heuristic (not exhaustive) for common
+// catastrophic-backtracking shapes. NESTED_QUANTIFIER catches quantified groups
+// whose body also ends in a quantifier (a+)+, (.*)*; QUANTIFIED_ALT catches a
+// quantifier applied to a group containing an alternation (a|a)+, (ab|a)*.
+// Patterns are user-authored, client-side, and length-capped; conservative
+// false positives just make a pattern inert.
+const NESTED_QUANTIFIER = /\([^)]*[+*}][^)]*\)\s*[+*{]/
+const QUANTIFIED_ALT = /\([^)]*\|[^)]*\)\s*[*+{]/
+
+export function isDangerousRegex(pattern: string): boolean {
+  return NESTED_QUANTIFIER.test(pattern) || QUANTIFIED_ALT.test(pattern)
+}
+
+const REGEX_CACHE_CAP = 500
+const regexCache = new Map<string, RegExp | null>()
+
+// User-supplied regex is sandboxed: length cap (enforced in sanitizeRule),
+// nested-quantifier rejection, and try/catch compile. Dangerous/invalid
+// patterns cache null and are inert (never match). Cached so each distinct
+// pattern compiles once and is reused across items/renders.
+export function compileUserRegex(pattern: string, caseSensitive: boolean): RegExp | null {
+  const key = `${caseSensitive}:${pattern}`
+  if (regexCache.has(key)) return regexCache.get(key)!
+  let re: RegExp | null = null
+  if (pattern.length <= MAX_PATTERN_LENGTH && !isDangerousRegex(pattern)) {
+    try {
+      re = new RegExp(pattern, caseSensitive ? '' : 'i')
+    } catch {
+      re = null
+    }
+  }
+  if (regexCache.size >= REGEX_CACHE_CAP) regexCache.clear()
+  regexCache.set(key, re)
+  return re
+}
+
+export function isValidRegex(pattern: string, caseSensitive: boolean): boolean {
+  return compileUserRegex(pattern, caseSensitive) !== null
+}
 
 export function newRuleId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -65,6 +106,10 @@ function matches(haystack: string, rule: FilterRule): boolean {
       return false
     }
   }
+  if (rule.type === 'regex') {
+    const re = compileUserRegex(rule.pattern, rule.caseSensitive)
+    return re ? re.test(haystack) : false
+  }
   if (rule.caseSensitive) {
     return haystack.includes(pattern)
   }
@@ -80,6 +125,10 @@ export function evaluateRules(item: FilterableItem, rules: FilterRule[]): Filter
     if (!matches(haystacks[rule.target], rule)) continue
     if (rule.action === 'hide') {
       return { hidden: true }
+    }
+    if (rule.action === 'mark-read') {
+      outcome.markRead = true
+      continue
     }
     outcome.highlight = rule.color ?? outcome.highlight
   }
