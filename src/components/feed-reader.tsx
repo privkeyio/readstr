@@ -25,6 +25,8 @@ import {
   type SavedView,
   type ViewSource,
 } from '@/lib/saved-views'
+import { recordRead, searchHistory, clearHistory, type HistoryRecord } from '@/lib/reading-history'
+import { safeExternalUrl } from '@/lib/safe-url'
 import { SimplePool } from 'nostr-tools'
 import { 
   fetchSubscriptionList,
@@ -106,7 +108,10 @@ export function FeedReader() {
   const [showAddFeed, setShowAddFeed] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [feedError, setFeedError] = useState<string>('')
-  const [sidebarView, setSidebarView] = useState<'feeds' | 'tags' | 'favorites'>('feeds')
+  const [sidebarView, setSidebarView] = useState<'feeds' | 'tags' | 'favorites' | 'history'>('feeds')
+  const [historyQuery, setHistoryQuery] = useState('')
+  const [historyResults, setHistoryResults] = useState<HistoryRecord[]>([])
+  const [selectedHistoryItem, setSelectedHistoryItem] = useState<HistoryRecord | null>(null)
   const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [openMenuFeedId, setOpenMenuFeedId] = useState<string | null>(null)
   const [editingFeedId, setEditingFeedId] = useState<string | null>(null)
@@ -210,9 +215,14 @@ export function FeedReader() {
   }
 
   // Sign out handler
-  const handleSignOut = () => {
-    disconnect()
-    router.push('/')
+  const handleSignOut = async () => {
+    try {
+      await clearHistory()
+    } catch {
+    } finally {
+      disconnect()
+      router.push('/')
+    }
   }
 
   // Debug: Log session info
@@ -332,7 +342,26 @@ export function FeedReader() {
     FAVORITES_QUERY_INPUT,
     { enabled: !!user && !!user.npub && sidebarView === 'favorites' }
   )
-  
+
+  // Reading history query (client-side, offline)
+  useEffect(() => {
+    if (sidebarView !== 'history') return
+    let cancelled = false
+    const run = () => {
+      searchHistory(historyQuery)
+        .then((results) => {
+          if (!cancelled) setHistoryResults(results)
+        })
+        .catch(() => {})
+    }
+    const delay = historyQuery.trim() ? 200 : 0
+    const timer = setTimeout(run, delay)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [sidebarView, historyQuery])
+
   // When tags are selected OR a category is selected, and viewing "All Items", 
   // we need to filter items to only show items from feeds that match the selected tags/category
   const filteredFeedIds = useMemo(() => {
@@ -767,9 +796,34 @@ export function FeedReader() {
   }
   
   // Handle marking item as read when clicked
+  const recordReadHistory = (item: {
+    id: string
+    title: string
+    content: string
+    author: string | null
+    feedTitle: string
+    url?: string | null
+    originalUrl?: string | null
+    feedType: string
+  }) => {
+    recordRead({
+      id: item.id,
+      title: item.title,
+      content: item.content,
+      author: item.author,
+      feedTitle: item.feedTitle,
+      url: item.originalUrl ?? item.url,
+      feedType: item.feedType,
+    }).catch(() => {})
+  }
+
   const handleItemClick = (itemId: string) => {
     setSelectedItem(itemId)
+    setSelectedHistoryItem(null)
     const item = allFeedItems.find((i: FeedItem) => i.id === itemId)
+    if (item) {
+      recordReadHistory(item)
+    }
     if (markReadBehavior === 'on-open' && item && !item.isRead) {
       updateFeedItemCache(itemId, () => ({ isRead: true }))
       markAsReadMutation.mutate({ itemId })
@@ -1253,6 +1307,21 @@ export function FeedReader() {
             >
               ⭐ Saved
             </button>
+            <button
+              onClick={() => {
+                setSidebarView('history')
+                setSelectedTags([])
+                setShowSidebar(true)
+                clearActiveView()
+              }}
+              className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
+                sidebarView === 'history'
+                  ? 'bg-theme-surface shadow-theme-sm text-theme-primary'
+                  : 'text-theme-secondary hover:text-theme-primary'
+              }`}
+            >
+              📖 History
+            </button>
           </div>
         </div>
       </div>
@@ -1364,6 +1433,21 @@ export function FeedReader() {
               }`}
             >
               ⭐
+            </button>
+            <button
+              onClick={() => {
+                setSidebarView('history')
+                setSelectedTags([])
+                setSelectedCategoryId(null)
+                clearActiveView()
+              }}
+              className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
+                sidebarView === 'history'
+                  ? 'bg-theme-surface shadow-theme-sm text-theme-primary'
+                  : 'text-theme-secondary hover:text-theme-primary'
+              }`}
+            >
+              📖
             </button>
           </div>
         </div>
@@ -1815,7 +1899,9 @@ export function FeedReader() {
                     <button
                       onClick={() => {
                         setSelectedItem(item.id)
+                        setSelectedHistoryItem(null)
                         setMobileView('content')
+                        recordReadHistory(item)
                       }}
                       className="flex-1 text-left min-w-0"
                     >
@@ -1853,6 +1939,59 @@ export function FeedReader() {
           </div>
         )}
 
+        {/* Reading History */}
+        {sidebarView === 'history' && (
+          <div className="flex-1 overflow-y-auto themed-scrollbar flex flex-col">
+            <div className="p-4 border-b border-theme-primary flex-shrink-0">
+              <input
+                type="text"
+                value={historyQuery}
+                onChange={(e) => setHistoryQuery(e.target.value)}
+                placeholder="Search history..."
+                className="input-theme w-full text-sm"
+              />
+            </div>
+            {historyResults.length === 0 ? (
+              <div className="p-6 text-center">
+                <div className="text-4xl mb-3">📖</div>
+                <p className="text-sm text-theme-secondary">
+                  {historyQuery.trim() ? 'No matches found' : 'No reading history yet'}
+                </p>
+                <p className="text-xs text-theme-tertiary mt-1">Items you open are saved here for offline reading.</p>
+              </div>
+            ) : (
+              historyResults.map((record) => (
+                <button
+                  key={record.id}
+                  onClick={() => {
+                    setSelectedHistoryItem(record)
+                    setSelectedItem(null)
+                    setMobileView('content')
+                  }}
+                  className={`w-full px-4 py-3 text-left transition-all duration-150 ${
+                    selectedHistoryItem?.id === record.id
+                      ? 'bg-theme-accent-light border-l-4 border-l-[rgb(var(--color-accent))]'
+                      : 'hover:bg-theme-hover border-l-4 border-l-transparent'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs">📖</span>
+                    <span className="text-xs text-theme-tertiary truncate">
+                      {record.author || record.feedTitle || 'Unknown'}
+                    </span>
+                  </div>
+                  <h3 className="text-sm font-medium text-theme-primary mb-1 line-clamp-2">
+                    {record.title}
+                  </h3>
+                  <p className="text-xs text-theme-tertiary">
+                    {new Date(record.readAt).toLocaleString()}
+                  </p>
+                </button>
+              ))
+            )}
+          </div>
+        )}
+
         {/* Footer */}
         <div className="p-4 border-t border-theme-primary flex-shrink-0 space-y-2">
           {user?.npub === env.NEXT_PUBLIC_ADMIN_NPUB && (
@@ -1880,7 +2019,7 @@ export function FeedReader() {
 
       {/* Center Panel - Article List */}
       <div className={`
-        ${mobileView === 'content' && selectedItem ? 'hidden md:flex' : 'flex'}
+        ${mobileView === 'content' && (selectedItem || selectedHistoryItem) ? 'hidden md:flex' : 'flex'}
         w-full md:w-96 bg-theme-surface border-r border-theme-primary flex-col max-h-screen
         pt-32 md:pt-0
       `}>
@@ -2130,12 +2269,12 @@ export function FeedReader() {
 
       {/* Right Panel - Article Content */}
       <div className={`
-        ${mobileView === 'list' && selectedItem ? 'hidden md:flex' : 'flex'}
+        ${mobileView === 'list' && (selectedItem || selectedHistoryItem) ? 'hidden md:flex' : 'flex'}
         flex-1 bg-theme-secondary flex-col max-h-screen
         pt-32 md:pt-0
       `}>
         {/* Mobile Back Button */}
-        {selectedItem && (
+        {(selectedItem || selectedHistoryItem) && (
           <button
             onClick={() => setMobileView('list')}
             className="md:hidden fixed top-20 left-4 z-50 p-2.5 bg-theme-surface rounded-full shadow-theme-lg border border-theme-primary"
@@ -2145,8 +2284,48 @@ export function FeedReader() {
             </svg>
           </button>
         )}
-        
-        {selectedItemData ? (
+
+        {selectedHistoryItem ? (
+          <>
+            <div className="bg-theme-surface-raised p-6 md:p-8 border-b border-theme-primary flex-shrink-0 shadow-theme-sm">
+              <div className="mx-auto" style={{ maxWidth: 'var(--reading-measure)' }}>
+                <h1 className="text-2xl md:text-3xl font-bold text-theme-primary leading-tight mb-4" style={{ fontFamily: 'var(--heading-font)' }}>
+                  {selectedHistoryItem.title}
+                </h1>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-theme-secondary">
+                  <span className="font-medium">{selectedHistoryItem.author || selectedHistoryItem.feedTitle}</span>
+                  <span className="text-theme-muted">•</span>
+                  <span className="tag-badge">{selectedHistoryItem.feedTitle}</span>
+                  <span className="text-theme-muted">•</span>
+                  <span>Read {new Date(selectedHistoryItem.readAt).toLocaleString()}</span>
+                  {selectedHistoryItem.url && (
+                    <>
+                      <span className="text-theme-muted">•</span>
+                      <a
+                        href={safeExternalUrl(selectedHistoryItem.url) ?? '#'}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-theme-accent hover:underline"
+                      >
+                        View Original
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                        </svg>
+                      </a>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto themed-scrollbar">
+              <div className="mx-auto p-6 md:p-8" style={{ maxWidth: 'var(--reading-measure)' }}>
+                <article className="article-content-inner p-6 md:p-10 rounded-xl">
+                  <p className="prose-theme whitespace-pre-wrap">{selectedHistoryItem.content}</p>
+                </article>
+              </div>
+            </div>
+          </>
+        ) : selectedItemData ? (
           <>
             <div className="bg-theme-surface-raised p-6 md:p-8 border-b border-theme-primary flex-shrink-0 shadow-theme-sm">
               <div className="mx-auto" style={{ maxWidth: 'var(--reading-measure)' }}>
@@ -2236,7 +2415,7 @@ export function FeedReader() {
                     <>
                       <span className="text-theme-muted">•</span>
                       <a
-                        href={selectedItemOriginalUrl}
+                        href={safeExternalUrl(selectedItemOriginalUrl) ?? '#'}
                         target="_blank"
                         rel="noopener noreferrer" 
                         className="inline-flex items-center gap-1 text-theme-accent hover:underline"
