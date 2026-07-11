@@ -6,9 +6,11 @@ import { AuthorByline } from './author-byline'
 import { safeExternalUrl } from '@/lib/safe-url'
 import type { HistoryRecord } from '@/lib/reading-history'
 import type { AiConfig } from '@/lib/ai/config'
+import type { LayoutMode } from '../settings-dialog'
 import type { FeedItem } from './types'
 
 interface ArticlePaneProps {
+  layoutMode: LayoutMode
   mobileView: 'list' | 'content'
   selectedItem: string | null
   selectedHistoryItem: HistoryRecord | null
@@ -27,6 +29,7 @@ interface ArticlePaneProps {
 }
 
 export function ArticlePane({
+  layoutMode,
   mobileView,
   selectedItem,
   selectedHistoryItem,
@@ -43,9 +46,16 @@ export function ArticlePane({
   setShowAiPanel,
   aiConfig,
 }: ArticlePaneProps) {
+  const hasSelection = selectedItem || selectedHistoryItem
+  const listActive = mobileView === 'list' && hasSelection
+  const contentActive = mobileView === 'content' && hasSelection
+  const visibilityClass = layoutMode === 'split'
+    ? (listActive ? 'hidden md:flex' : 'flex')
+    : (contentActive ? 'flex' : 'hidden')
+  const backButtonClass = layoutMode === 'split' ? 'md:hidden ' : ''
   return (
       <div className={`
-        ${mobileView === 'list' && (selectedItem || selectedHistoryItem) ? 'hidden md:flex' : 'flex'}
+        ${visibilityClass}
         flex-1 bg-theme-secondary flex-col max-h-screen
         pt-32 md:pt-0
       `}>
@@ -53,7 +63,7 @@ export function ArticlePane({
         {(selectedItem || selectedHistoryItem) && (
           <button
             onClick={() => setMobileView('list')}
-            className="md:hidden fixed top-20 left-4 z-50 p-2.5 bg-theme-surface rounded-full shadow-theme-lg border border-theme-primary"
+            className={`${backButtonClass}fixed top-20 left-4 z-50 p-2.5 bg-theme-surface rounded-full shadow-theme-lg border border-theme-primary`}
           >
             <svg className="w-5 h-5 text-theme-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />

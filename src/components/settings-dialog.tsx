@@ -28,6 +28,7 @@ import {
 import type { SavedView } from '@/lib/saved-views'
 
 export type MarkReadBehavior = 'on-open' | 'after-10s' | 'never'
+export type LayoutMode = 'split' | 'single' | 'grid'
 export type OrganizationMode = 'tags' | 'categories'
 
 // Settings tabs
@@ -122,6 +123,12 @@ const MARK_READ_OPTIONS: { value: MarkReadBehavior; title: string; description: 
   },
 ]
 
+const LAYOUT_OPTIONS: { label: string; value: LayoutMode }[] = [
+  { label: 'Split', value: 'split' },
+  { label: 'Single', value: 'single' },
+  { label: 'Grid', value: 'grid' },
+]
+
 const LINE_HEIGHT_OPTIONS: { label: string; value: number }[] = [
   { label: 'Compact', value: 1.5 },
   { label: 'Normal', value: 1.75 },
@@ -208,6 +215,8 @@ interface SettingsDialogProps {
   onClose: () => void
   markReadBehavior: MarkReadBehavior
   onChangeMarkReadBehavior: (behavior: MarkReadBehavior) => void
+  layoutMode: LayoutMode
+  onChangeLayoutMode: (mode: LayoutMode) => void
   organizationMode: OrganizationMode
   onChangeOrganizationMode: (mode: OrganizationMode) => void
   feeds?: Array<{ type: 'RSS' | 'NOSTR' | 'NOSTR_VIDEO'; url: string; title?: string; tags?: string[]; category?: { name: string; color?: string | null; icon?: string | null } | null }>
@@ -234,7 +243,7 @@ const CATEGORY_COLORS = [
 
 const CATEGORY_ICONS = ['📁', '📰', '🎬', '🎵', '💼', '🎮', '📚', '🔬', '💡', '🌍', '⚡', '🎯']
 
-export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds, onFilterRulesChange, views = [], onRenameView, onDeleteView, onMoveView }: SettingsDialogProps) {
+export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, layoutMode, onChangeLayoutMode, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds, onFilterRulesChange, views = [], onRenameView, onDeleteView, onMoveView }: SettingsDialogProps) {
   const { user, canSign, signEventOrThrow } = useNostrAuth()
   const { readingPrefs, setReadingPref, resetReading } = useTheme()
   const { config: aiConfig, setConfig: setAiConfig } = useAiConfig()
@@ -1130,6 +1139,18 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                     options={PARA_GAP_OPTIONS}
                     value={readingPrefs.paraGap}
                     onChange={(value) => setReadingPref({ paraGap: value })}
+                  />
+                </div>
+
+                <h3 className="text-lg font-bold text-theme-primary mb-2">Layout</h3>
+                <p className="text-sm text-theme-secondary mb-3">
+                  How the item list and article panes arrange on larger screens.
+                </p>
+                <div className="mb-8">
+                  <Segmented
+                    options={LAYOUT_OPTIONS}
+                    value={layoutMode}
+                    onChange={onChangeLayoutMode}
                   />
                 </div>
 

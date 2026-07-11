@@ -8,7 +8,7 @@ import { useRouter } from 'next/navigation'
 import { api } from '@/trpc/react'
 import { env } from '@/env.mjs'
 import { AddFeedModal } from './add-feed-modal'
-import { SettingsDialog, MarkReadBehavior, OrganizationMode } from './settings-dialog'
+import { SettingsDialog, MarkReadBehavior, LayoutMode, OrganizationMode } from './settings-dialog'
 import { useAiConfig } from '@/lib/ai/config'
 import { applyFilters, loadFilterRules, type FilterRule } from '@/lib/keyword-filter'
 import {
@@ -72,6 +72,7 @@ export function FeedReader() {
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest')
   const [tagSortOrder, setTagSortOrder] = useState<'alphabetical' | 'unread'>('alphabetical')
   const [markReadBehavior, setMarkReadBehavior] = useState<MarkReadBehavior>('on-open')
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>('split')
   const { config: aiConfig } = useAiConfig()
   const aiEnabled = aiConfig.enabled && (aiConfig.features.summarize || aiConfig.features.insights || aiConfig.features.translate)
   const [showAiPanel, setShowAiPanel] = useState(false)
@@ -135,6 +136,10 @@ export function FeedReader() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return
+    const storedLayout = localStorage.getItem('readstr_layout')
+    if (storedLayout === 'split' || storedLayout === 'single' || storedLayout === 'grid') {
+      setLayoutMode(storedLayout)
+    }
     const stored = localStorage.getItem('mark_read_behavior') as MarkReadBehavior | 'manual' | null
     if (stored === 'manual') {
       setMarkReadBehavior('never')
@@ -160,6 +165,13 @@ export function FeedReader() {
     setMarkReadBehavior(behavior)
     if (typeof window !== 'undefined') {
       localStorage.setItem('mark_read_behavior', behavior)
+    }
+  }
+
+  const handleLayoutModeChange = (mode: LayoutMode) => {
+    setLayoutMode(mode)
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('readstr_layout', mode)
     }
   }
 
@@ -1342,6 +1354,7 @@ export function FeedReader() {
 
       {/* Center Panel - Article List */}
       <ItemList
+        layoutMode={layoutMode}
         mobileView={mobileView}
         selectedItem={selectedItem}
         selectedHistoryItem={selectedHistoryItem}
@@ -1379,6 +1392,7 @@ export function FeedReader() {
 
       {/* Right Panel - Article Content */}
       <ArticlePane
+        layoutMode={layoutMode}
         mobileView={mobileView}
         selectedItem={selectedItem}
         selectedHistoryItem={selectedHistoryItem}
@@ -1473,6 +1487,8 @@ export function FeedReader() {
         onClose={() => setShowSettings(false)}
         markReadBehavior={markReadBehavior}
         onChangeMarkReadBehavior={handleMarkReadBehaviorChange}
+        layoutMode={layoutMode}
+        onChangeLayoutMode={handleLayoutModeChange}
         onFilterRulesChange={() => setFilterRules(loadFilterRules())}
         views={views}
         onRenameView={handleRenameView}

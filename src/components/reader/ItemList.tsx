@@ -2,13 +2,14 @@
 
 import { SavedViewsBar } from '../saved-views-bar'
 import { AuthorByline } from './author-byline'
-import type { MarkReadBehavior } from '../settings-dialog'
+import type { MarkReadBehavior, LayoutMode } from '../settings-dialog'
 import type { SavedView } from '@/lib/saved-views'
 import type { HistoryRecord } from '@/lib/reading-history'
 import type { FilterOutcome } from '@/lib/keyword-filter'
 import type { Feed, FeedItem } from './types'
 
 interface ItemListProps {
+  layoutMode: LayoutMode
   mobileView: 'list' | 'content'
   selectedItem: string | null
   selectedHistoryItem: HistoryRecord | null
@@ -41,6 +42,7 @@ interface ItemListProps {
 }
 
 export function ItemList({
+  layoutMode,
   mobileView,
   selectedItem,
   selectedHistoryItem,
@@ -71,10 +73,83 @@ export function ItemList({
   setMobileView,
   onToggleFavorite,
 }: ItemListProps) {
+  const contentActive = mobileView === 'content' && (selectedItem || selectedHistoryItem)
+  const visibilityClass = layoutMode === 'split'
+    ? (contentActive ? 'hidden md:flex' : 'flex')
+    : (contentActive ? 'hidden' : 'flex')
+  const widthClass = layoutMode === 'split' ? 'w-full md:w-96' : 'w-full flex-1'
+
+  const renderItem = (item: FeedItem) => {
+    const outcome = filterOutcomes.get(item.id)
+    return (
+      <div
+        key={item.id}
+        className={`article-card relative group ${
+          selectedItem === item.id ? 'active' : ''
+        } ${item.isRead ? 'read' : ''}`}
+        style={{
+          ...(outcome?.highlight ? { boxShadow: `inset 3px 0 0 ${outcome.highlight}` } : {}),
+          ...(outcome?.hidden ? { opacity: 0.4 } : {}),
+        }}
+      >
+        <button
+          onClick={() => {
+            onItemClick(item.id)
+            setMobileView('content')
+          }}
+          className="w-full pr-12 text-left"
+        >
+          <div className="space-y-2">
+            <div className="flex items-start justify-between gap-2">
+              <h3 className={`text-sm font-semibold leading-snug ${
+                item.isRead ? 'text-theme-secondary' : 'text-theme-primary'
+              }`}>
+                {item.title}
+              </h3>
+              {!item.isRead && (
+                <div className="w-2 h-2 rounded-full bg-theme-accent flex-shrink-0 mt-1.5" />
+              )}
+            </div>
+            <div className="flex items-center gap-2 text-xs text-theme-tertiary">
+              <AuthorByline
+                author={item.author}
+                feedType={item.feedType}
+                feedTitle={item.feedTitle}
+                className="font-medium"
+              />
+              <span>•</span>
+              <span>{item.publishedAt.toLocaleDateString()}</span>
+            </div>
+            <p className="text-xs text-theme-secondary line-clamp-2 leading-relaxed">
+              {item.content.replace(/<[^>]*>/g, '').substring(0, 140)}...
+            </p>
+            <div className="flex items-center gap-2 pt-1">
+              <span className="tag-badge">
+                {item.feedTitle}
+              </span>
+            </div>
+          </div>
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            onToggleFavorite(item.id, item.isFavorited || false)
+          }}
+          className="absolute top-4 right-4 p-2 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-theme-hover transition-all"
+          title={item.isFavorited ? 'Remove from favorites' : 'Add to favorites'}
+        >
+          <span className="text-xl">
+            {item.isFavorited ? '⭐' : '☆'}
+          </span>
+        </button>
+      </div>
+    )
+  }
+
   return (
       <div className={`
-        ${mobileView === 'content' && (selectedItem || selectedHistoryItem) ? 'hidden md:flex' : 'flex'}
-        w-full md:w-96 bg-theme-surface border-r border-theme-primary flex-col max-h-screen
+        ${visibilityClass}
+        ${widthClass} bg-theme-surface border-r border-theme-primary flex-col max-h-screen
         pt-32 md:pt-0
       `}>
         <div className="p-5 border-b border-theme-primary flex-shrink-0">
@@ -246,73 +321,12 @@ export function ItemList({
                 {viewFilter === 'all' && 'Subscribe to feeds to see content here'}
               </p>
             </div>
+          ) : layoutMode === 'grid' ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 p-3">
+              {feedItems.map(renderItem)}
+            </div>
           ) : (
-            feedItems.map((item: FeedItem) => {
-              const outcome = filterOutcomes.get(item.id)
-              return (
-              <div
-                key={item.id}
-                className={`article-card relative group ${
-                  selectedItem === item.id ? 'active' : ''
-                } ${item.isRead ? 'read' : ''}`}
-                style={{
-                  ...(outcome?.highlight ? { boxShadow: `inset 3px 0 0 ${outcome.highlight}` } : {}),
-                  ...(outcome?.hidden ? { opacity: 0.4 } : {}),
-                }}
-              >
-                <button
-                  onClick={() => {
-                    onItemClick(item.id)
-                    setMobileView('content')
-                  }}
-                  className="w-full pr-12 text-left"
-                >
-                  <div className="space-y-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <h3 className={`text-sm font-semibold leading-snug ${
-                        item.isRead ? 'text-theme-secondary' : 'text-theme-primary'
-                      }`}>
-                        {item.title}
-                      </h3>
-                      {!item.isRead && (
-                        <div className="w-2 h-2 rounded-full bg-theme-accent flex-shrink-0 mt-1.5" />
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 text-xs text-theme-tertiary">
-                      <AuthorByline
-                        author={item.author}
-                        feedType={item.feedType}
-                        feedTitle={item.feedTitle}
-                        className="font-medium"
-                      />
-                      <span>•</span>
-                      <span>{item.publishedAt.toLocaleDateString()}</span>
-                    </div>
-                    <p className="text-xs text-theme-secondary line-clamp-2 leading-relaxed">
-                      {item.content.replace(/<[^>]*>/g, '').substring(0, 140)}...
-                    </p>
-                    <div className="flex items-center gap-2 pt-1">
-                      <span className="tag-badge">
-                        {item.feedTitle}
-                      </span>
-                    </div>
-                  </div>
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onToggleFavorite(item.id, item.isFavorited || false)
-                  }}
-                  className="absolute top-4 right-4 p-2 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-theme-hover transition-all"
-                  title={item.isFavorited ? 'Remove from favorites' : 'Add to favorites'}
-                >
-                  <span className="text-xl">
-                    {item.isFavorited ? '⭐' : '☆'}
-                  </span>
-                </button>
-              </div>
-              )
-            })
+            feedItems.map(renderItem)
           )}
         </div>
       </div>
