@@ -10,6 +10,8 @@ import { env } from '@/env.mjs'
 import { AddFeedModal } from './add-feed-modal'
 import { SettingsDialog, MarkReadBehavior, OrganizationMode } from './settings-dialog'
 import { FormattedContent } from './formatted-content'
+import { AiSummaryPanel } from './ai-summary-panel'
+import { useAiConfig } from '@/lib/ai/config'
 import { applyFilters, loadFilterRules, type FilterRule } from '@/lib/keyword-filter'
 import { SimplePool } from 'nostr-tools'
 import { 
@@ -80,6 +82,9 @@ export function FeedReader() {
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest')
   const [tagSortOrder, setTagSortOrder] = useState<'alphabetical' | 'unread'>('alphabetical')
   const [markReadBehavior, setMarkReadBehavior] = useState<MarkReadBehavior>('on-open')
+  const { config: aiConfig } = useAiConfig()
+  const aiEnabled = aiConfig.enabled && (aiConfig.features.summarize || aiConfig.features.insights)
+  const [showAiPanel, setShowAiPanel] = useState(false)
   const [filterRules, setFilterRules] = useState<FilterRule[]>([])
   const [showHiddenByFilter, setShowHiddenByFilter] = useState(false)
   const [isSharing, setIsSharing] = useState(false)
@@ -1996,6 +2001,15 @@ export function FeedReader() {
                         {selectedItemData.isFavorited ? '⭐' : '☆'}
                       </span>
                     </button>
+                    {aiEnabled && (
+                      <button
+                        onClick={() => setShowAiPanel((v) => !v)}
+                        className={`p-2.5 rounded-lg transition-colors ${showAiPanel ? 'bg-theme-accent-light text-theme-accent' : 'hover:bg-theme-hover text-theme-secondary'}`}
+                        title={showAiPanel ? 'Hide AI summary' : 'AI summary'}
+                      >
+                        <span className="text-xl">✨</span>
+                      </button>
+                    )}
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-theme-secondary">
@@ -2030,6 +2044,16 @@ export function FeedReader() {
             </div>
             <div className="flex-1 overflow-y-auto themed-scrollbar">
               <div className="mx-auto p-6 md:p-8" style={{ maxWidth: 'var(--reading-measure)' }}>
+                {aiEnabled && showAiPanel && (
+                  <AiSummaryPanel
+                    key={selectedItemData.guid ?? selectedItemData.id}
+                    articleKey={selectedItemData.guid ?? selectedItemData.id}
+                    title={selectedItemData.title}
+                    text={selectedItemData.content.replace(/<[^>]*>/g, '')}
+                    feedTitle={selectedItemData.feedTitle}
+                    config={aiConfig}
+                  />
+                )}
                 <article className="article-content-inner p-6 md:p-10 rounded-xl">
                   <FormattedContent 
                     content={selectedItemData.content}

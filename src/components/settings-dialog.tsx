@@ -15,6 +15,7 @@ import {
   type SubscriptionList,
 } from '@/lib/nostr-sync'
 import { parseOpml, buildOpml, planOpmlImport, MAX_CONTENT_BYTES } from '@/lib/opml'
+import { useAiConfig, AI_LANG_OPTIONS } from '@/lib/ai/config'
 import {
   loadFilterRules,
   saveFilterRules,
@@ -29,16 +30,32 @@ export type MarkReadBehavior = 'on-open' | 'after-10s' | 'never'
 export type OrganizationMode = 'tags' | 'categories'
 
 // Settings tabs
-type SettingsTab = 'relays' | 'organization' | 'reading' | 'filters' | 'sync' | 'about'
+type SettingsTab = 'relays' | 'organization' | 'reading' | 'filters' | 'ai' | 'sync' | 'about'
 
 const SETTINGS_TABS: { id: SettingsTab; label: string; icon: string }[] = [
   { id: 'relays', label: 'Nostr Relays', icon: '🔌' },
   { id: 'organization', label: 'Feed Organization', icon: '📁' },
   { id: 'reading', label: 'Reading', icon: '📖' },
   { id: 'filters', label: 'Filters', icon: '🧹' },
+  { id: 'ai', label: 'AI', icon: '✨' },
   { id: 'sync', label: 'Sync', icon: '🔄' },
   { id: 'about', label: 'About', icon: 'ℹ️' },
 ]
+
+const SETTINGS_LANG_OPTIONS = AI_LANG_OPTIONS.map((o) =>
+  o.value === 'auto' ? { label: 'Original (article language)', value: o.value } : o
+)
+
+function isInsecureAiUrl(baseUrl: string): boolean {
+  try {
+    const u = new URL(baseUrl)
+    if (u.protocol === 'https:') return false
+    if (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]') return false
+    return true
+  } catch {
+    return false
+  }
+}
 
 // Sync state type
 export interface SyncState {
@@ -214,6 +231,7 @@ const CATEGORY_ICONS = ['📁', '📰', '🎬', '🎵', '💼', '🎮', '📚', 
 export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds, onFilterRulesChange }: SettingsDialogProps) {
   const { user, canSign, signEventOrThrow } = useNostrAuth()
   const { readingPrefs, setReadingPref, resetReading } = useTheme()
+  const { config: aiConfig, setConfig: setAiConfig } = useAiConfig()
   const [activeTab, setActiveTab] = useState<SettingsTab>('relays')
   const [relays, setRelays] = useState<Relay[]>([])
   const [newRelayUrl, setNewRelayUrl] = useState('')
@@ -1301,6 +1319,129 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                       ))}
                     </div>
                   )}
+                </div>
+              </div>
+            )}
+
+            {/* AI Tab */}
+            {activeTab === 'ai' && (
+              <div>
+                <h3 className="text-lg font-bold text-theme-primary mb-2">AI Summaries & Insights</h3>
+                <p className="text-sm text-theme-secondary mb-2">
+                  Generate article summaries and insights using your own OpenAI-compatible endpoint
+                  (Ollama, LM Studio, etc.).
+                </p>
+                <p className="text-xs text-theme-tertiary mb-6">
+                  Your browser calls the endpoint directly. The Readstr server never sees your prompt,
+                  API key, or the output. The API key is stored only in this browser and is never sent
+                  to any relay or server.
+                </p>
+
+                <label className="flex items-start gap-3 p-4 mb-6 rounded-xl border-2 border-theme-secondary bg-theme-primary cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={aiConfig.enabled}
+                    onChange={(e) => setAiConfig({ enabled: e.target.checked })}
+                    className="mt-1 accent-[rgb(var(--color-accent))]"
+                  />
+                  <div>
+                    <div className="font-medium text-theme-primary">Enable AI features</div>
+                    <p className="text-sm text-theme-secondary">
+                      Off by default. When disabled, no AI controls appear and no requests are made.
+                    </p>
+                  </div>
+                </label>
+
+                <div className="mb-4">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    Base URL
+                  </label>
+                  <input
+                    type="text"
+                    value={aiConfig.baseUrl}
+                    onChange={(e) => setAiConfig({ baseUrl: e.target.value })}
+                    placeholder="http://localhost:11434/v1"
+                    className="input-theme w-full"
+                  />
+                  {isInsecureAiUrl(aiConfig.baseUrl) && (
+                    <div className="mt-2 flex items-start gap-2 text-sm text-yellow-700">
+                      <span>⚠</span>
+                      <span>
+                        This is a non-localhost, non-HTTPS endpoint. Browsers block mixed content, so
+                        requests from this page will fail. Use HTTPS or a localhost endpoint.
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="mb-4">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    API Key
+                  </label>
+                  <input
+                    type="password"
+                    value={aiConfig.apiKey}
+                    onChange={(e) => setAiConfig({ apiKey: e.target.value })}
+                    placeholder="Leave empty for local endpoints"
+                    autoComplete="off"
+                    className="input-theme w-full"
+                  />
+                </div>
+
+                <div className="mb-4">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    Model
+                  </label>
+                  <input
+                    type="text"
+                    value={aiConfig.model}
+                    onChange={(e) => setAiConfig({ model: e.target.value })}
+                    placeholder="llama3.2"
+                    className="input-theme w-full"
+                  />
+                </div>
+
+                <div className="mb-6">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    Features
+                  </label>
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-3 text-sm text-theme-secondary cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={aiConfig.features.summarize}
+                        onChange={(e) => setAiConfig({ features: { ...aiConfig.features, summarize: e.target.checked } })}
+                        className="accent-[rgb(var(--color-accent))]"
+                      />
+                      Summaries
+                    </label>
+                    <label className="flex items-center gap-3 text-sm text-theme-secondary cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={aiConfig.features.insights}
+                        onChange={(e) => setAiConfig({ features: { ...aiConfig.features, insights: e.target.checked } })}
+                        className="accent-[rgb(var(--color-accent))]"
+                      />
+                      Insights
+                    </label>
+                  </div>
+                </div>
+
+                <div className="mb-4">
+                  <label className="block text-sm font-semibold text-theme-secondary mb-2 uppercase tracking-wider">
+                    Output Language
+                  </label>
+                  <select
+                    value={aiConfig.targetLang}
+                    onChange={(e) => setAiConfig({ targetLang: e.target.value })}
+                    className="input-theme w-full"
+                  >
+                    {SETTINGS_LANG_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
             )}
