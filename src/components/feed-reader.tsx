@@ -215,10 +215,14 @@ export function FeedReader() {
   }
 
   // Sign out handler
-  const handleSignOut = () => {
-    clearHistory().catch(() => {})
-    disconnect()
-    router.push('/')
+  const handleSignOut = async () => {
+    try {
+      await clearHistory()
+    } catch {
+    } finally {
+      disconnect()
+      router.push('/')
+    }
   }
 
   // Debug: Log session info
@@ -792,20 +796,33 @@ export function FeedReader() {
   }
   
   // Handle marking item as read when clicked
+  const recordReadHistory = (item: {
+    id: string
+    title: string
+    content: string
+    author: string | null
+    feedTitle: string
+    url?: string | null
+    originalUrl?: string | null
+    feedType: string
+  }) => {
+    recordRead({
+      id: item.id,
+      title: item.title,
+      content: item.content,
+      author: item.author,
+      feedTitle: item.feedTitle,
+      url: item.originalUrl ?? item.url,
+      feedType: item.feedType,
+    }).catch(() => {})
+  }
+
   const handleItemClick = (itemId: string) => {
     setSelectedItem(itemId)
     setSelectedHistoryItem(null)
     const item = allFeedItems.find((i: FeedItem) => i.id === itemId)
     if (item) {
-      recordRead({
-        id: item.id,
-        title: item.title,
-        content: item.content,
-        author: item.author,
-        feedTitle: item.feedTitle,
-        url: item.url,
-        feedType: item.feedType,
-      }).catch(() => {})
+      recordReadHistory(item)
     }
     if (markReadBehavior === 'on-open' && item && !item.isRead) {
       updateFeedItemCache(itemId, () => ({ isRead: true }))
@@ -1882,6 +1899,7 @@ export function FeedReader() {
                         setSelectedItem(item.id)
                         setSelectedHistoryItem(null)
                         setMobileView('content')
+                        recordReadHistory(item)
                       }}
                       className="flex-1 text-left min-w-0"
                     >
@@ -1999,7 +2017,7 @@ export function FeedReader() {
 
       {/* Center Panel - Article List */}
       <div className={`
-        ${mobileView === 'content' && selectedItem ? 'hidden md:flex' : 'flex'}
+        ${mobileView === 'content' && (selectedItem || selectedHistoryItem) ? 'hidden md:flex' : 'flex'}
         w-full md:w-96 bg-theme-surface border-r border-theme-primary flex-col max-h-screen
         pt-32 md:pt-0
       `}>
@@ -2249,7 +2267,7 @@ export function FeedReader() {
 
       {/* Right Panel - Article Content */}
       <div className={`
-        ${mobileView === 'list' && selectedItem ? 'hidden md:flex' : 'flex'}
+        ${mobileView === 'list' && (selectedItem || selectedHistoryItem) ? 'hidden md:flex' : 'flex'}
         flex-1 bg-theme-secondary flex-col max-h-screen
         pt-32 md:pt-0
       `}>

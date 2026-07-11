@@ -126,20 +126,16 @@ export async function recordRead(item: HistoryInput): Promise<void> {
 export async function clearHistory(): Promise<void> {
   memoryStore.clear()
   if (!hasIndexedDb()) return
-  try {
-    const db = await openDb()
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readwrite')
-      tx.objectStore(STORE_NAME).clear()
-      tx.oncomplete = () => {
-        db.close()
-        resolve()
-      }
-      tx.onerror = () => reject(tx.error)
-    })
-  } catch {
-    // Memory store already cleared above.
-  }
+  const db = await openDb()
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite')
+    tx.objectStore(STORE_NAME).clear()
+    tx.oncomplete = () => {
+      db.close()
+      resolve()
+    }
+    tx.onerror = () => reject(tx.error)
+  })
 }
 
 export async function getHistory(limit: number = DEFAULT_LIMIT): Promise<HistoryRecord[]> {
