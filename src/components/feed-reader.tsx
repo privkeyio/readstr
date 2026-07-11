@@ -2,18 +2,15 @@
 
 import { useNostrAuth, getLastSigningError } from '@/contexts/NostrAuthContext'
 import { useTheme, themeConfig } from '@/contexts/ThemeContext'
-import { ThemeSelector, ThemeToggleButton } from './theme-selector'
+import { ThemeToggleButton } from './theme-selector'
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { api } from '@/trpc/react'
 import { env } from '@/env.mjs'
 import { AddFeedModal } from './add-feed-modal'
 import { SettingsDialog, MarkReadBehavior, OrganizationMode } from './settings-dialog'
-import { FormattedContent } from './formatted-content'
-import { AiSummaryPanel } from './ai-summary-panel'
 import { useAiConfig } from '@/lib/ai/config'
 import { applyFilters, loadFilterRules, type FilterRule } from '@/lib/keyword-filter'
-import { SavedViewsBar } from './saved-views-bar'
 import {
   loadViews,
   saveViews,
@@ -26,7 +23,6 @@ import {
   type ViewSource,
 } from '@/lib/saved-views'
 import { recordRead, searchHistory, clearHistory, type HistoryRecord } from '@/lib/reading-history'
-import { safeExternalUrl } from '@/lib/safe-url'
 import { SimplePool } from 'nostr-tools'
 import { 
   fetchSubscriptionList,
@@ -37,35 +33,11 @@ import {
   publishSubscriptionList,
   buildSubscriptionListFromFeeds,
 } from '@/lib/nostr-sync'
-import { useNostrProfile } from '@/lib/nostr-profile'
 import type { UnsignedEvent } from 'nostr-tools'
-import type { inferRouterOutputs } from '@trpc/server'
-import type { AppRouter } from '@/server/api/root'
-
-interface Category {
-  id: string
-  name: string
-  color: string | null
-  icon: string | null
-}
-
-interface Feed {
-  id: string
-  title: string
-  type: 'RSS' | 'NOSTR' | 'NOSTR_VIDEO'
-  unreadCount: number
-  url?: string | null
-  npub?: string | null
-  tags?: string[]
-  categoryId?: string | null
-  category?: Category | null
-}
-
-type RouterOutputs = inferRouterOutputs<AppRouter>
-type FeedItemsResponse = RouterOutputs['feed']['getFeedItems']
-type FeedItem = FeedItemsResponse['items'][number]
-type FavoritesResponse = RouterOutputs['feed']['getFavorites']
-type FavoriteItem = FavoritesResponse['items'][number]
+import { ArticlePane } from './reader/ArticlePane'
+import { ItemList } from './reader/ItemList'
+import { ReaderSidebar } from './reader/ReaderSidebar'
+import type { Category, Feed, FeedItem, FavoriteItem } from './reader/types'
 
 const FAVORITES_QUERY_INPUT = { limit: 50 } as const
 const QUICK_MARK_READ_OPTIONS: { value: MarkReadBehavior; label: string; helper: string }[] = [
@@ -73,29 +45,6 @@ const QUICK_MARK_READ_OPTIONS: { value: MarkReadBehavior; label: string; helper:
   { value: 'after-10s', label: 'After 10 seconds', helper: 'Give me a short buffer before marking read' },
   { value: 'never', label: 'Never automatically', helper: 'Only change when I click Mark as Read' },
 ]
-
-function AuthorByline({
-  author,
-  feedType,
-  feedTitle,
-  className,
-}: {
-  author: string | null
-  feedType: 'RSS' | 'NOSTR' | 'NOSTR_VIDEO'
-  feedTitle: string
-  className: string
-}) {
-  const isNostr = feedType === 'NOSTR' || feedType === 'NOSTR_VIDEO'
-  const { profile } = useNostrProfile(isNostr ? author : null)
-
-  if (!isNostr) {
-    return <span className={className}>{author}</span>
-  }
-
-  const label = profile?.name || feedTitle || author
-
-  return <span className={className}>{label}</span>
-}
 
 export function FeedReader() {
   const { user, disconnect, canSign, signEventOrThrow } = useNostrAuth()
@@ -1335,1135 +1284,117 @@ export function FeedReader() {
       )}
 
       {/* Left Sidebar - Feeds/Tags */}
-      <div className={`
-        ${showSidebar ? 'translate-x-0' : '-translate-x-full'}
-        md:translate-x-0 md:relative
-        fixed inset-y-0 left-0 z-50
-        w-72 bg-theme-surface border-r border-theme-primary flex flex-col max-h-screen
-        transition-transform duration-300 ease-out
-        pt-32 md:pt-0
-        shadow-theme-lg md:shadow-none
-      `}>
-        {/* Header - Hidden on mobile (shown in top bar instead) */}
-        <div className="hidden md:block p-5 border-b border-theme-primary flex-shrink-0">
-          <div className="flex items-center justify-between mb-4">
-            <h1 className="text-xl font-bold text-theme-primary tracking-tight">
-              Readstr
-            </h1>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={handleRefreshAllFeeds}
-                disabled={isRefreshingAll}
-                className={`p-2 rounded-lg hover:bg-theme-hover text-theme-secondary transition-all ${isRefreshingAll ? 'animate-spin' : ''}`}
-                title={isRefreshingAll ? 'Refreshing...' : `Refresh all feeds${lastRefreshTime ? ` (last: ${new Date(lastRefreshTime).toLocaleTimeString()})` : ''}`}
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-              </button>
-              <ThemeSelector showLabels={false} />
-              <button
-                onClick={() => setShowSettings(true)}
-                className="p-2 rounded-lg hover:bg-theme-hover text-theme-secondary transition-colors"
-                title="Settings"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-              </button>
-            </div>
-          </div>
-          <button
-            onClick={() => setShowAddFeed(true)}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-theme-accent hover:bg-theme-accent-hover text-white rounded-xl font-medium transition-colors shadow-theme-sm"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            Add Feed
-          </button>
-          <div className="mt-3 text-xs text-theme-tertiary truncate flex items-center gap-2">
-            <span className="font-mono">{user?.npub?.slice(0, 20)}...</span>
-            {isRefreshingAll && (
-              <span className="text-theme-accent animate-pulse-subtle">Refreshing...</span>
-            )}
-          </div>
-        </div>
-
-        {/* View Toggle */}
-        <div className="px-4 py-3 border-b border-theme-primary flex-shrink-0">
-          <div className="flex bg-theme-tertiary rounded-xl p-1">
-            <button
-              onClick={() => {
-                setSidebarView('feeds')
-                setSelectedTags([])
-                setSelectedCategoryId(null)
-                clearActiveView()
-              }}
-              className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
-                sidebarView === 'feeds'
-                  ? 'bg-theme-surface shadow-theme-sm text-theme-primary'
-                  : 'text-theme-secondary hover:text-theme-primary'
-              }`}
-            >
-              Feeds
-            </button>
-            <button
-              onClick={() => setSidebarView('tags')}
-              className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
-                sidebarView === 'tags'
-                  ? 'bg-theme-surface shadow-theme-sm text-theme-primary'
-                  : 'text-theme-secondary hover:text-theme-primary'
-              }`}
-            >
-              {organizationMode === 'categories' ? 'Categories' : 'Tags'}
-            </button>
-            <button
-              onClick={() => {
-                setSidebarView('favorites')
-                setSelectedTags([])
-                setSelectedCategoryId(null)
-                clearActiveView()
-              }}
-              className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
-                sidebarView === 'favorites'
-                  ? 'bg-theme-surface shadow-theme-sm text-theme-primary'
-                  : 'text-theme-secondary hover:text-theme-primary'
-              }`}
-            >
-              ⭐
-            </button>
-            <button
-              onClick={() => {
-                setSidebarView('history')
-                setSelectedTags([])
-                setSelectedCategoryId(null)
-                clearActiveView()
-              }}
-              className={`flex-1 px-3 py-2 text-sm rounded-lg font-medium transition-all duration-200 ${
-                sidebarView === 'history'
-                  ? 'bg-theme-surface shadow-theme-sm text-theme-primary'
-                  : 'text-theme-secondary hover:text-theme-primary'
-              }`}
-            >
-              📖
-            </button>
-          </div>
-        </div>
-
-        {/* Active Tag Filters */}
-        {selectedTags.length > 0 && (
-          <div className="px-4 py-3 border-b border-theme-primary bg-theme-accent-light flex-shrink-0">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold text-theme-accent uppercase tracking-wider">Filtered by</span>
-              <button
-                onClick={handleClearTags}
-                className="text-xs font-medium text-theme-accent hover:underline"
-              >
-                Clear all
-              </button>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {selectedTags.map(tag => (
-                <span
-                  key={tag}
-                  className="inline-flex items-center px-2.5 py-1 bg-theme-surface rounded-full text-xs font-medium text-theme-accent shadow-theme-sm"
-                >
-                  {tag}
-                  <button
-                    onClick={() => handleToggleTag(tag)}
-                    className="ml-1.5 hover:text-theme-accent-hover"
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Feeds List */}
-        {sidebarView === 'feeds' && (
-          <div className="flex-1 overflow-y-auto themed-scrollbar">
-          {allFeeds.map((feed) => (
-            <div
-              key={feed.id}
-              className={`relative group w-full text-left transition-all duration-150 ${
-                selectedFeed === feed.id 
-                  ? 'bg-theme-accent-light border-l-4 border-l-[rgb(var(--color-accent))]' 
-                  : 'hover:bg-theme-hover border-l-4 border-l-transparent'
-              }`}
-            >
-              <button
-                onClick={() => {
-                  setSelectedFeed(feed.id)
-                  setShowSidebar(false)
-                  clearActiveView()
-                }}
-                className="w-full px-4 py-3"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span className={`text-base flex-shrink-0 ${feed.id === 'all' ? 'opacity-80' : ''}`}>
-                      {feed.id === 'all' ? '📚' : feed.type === 'RSS' ? '📰' : feed.type === 'NOSTR_VIDEO' ? '🎬' : '⚡'}
-                    </span>
-                    <span className={`text-sm font-medium truncate ${
-                      selectedFeed === feed.id ? 'text-theme-accent' : 'text-theme-primary'
-                    }`}>
-                      {feed.title}
-                    </span>
-                  </div>
-                  {feed.unreadCount > 0 && (
-                    <span className="unread-badge flex-shrink-0 ml-2">
-                      {feed.unreadCount > 99 ? '99+' : feed.unreadCount}
-                    </span>
-                  )}
-                </div>
-                {feed.url && (
-                  <div className="text-xs text-theme-tertiary truncate mt-1 ml-7">
-                    {new URL(feed.url).hostname}
-                  </div>
-                )}
-                {feed.npub && (
-                  <div className="text-xs text-theme-tertiary truncate mt-1 ml-7 font-mono">
-                    {feed.npub.slice(0, 16)}...
-                  </div>
-                )}
-                {/* Show tags if any */}
-                {feed.tags && feed.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-2 ml-7">
-                    {feed.tags.map(tag => (
-                      <span
-                        key={tag}
-                        className="tag-badge"
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </button>
-              
-              {/* Menu button - only show for actual feeds, not "All Items" */}
-              {feed.id !== 'all' && (
-                <div className="absolute right-3 top-3">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setOpenMenuFeedId(openMenuFeedId === feed.id ? null : feed.id)
-                    }}
-                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg bg-theme-tertiary hover:bg-theme-hover text-theme-secondary transition-all"
-                    title="Menu"
-                  >
-                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                      <path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z" />
-                    </svg>
-                  </button>
-                  
-                  {/* Dropdown menu */}
-                  {openMenuFeedId === feed.id && !showCategoryPicker && (
-                    <div className="absolute right-0 mt-1 w-52 dropdown-menu animate-slide-in">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          handleRefreshFeed(feed.id, feed.type)
-                          setOpenMenuFeedId(null)
-                        }}
-                        disabled={refreshFeedMutation.isLoading || refreshNostrFeedMutation.isLoading}
-                        className="dropdown-item flex items-center gap-2 disabled:opacity-50"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                        </svg>
-                        Refresh
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          handleMarkAllAsRead(feed.id)
-                        }}
-                        disabled={markAllAsReadMutation.isLoading || feed.unreadCount === 0}
-                        className="dropdown-item flex items-center gap-2 disabled:opacity-50"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                        </svg>
-                        Mark All Read
-                      </button>
-                      {organizationMode === 'categories' && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setShowCategoryPicker(feed.id)
-                          }}
-                          className="dropdown-item flex items-center gap-2"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                          </svg>
-                          {(() => {
-                            const cat = categories?.find((c: any) => c.id === feed.categoryId)
-                            return cat 
-                              ? <span className="truncate">{cat.icon || '📁'} {cat.name}</span>
-                              : 'Set Category'
-                          })()}
-                        </button>
-                      )}
-                      {organizationMode === 'tags' && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            const currentFeed = feeds.find((f: any) => f.id === feed.id)
-                            handleOpenEditMenu(feed.id, currentFeed?.tags || [])
-                          }}
-                          className="dropdown-item flex items-center gap-2"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
-                          </svg>
-                          Edit Tags
-                        </button>
-                      )}
-                      <div className="border-t border-theme-primary my-1" />
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          handleRemoveFeed(feed.id, feed.title)
-                          setOpenMenuFeedId(null)
-                        }}
-                        className="dropdown-item flex items-center gap-2 text-red-600 hover:bg-red-50"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                        Unsubscribe
-                      </button>
-                    </div>
-                  )}
-                  
-                  {/* Category Picker Dropdown */}
-                  {showCategoryPicker === feed.id && (
-                    <div className="absolute right-0 mt-1 w-60 dropdown-menu animate-slide-in">
-                      <div className="px-3 py-2 border-b border-theme-primary flex items-center justify-between">
-                        <span className="text-sm font-semibold text-theme-primary">Set Category</span>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setShowCategoryPicker(null)
-                            setOpenMenuFeedId(null)
-                          }}
-                          className="p-1 rounded hover:bg-theme-hover text-theme-tertiary"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                      </div>
-                      <div className="max-h-48 overflow-y-auto themed-scrollbar py-1">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            updateCategoryMutation.mutate({ feedId: feed.id, categoryId: null })
-                          }}
-                          className={`dropdown-item flex items-center gap-2 ${
-                            !feed.categoryId ? 'active' : ''
-                          }`}
-                        >
-                          <span className="text-base">📋</span>
-                          <span>No Category</span>
-                        </button>
-                        {categories.map((cat: Category) => (
-                          <button
-                            key={cat.id}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              updateCategoryMutation.mutate({ feedId: feed.id, categoryId: cat.id })
-                            }}
-                            className={`dropdown-item flex items-center gap-2 ${
-                              feed.categoryId === cat.id ? 'active' : ''
-                            }`}
-                          >
-                            <span 
-                              className="w-6 h-6 rounded-lg flex items-center justify-center text-sm"
-                              style={{ backgroundColor: cat.color ?? 'rgb(var(--color-bg-tertiary))' }}
-                            >
-                              {cat.icon || '📁'}
-                            </span>
-                            <span className="truncate">{cat.name}</span>
-                          </button>
-                        ))}
-                      </div>
-                      {categories.length === 0 && (
-                        <div className="px-3 py-4 text-xs text-theme-tertiary text-center">
-                          No categories yet. Create them in Settings.
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-        )}
-
-        {/* Tags/Categories List */}
-        {sidebarView === 'tags' && (
-          <div className="flex-1 overflow-y-auto themed-scrollbar flex flex-col">
-            {/* Sort Options - only for tags mode */}
-            {organizationMode === 'tags' && (
-              <div className="px-4 py-3 border-b border-theme-primary flex items-center justify-between flex-shrink-0">
-                <span className="text-xs font-semibold text-theme-tertiary uppercase tracking-wider">Sort by</span>
-                <div className="flex bg-theme-tertiary rounded-lg p-0.5">
-                  <button
-                    onClick={() => setTagSortOrder('alphabetical')}
-                    className={`px-2.5 py-1 text-xs rounded-md font-medium transition-all ${
-                      tagSortOrder === 'alphabetical'
-                        ? 'bg-theme-surface shadow-theme-sm text-theme-primary'
-                        : 'text-theme-secondary hover:text-theme-primary'
-                    }`}
-                  >
-                    A-Z
-                  </button>
-                  <button
-                    onClick={() => setTagSortOrder('unread')}
-                    className={`px-2.5 py-1 text-xs rounded-md font-medium transition-all ${
-                      tagSortOrder === 'unread'
-                        ? 'bg-theme-surface shadow-theme-sm text-theme-primary'
-                        : 'text-theme-secondary hover:text-theme-primary'
-                    }`}
-                  >
-                    Unread
-                  </button>
-                </div>
-              </div>
-            )}
-            
-            {/* Categories Mode */}
-            {organizationMode === 'categories' && (
-              <>
-                {categoriesWithUnread.length === 0 ? (
-                  <div className="p-6 text-center">
-                    <div className="text-4xl mb-3">📁</div>
-                    <p className="text-sm text-theme-secondary">No categories yet</p>
-                    <p className="text-xs text-theme-tertiary mt-1">Create them in Settings!</p>
-                  </div>
-                ) : (
-                  <div className="flex-1 overflow-y-auto themed-scrollbar">
-                    {/* All Items option */}
-                    <button
-                      onClick={() => {
-                        setSelectedCategoryId(null)
-                        clearActiveView()
-                      }}
-                      className={`w-full px-4 py-3 text-left transition-all duration-150 ${
-                        !selectedCategoryId 
-                          ? 'bg-theme-accent-light border-l-4 border-l-[rgb(var(--color-accent))]' 
-                          : 'hover:bg-theme-hover border-l-4 border-l-transparent'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2.5">
-                          <span className="text-lg">📋</span>
-                          <span className={`text-sm font-medium ${!selectedCategoryId ? 'text-theme-accent' : 'text-theme-primary'}`}>
-                            All Categories
-                          </span>
-                        </div>
-                      </div>
-                    </button>
-                    {categoriesWithUnread.map((cat: Category & { unreadCount: number; feedCount: number }) => (
-                      <button
-                        key={cat.id}
-                        onClick={() => {
-                          setSelectedCategoryId(cat.id)
-                          clearActiveView()
-                        }}
-                        className={`w-full px-4 py-3 text-left transition-all duration-150 ${
-                          selectedCategoryId === cat.id 
-                            ? 'bg-theme-accent-light border-l-4 border-l-[rgb(var(--color-accent))]' 
-                            : 'hover:bg-theme-hover border-l-4 border-l-transparent'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2.5">
-                            <span 
-                              className="w-7 h-7 rounded-lg flex items-center justify-center text-base shadow-theme-sm"
-                              style={{ backgroundColor: cat.color ?? 'rgb(var(--color-bg-tertiary))' }}
-                            >
-                              {cat.icon || '📁'}
-                            </span>
-                            <span className={`text-sm font-medium ${selectedCategoryId === cat.id ? 'text-theme-accent' : 'text-theme-primary'}`}>
-                              {cat.name}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2 text-xs">
-                            <span className="text-theme-tertiary">{cat.feedCount}</span>
-                            {cat.unreadCount > 0 && (
-                              <span className="unread-badge">
-                                {cat.unreadCount > 99 ? '99+' : cat.unreadCount}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
-            
-            {/* Tags Mode */}
-            {organizationMode === 'tags' && (
-              <>
-                {filteredTags.length === 0 ? (
-                  <div className="p-6 text-center">
-                    <div className="text-4xl mb-3">🏷️</div>
-                    <p className="text-sm text-theme-secondary">
-                      {selectedTags.length > 0 
-                        ? 'No additional tags found'
-                        : 'No tags yet'}
-                    </p>
-                    <p className="text-xs text-theme-tertiary mt-1">
-                      {selectedTags.length > 0 
-                        ? 'Try clearing your filter'
-                        : 'Add tags when subscribing to feeds!'}
-                    </p>
-                  </div>
-                ) : (
-                  <div className="flex-1 overflow-y-auto themed-scrollbar">
-                    {filteredTags.map(({ tag, unreadCount, feedCount }) => (
-                      <button
-                        key={tag}
-                        onClick={() => handleToggleTag(tag)}
-                        className={`w-full px-4 py-3 text-left transition-all duration-150 ${
-                          selectedTags.includes(tag) 
-                            ? 'bg-theme-accent-light border-l-4 border-l-[rgb(var(--color-accent))]' 
-                            : 'hover:bg-theme-hover border-l-4 border-l-transparent'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2.5">
-                            <span className="text-base">🏷️</span>
-                            <span className={`text-sm font-medium ${selectedTags.includes(tag) ? 'text-theme-accent' : 'text-theme-primary'}`}>
-                              {tag}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2 text-xs">
-                            <span className="text-theme-tertiary">{feedCount} feeds</span>
-                            {unreadCount > 0 && (
-                              <span className="unread-badge">
-                                {unreadCount > 99 ? '99+' : unreadCount}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Favorites List */}
-        {sidebarView === 'favorites' && (
-          <div className="flex-1 overflow-y-auto themed-scrollbar">
-            {favoritesLoading ? (
-              <div className="p-6 space-y-3">
-                {[1, 2, 3].map(i => (
-                  <div key={i} className="space-y-2">
-                    <div className="skeleton h-4 w-3/4" />
-                    <div className="skeleton h-3 w-1/2" />
-                  </div>
-                ))}
-              </div>
-            ) : !favoritesData?.items || favoritesData.items.length === 0 ? (
-              <div className="p-6 text-center">
-                <div className="text-4xl mb-3">⭐</div>
-                <p className="text-sm text-theme-secondary">No favorites yet</p>
-                <p className="text-xs text-theme-tertiary mt-1">Star items to save them here!</p>
-              </div>
-            ) : (
-              favoritesData.items.map((item: any) => (
-                <div
-                  key={item.id}
-                  className={`w-full px-4 py-3 text-left transition-all duration-150 group ${
-                    selectedItem === item.id 
-                      ? 'bg-theme-accent-light border-l-4 border-l-[rgb(var(--color-accent))]' 
-                      : 'hover:bg-theme-hover border-l-4 border-l-transparent'
-                  }`}
-                >
-                  <div className="flex items-start gap-3">
-                    <button
-                      onClick={() => {
-                        setSelectedItem(item.id)
-                        setSelectedHistoryItem(null)
-                        setMobileView('content')
-                        recordReadHistory(item)
-                      }}
-                      className="flex-1 text-left min-w-0"
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-xs">⭐</span>
-                        <span className="text-xs text-theme-tertiary truncate">
-                          {item.feedTitle || 'Unknown Feed'}
-                        </span>
-                      </div>
-                      <h3 className="text-sm font-medium text-theme-primary mb-1 line-clamp-2">
-                        {item.title}
-                      </h3>
-                      {item.snippet && (
-                        <p className="text-xs text-theme-secondary line-clamp-2">
-                          {item.snippet}
-                        </p>
-                      )}
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        handleToggleFavorite(item.id, true)
-                      }}
-                      className="opacity-0 group-hover:opacity-100 p-1.5 text-xs text-red-500 hover:bg-red-50 rounded-lg transition-all"
-                      title="Remove from favorites"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        )}
-
-        {/* Reading History */}
-        {sidebarView === 'history' && (
-          <div className="flex-1 overflow-y-auto themed-scrollbar flex flex-col">
-            <div className="p-4 border-b border-theme-primary flex-shrink-0">
-              <input
-                type="text"
-                value={historyQuery}
-                onChange={(e) => setHistoryQuery(e.target.value)}
-                placeholder="Search history..."
-                className="input-theme w-full text-sm"
-              />
-            </div>
-            {historyResults.length === 0 ? (
-              <div className="p-6 text-center">
-                <div className="text-4xl mb-3">📖</div>
-                <p className="text-sm text-theme-secondary">
-                  {historyQuery.trim() ? 'No matches found' : 'No reading history yet'}
-                </p>
-                <p className="text-xs text-theme-tertiary mt-1">Items you open are saved here for offline reading.</p>
-              </div>
-            ) : (
-              historyResults.map((record) => (
-                <button
-                  key={record.id}
-                  onClick={() => {
-                    setSelectedHistoryItem(record)
-                    setSelectedItem(null)
-                    setMobileView('content')
-                  }}
-                  className={`w-full px-4 py-3 text-left transition-all duration-150 ${
-                    selectedHistoryItem?.id === record.id
-                      ? 'bg-theme-accent-light border-l-4 border-l-[rgb(var(--color-accent))]'
-                      : 'hover:bg-theme-hover border-l-4 border-l-transparent'
-                  }`}
-                >
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-xs">📖</span>
-                    <span className="text-xs text-theme-tertiary truncate">
-                      {record.author || record.feedTitle || 'Unknown'}
-                    </span>
-                  </div>
-                  <h3 className="text-sm font-medium text-theme-primary mb-1 line-clamp-2">
-                    {record.title}
-                  </h3>
-                  <p className="text-xs text-theme-tertiary">
-                    {new Date(record.readAt).toLocaleString()}
-                  </p>
-                </button>
-              ))
-            )}
-          </div>
-        )}
-
-        {/* Footer */}
-        <div className="p-4 border-t border-theme-primary flex-shrink-0 space-y-2">
-          {user?.npub === env.NEXT_PUBLIC_ADMIN_NPUB && (
-            <button
-              onClick={() => router.push('/admin')}
-              className="w-full flex items-center gap-2 text-sm text-theme-secondary hover:text-theme-primary transition-colors"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-              </svg>
-              Admin Dashboard
-            </button>
-          )}
-          <button
-            onClick={handleSignOut}
-            className="w-full flex items-center gap-2 text-sm text-theme-secondary hover:text-theme-primary transition-colors"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-            </svg>
-            Sign Out
-          </button>
-        </div>
-      </div>
+      <ReaderSidebar
+        showSidebar={showSidebar}
+        onRefreshAllFeeds={handleRefreshAllFeeds}
+        isRefreshingAll={isRefreshingAll}
+        lastRefreshTime={lastRefreshTime}
+        setShowSettings={setShowSettings}
+        setShowAddFeed={setShowAddFeed}
+        user={user}
+        sidebarView={sidebarView}
+        setSidebarView={setSidebarView}
+        setSelectedTags={setSelectedTags}
+        selectedCategoryId={selectedCategoryId}
+        setSelectedCategoryId={setSelectedCategoryId}
+        onClearActiveView={clearActiveView}
+        organizationMode={organizationMode}
+        selectedTags={selectedTags}
+        onClearTags={handleClearTags}
+        onToggleTag={handleToggleTag}
+        allFeeds={allFeeds}
+        selectedFeed={selectedFeed}
+        setSelectedFeed={setSelectedFeed}
+        setShowSidebar={setShowSidebar}
+        openMenuFeedId={openMenuFeedId}
+        setOpenMenuFeedId={setOpenMenuFeedId}
+        showCategoryPicker={showCategoryPicker}
+        setShowCategoryPicker={setShowCategoryPicker}
+        onRefreshFeed={handleRefreshFeed}
+        refreshFeedLoading={refreshFeedMutation.isLoading}
+        refreshNostrFeedLoading={refreshNostrFeedMutation.isLoading}
+        onMarkAllAsRead={handleMarkAllAsRead}
+        markAllAsReadLoading={markAllAsReadMutation.isLoading}
+        categories={categories}
+        feeds={feeds}
+        onOpenEditMenu={handleOpenEditMenu}
+        onSetCategory={(feedId, categoryId) => updateCategoryMutation.mutate({ feedId, categoryId })}
+        onRemoveFeed={handleRemoveFeed}
+        categoriesWithUnread={categoriesWithUnread}
+        tagSortOrder={tagSortOrder}
+        setTagSortOrder={setTagSortOrder}
+        filteredTags={filteredTags}
+        favoritesLoading={favoritesLoading}
+        favoritesData={favoritesData}
+        selectedItem={selectedItem}
+        setSelectedItem={setSelectedItem}
+        setSelectedHistoryItem={setSelectedHistoryItem}
+        setMobileView={setMobileView}
+        onRecordReadHistory={recordReadHistory}
+        onToggleFavorite={handleToggleFavorite}
+        historyQuery={historyQuery}
+        setHistoryQuery={setHistoryQuery}
+        historyResults={historyResults}
+        selectedHistoryItem={selectedHistoryItem}
+        onNavigateAdmin={() => router.push('/admin')}
+        onSignOut={handleSignOut}
+      />
 
       {/* Center Panel - Article List */}
-      <div className={`
-        ${mobileView === 'content' && (selectedItem || selectedHistoryItem) ? 'hidden md:flex' : 'flex'}
-        w-full md:w-96 bg-theme-surface border-r border-theme-primary flex-col max-h-screen
-        pt-32 md:pt-0
-      `}>
-        <div className="p-5 border-b border-theme-primary flex-shrink-0">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="font-bold text-lg text-theme-primary">
-              {selectedFeed === 'all' ? 'All Items' :
-               allFeeds.find(f => f.id === selectedFeed)?.title || 'Select a feed'}
-            </h2>
-            
-            {/* View Options Dropdown */}
-            <div className="relative">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setShowViewOptions(!showViewOptions)
-                }}
-                className="p-2 hover:bg-theme-hover rounded-lg text-theme-secondary hover:text-theme-primary transition-colors"
-                title="View options"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
-                </svg>
-              </button>
-              
-              {/* Dropdown menu */}
-              {showViewOptions && (
-                <div className="absolute right-0 mt-2 w-48 dropdown-menu animate-slide-in">
-                  <div className="py-1">
-                    <div className="px-3 py-2 text-xs font-semibold text-theme-tertiary uppercase tracking-wider">Show</div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setViewFilter('all')
-                        setShowViewOptions(false)
-                        clearActiveView()
-                      }}
-                      className={`dropdown-item ${viewFilter === 'all' ? 'active' : ''}`}
-                    >
-                      {viewFilter === 'all' && '✓ '}All Items
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setViewFilter('unread')
-                        setShowViewOptions(false)
-                        clearActiveView()
-                      }}
-                      className={`dropdown-item ${viewFilter === 'unread' ? 'active' : ''}`}
-                    >
-                      {viewFilter === 'unread' && '✓ '}Unread Only
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setViewFilter('read')
-                        setShowViewOptions(false)
-                        clearActiveView()
-                      }}
-                      className={`dropdown-item ${viewFilter === 'read' ? 'active' : ''}`}
-                    >
-                      {viewFilter === 'read' && '✓ '}Read Only
-                    </button>
-                    
-                    <div className="border-t border-theme-primary mt-1 pt-1">
-                      <div className="px-3 py-2 text-xs font-semibold text-theme-tertiary uppercase tracking-wider">Sort</div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setSortOrder('newest')
-                          setShowViewOptions(false)
-                          clearActiveView()
-                        }}
-                        className={`dropdown-item ${sortOrder === 'newest' ? 'active' : ''}`}
-                      >
-                        {sortOrder === 'newest' && '✓ '}Newest First
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setSortOrder('oldest')
-                          setShowViewOptions(false)
-                          clearActiveView()
-                        }}
-                        className={`dropdown-item ${sortOrder === 'oldest' ? 'active' : ''}`}
-                      >
-                        {sortOrder === 'oldest' && '✓ '}Oldest First
-                      </button>
-                    </div>
-
-                    <div className="border-t border-theme-primary mt-1 pt-1">
-                      <div className="px-3 py-2 text-xs font-semibold text-theme-tertiary uppercase tracking-wider">Mark as read</div>
-                      {QUICK_MARK_READ_OPTIONS.map(option => (
-                        <button
-                          key={option.value}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleMarkReadBehaviorChange(option.value)
-                            setShowViewOptions(false)
-                          }}
-                          className={`dropdown-item ${markReadBehavior === option.value ? 'active' : ''}`}
-                        >
-                          <div className="flex flex-col text-left">
-                            <span>{markReadBehavior === option.value ? '✓ ' : ''}{option.label}</span>
-                            <span className="text-[11px] text-theme-tertiary">{option.helper}</span>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-          
-          <SavedViewsBar
-            views={views}
-            activeViewId={activeViewId}
-            onSelectCurrent={clearActiveView}
-            onSelectView={applyView}
-            onSaveCurrent={() => {
-              setNewViewName('')
-              setNewViewIcon('')
-              setShowSaveViewModal(true)
-            }}
-          />
-
-          <div className="mt-3 flex items-center gap-2 text-sm text-theme-secondary">
-            <span className="font-medium">{allFeedItems.filter(item => !item.isRead).length}</span>
-            <span>unread</span>
-            {viewFilter !== 'all' && (
-              <span className="px-2 py-0.5 text-xs rounded-full bg-theme-accent-light text-theme-accent font-medium">
-                {viewFilter === 'unread' ? 'Unread only' : 'Read only'}
-              </span>
-            )}
-          </div>
-        </div>
-
-        {hiddenByFilterCount > 0 && (
-          <div className="flex items-center justify-between gap-3 px-4 py-2 text-sm bg-theme-tertiary border-b border-theme-primary text-theme-secondary">
-            <span>{hiddenByFilterCount} hidden by filters</span>
-            <button
-              onClick={() => setShowHiddenByFilter(v => !v)}
-              className="flex-shrink-0 underline font-medium text-theme-accent"
-            >
-              {showHiddenByFilter ? 'Hide' : 'Show'}
-            </button>
-          </div>
-        )}
-
-        <div className="flex-1 overflow-y-auto themed-scrollbar">
-          {itemsLoading ? (
-            <div className="p-6 space-y-4">
-              {[1, 2, 3, 4].map(i => (
-                <div key={i} className="space-y-2 p-4 border-b border-theme-secondary">
-                  <div className="skeleton h-4 w-3/4" />
-                  <div className="skeleton h-3 w-1/2" />
-                  <div className="skeleton h-3 w-full" />
-                  <div className="skeleton h-3 w-2/3" />
-                </div>
-              ))}
-            </div>
-          ) : feedItems.length === 0 ? (
-            <div className="flex flex-col items-center justify-center p-8 text-center">
-              <div className="text-5xl mb-4">📭</div>
-              <p className="text-lg font-medium text-theme-primary mb-1">
-                {viewFilter === 'unread' && 'All caught up!'}
-                {viewFilter === 'read' && 'No read items'}
-                {viewFilter === 'all' && 'No items yet'}
-              </p>
-              <p className="text-sm text-theme-tertiary">
-                {viewFilter === 'unread' && 'No unread articles in this feed'}
-                {viewFilter === 'read' && 'You haven\'t read any articles yet'}
-                {viewFilter === 'all' && 'Subscribe to feeds to see content here'}
-              </p>
-            </div>
-          ) : (
-            feedItems.map((item: FeedItem) => {
-              const outcome = filterOutcomes.get(item.id)
-              return (
-              <div
-                key={item.id}
-                className={`article-card relative group ${
-                  selectedItem === item.id ? 'active' : ''
-                } ${item.isRead ? 'read' : ''}`}
-                style={{
-                  ...(outcome?.highlight ? { boxShadow: `inset 3px 0 0 ${outcome.highlight}` } : {}),
-                  ...(outcome?.hidden ? { opacity: 0.4 } : {}),
-                }}
-              >
-                <button
-                  onClick={() => {
-                    handleItemClick(item.id)
-                    setMobileView('content')
-                  }}
-                  className="w-full pr-12 text-left"
-                >
-                  <div className="space-y-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <h3 className={`text-sm font-semibold leading-snug ${
-                        item.isRead ? 'text-theme-secondary' : 'text-theme-primary'
-                      }`}>
-                        {item.title}
-                      </h3>
-                      {!item.isRead && (
-                        <div className="w-2 h-2 rounded-full bg-theme-accent flex-shrink-0 mt-1.5" />
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 text-xs text-theme-tertiary">
-                      <AuthorByline
-                        author={item.author}
-                        feedType={item.feedType}
-                        feedTitle={item.feedTitle}
-                        className="font-medium"
-                      />
-                      <span>•</span>
-                      <span>{item.publishedAt.toLocaleDateString()}</span>
-                    </div>
-                    <p className="text-xs text-theme-secondary line-clamp-2 leading-relaxed">
-                      {item.content.replace(/<[^>]*>/g, '').substring(0, 140)}...
-                    </p>
-                    <div className="flex items-center gap-2 pt-1">
-                      <span className="tag-badge">
-                        {item.feedTitle}
-                      </span>
-                    </div>
-                  </div>
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    handleToggleFavorite(item.id, item.isFavorited || false)
-                  }}
-                  className="absolute top-4 right-4 p-2 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-theme-hover transition-all"
-                  title={item.isFavorited ? 'Remove from favorites' : 'Add to favorites'}
-                >
-                  <span className="text-xl">
-                    {item.isFavorited ? '⭐' : '☆'}
-                  </span>
-                </button>
-              </div>
-              )
-            })
-          )}
-        </div>
-      </div>
+      <ItemList
+        mobileView={mobileView}
+        selectedItem={selectedItem}
+        selectedHistoryItem={selectedHistoryItem}
+        selectedFeed={selectedFeed}
+        allFeeds={allFeeds}
+        showViewOptions={showViewOptions}
+        setShowViewOptions={setShowViewOptions}
+        viewFilter={viewFilter}
+        setViewFilter={setViewFilter}
+        sortOrder={sortOrder}
+        setSortOrder={setSortOrder}
+        markReadBehavior={markReadBehavior}
+        onMarkReadBehaviorChange={handleMarkReadBehaviorChange}
+        quickMarkReadOptions={QUICK_MARK_READ_OPTIONS}
+        onClearActiveView={clearActiveView}
+        views={views}
+        activeViewId={activeViewId}
+        onApplyView={applyView}
+        onSaveCurrent={() => {
+          setNewViewName('')
+          setNewViewIcon('')
+          setShowSaveViewModal(true)
+        }}
+        allFeedItems={allFeedItems}
+        hiddenByFilterCount={hiddenByFilterCount}
+        showHiddenByFilter={showHiddenByFilter}
+        setShowHiddenByFilter={setShowHiddenByFilter}
+        itemsLoading={itemsLoading}
+        feedItems={feedItems}
+        filterOutcomes={filterOutcomes}
+        onItemClick={handleItemClick}
+        setMobileView={setMobileView}
+        onToggleFavorite={handleToggleFavorite}
+      />
 
       {/* Right Panel - Article Content */}
-      <div className={`
-        ${mobileView === 'list' && (selectedItem || selectedHistoryItem) ? 'hidden md:flex' : 'flex'}
-        flex-1 bg-theme-secondary flex-col max-h-screen
-        pt-32 md:pt-0
-      `}>
-        {/* Mobile Back Button */}
-        {(selectedItem || selectedHistoryItem) && (
-          <button
-            onClick={() => setMobileView('list')}
-            className="md:hidden fixed top-20 left-4 z-50 p-2.5 bg-theme-surface rounded-full shadow-theme-lg border border-theme-primary"
-          >
-            <svg className="w-5 h-5 text-theme-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </button>
-        )}
-
-        {selectedHistoryItem ? (
-          <>
-            <div className="bg-theme-surface-raised p-6 md:p-8 border-b border-theme-primary flex-shrink-0 shadow-theme-sm">
-              <div className="mx-auto" style={{ maxWidth: 'var(--reading-measure)' }}>
-                <h1 className="text-2xl md:text-3xl font-bold text-theme-primary leading-tight mb-4" style={{ fontFamily: 'var(--heading-font)' }}>
-                  {selectedHistoryItem.title}
-                </h1>
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-theme-secondary">
-                  <span className="font-medium">{selectedHistoryItem.author || selectedHistoryItem.feedTitle}</span>
-                  <span className="text-theme-muted">•</span>
-                  <span className="tag-badge">{selectedHistoryItem.feedTitle}</span>
-                  <span className="text-theme-muted">•</span>
-                  <span>Read {new Date(selectedHistoryItem.readAt).toLocaleString()}</span>
-                  {selectedHistoryItem.url && (
-                    <>
-                      <span className="text-theme-muted">•</span>
-                      <a
-                        href={safeExternalUrl(selectedHistoryItem.url) ?? '#'}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-theme-accent hover:underline"
-                      >
-                        View Original
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                        </svg>
-                      </a>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-            <div className="flex-1 overflow-y-auto themed-scrollbar">
-              <div className="mx-auto p-6 md:p-8" style={{ maxWidth: 'var(--reading-measure)' }}>
-                <article className="article-content-inner p-6 md:p-10 rounded-xl">
-                  <p className="prose-theme whitespace-pre-wrap">{selectedHistoryItem.content}</p>
-                </article>
-              </div>
-            </div>
-          </>
-        ) : selectedItemData ? (
-          <>
-            <div className="bg-theme-surface-raised p-6 md:p-8 border-b border-theme-primary flex-shrink-0 shadow-theme-sm">
-              <div className="mx-auto" style={{ maxWidth: 'var(--reading-measure)' }}>
-                <div className="flex items-start justify-between gap-4 mb-4">
-                  <h1 className="text-2xl md:text-3xl font-bold text-theme-primary leading-tight" style={{ fontFamily: 'var(--heading-font)' }}>
-                    {selectedItemData.title}
-                  </h1>
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    <button
-                      onClick={() => handleToggleReadStatus(selectedItemData)}
-                      className="btn-theme-secondary text-sm hidden sm:flex items-center gap-2"
-                    >
-                      {selectedItemData.isRead ? (
-                        <>
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 19v-8.93a2 2 0 01.89-1.664l7-4.666a2 2 0 012.22 0l7 4.666A2 2 0 0121 10.07V19M3 19a2 2 0 002 2h14a2 2 0 002-2M3 19l6.75-4.5M21 19l-6.75-4.5M3 10l6.75 4.5M21 10l-6.75 4.5m0 0l-1.14.76a2 2 0 01-2.22 0l-1.14-.76" />
-                          </svg>
-                          <span>Mark Unread</span>
-                        </>
-                      ) : (
-                        <>
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                          </svg>
-                          <span>Mark Read</span>
-                        </>
-                      )}
-                    </button>
-                    <button
-                      onClick={() => handleShareToNostr(selectedItemData, selectedItemOriginalUrl)}
-                      disabled={isSharing}
-                      className="p-2.5 hover:bg-theme-hover rounded-lg transition-colors"
-                      title="Share to Nostr"
-                    >
-                      {isSharing ? (
-                        <svg className="w-5 h-5 text-theme-tertiary animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                        </svg>
-                      ) : shareSuccess ? (
-                        <svg className="w-5 h-5 text-theme-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                        </svg>
-                      ) : (
-                        <svg className="w-5 h-5 text-theme-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
-                        </svg>
-                      )}
-                    </button>
-                    <button
-                      onClick={() => handleToggleFavorite(selectedItemData.id, selectedItemData.isFavorited || false)}
-                      className="p-2.5 hover:bg-theme-hover rounded-lg transition-colors"
-                      title={selectedItemData.isFavorited ? 'Remove from favorites' : 'Add to favorites'}
-                    >
-                      <span className="text-2xl">
-                        {selectedItemData.isFavorited ? '⭐' : '☆'}
-                      </span>
-                    </button>
-                    {aiEnabled && (
-                      <button
-                        onClick={() => setShowAiPanel((v) => !v)}
-                        className={`p-2.5 rounded-lg transition-colors ${showAiPanel ? 'bg-theme-accent-light text-theme-accent' : 'hover:bg-theme-hover text-theme-secondary'}`}
-                        title={showAiPanel ? 'Hide AI summary' : 'AI summary'}
-                      >
-                        <span className="text-xl">✨</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-theme-secondary">
-                  <AuthorByline
-                    author={selectedItemData.author}
-                    feedType={selectedItemData.feedType}
-                    feedTitle={selectedItemData.feedTitle}
-                    className="font-medium"
-                  />
-                  <span className="text-theme-muted">•</span>
-                  <span>{selectedItemData.publishedAt.toLocaleDateString('en-US', { 
-                    weekday: 'long', 
-                    year: 'numeric', 
-                    month: 'long', 
-                    day: 'numeric' 
-                  })}</span>
-                  <span className="text-theme-muted">•</span>
-                  <span className="tag-badge">{selectedItemData.feedTitle}</span>
-                  {selectedItemOriginalUrl && (
-                    <>
-                      <span className="text-theme-muted">•</span>
-                      <a
-                        href={safeExternalUrl(selectedItemOriginalUrl) ?? '#'}
-                        target="_blank"
-                        rel="noopener noreferrer" 
-                        className="inline-flex items-center gap-1 text-theme-accent hover:underline"
-                      >
-                        {selectedItemData.feedType === 'NOSTR' || selectedItemData.feedType === 'NOSTR_VIDEO' ? 'View on Nostr' : 'View Original'}
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                        </svg>
-                      </a>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-            <div className="flex-1 overflow-y-auto themed-scrollbar">
-              <div className="mx-auto p-6 md:p-8" style={{ maxWidth: 'var(--reading-measure)' }}>
-                {aiEnabled && showAiPanel && (
-                  <AiSummaryPanel
-                    key={selectedItemData.guid ?? selectedItemData.id}
-                    articleKey={selectedItemData.guid ?? selectedItemData.id}
-                    title={selectedItemData.title}
-                    text={selectedItemData.content.replace(/<[^>]*>/g, '')}
-                    feedTitle={selectedItemData.feedTitle}
-                    config={aiConfig}
-                  />
-                )}
-                <article className="article-content-inner p-6 md:p-10 rounded-xl">
-                  <FormattedContent 
-                    content={selectedItemData.content}
-                    embedUrl={selectedItemData.embedUrl ?? undefined}
-                    thumbnail={selectedItemData.thumbnail ?? undefined}
-                    title={selectedItemData.title}
-                    className="prose-theme"
-                  />
-                </article>
-              </div>
-            </div>
-          </>
-        ) : (
-          <div className="flex-1 flex items-center justify-center">
-            <div className="text-center">
-              <div className="text-6xl mb-4 opacity-50">📖</div>
-              <p className="text-xl font-medium text-theme-secondary mb-2">Select an article to read</p>
-              <p className="text-sm text-theme-tertiary">Choose from the list on the left</p>
-            </div>
-          </div>
-        )}
-      </div>
+      <ArticlePane
+        mobileView={mobileView}
+        selectedItem={selectedItem}
+        selectedHistoryItem={selectedHistoryItem}
+        selectedItemData={selectedItemData}
+        selectedItemOriginalUrl={selectedItemOriginalUrl}
+        setMobileView={setMobileView}
+        onToggleReadStatus={handleToggleReadStatus}
+        onShareToNostr={handleShareToNostr}
+        isSharing={isSharing}
+        shareSuccess={shareSuccess}
+        onToggleFavorite={handleToggleFavorite}
+        aiEnabled={aiEnabled}
+        showAiPanel={showAiPanel}
+        setShowAiPanel={setShowAiPanel}
+        aiConfig={aiConfig}
+      />
 
       {/* Enhanced Add Feed Modal */}
       <AddFeedModal
