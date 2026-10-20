@@ -12,18 +12,19 @@ import { type UnsignedEvent, type Event as NostrEvent } from 'nostr-tools'
 
 export const api = createTRPCReact<AppRouter>()
 
-async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input)
-  const digest = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(digest))
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
     .map(b => b.toString(16).padStart(2, '0'))
     .join('')
 }
 
+async function sha256Hex(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input)
+  return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', data)))
+}
+
 function randomHex(bytes: number): string {
-  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)))
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('')
+  return toHex(crypto.getRandomValues(new Uint8Array(bytes)))
 }
 
 // Current signer, kept in a module-scoped ref so the per-request fetch wrapper
