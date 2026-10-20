@@ -612,7 +612,8 @@ let refreshInFlight: Promise<RefreshResult> | null = null;
 
 function refreshFeeds(forceSync = false): Promise<RefreshResult> {
   if (refreshInFlight && !forceSync) return refreshInFlight;
-  const run = (refreshInFlight ?? Promise.resolve()).then(() => runRefreshFeeds(forceSync));
+  const start = () => runRefreshFeeds(forceSync);
+  const run = (refreshInFlight ?? Promise.resolve()).then(start, start);
   const tracked = run.finally(() => {
     if (refreshInFlight === tracked) refreshInFlight = null;
   });
