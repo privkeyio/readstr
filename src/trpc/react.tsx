@@ -117,11 +117,12 @@ export function TRPCReactProvider(props: {
                   method,
                   async e => {
                     const event = e as unknown as UnsignedEvent
-                    // The event id hashes only pubkey, created_at (seconds) and
-                    // tags, so two identical requests in the same second (two
-                    // tabs, two devices, a duplicated query) would share an id
-                    // and the server's single-use check would reject all but the
-                    // first as a replay. A random nonce keeps every id unique.
+                    // The event id hashes only pubkey, created_at (seconds),
+                    // kind, tags and content, so two identical requests in the
+                    // same second (two tabs, two devices, a duplicated query)
+                    // would share an id and the server's single-use check would
+                    // reject all but the first as a replay. A random nonce keeps
+                    // every id unique.
                     event.tags = [...event.tags, ['nonce', randomHex(16)]]
                     if (payloadHash) {
                       event.tags = [...event.tags, ['payload', payloadHash]]
