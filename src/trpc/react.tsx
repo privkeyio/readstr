@@ -20,6 +20,12 @@ async function sha256Hex(input: string): Promise<string> {
     .join('')
 }
 
+function randomHex(bytes: number): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
 // Current signer, kept in a module-scoped ref so the per-request fetch wrapper
 // (created once when the client is built) always sees the latest auth state.
 // `sign` is null when the user can't sign (e.g. read-only npub view),
@@ -111,6 +117,12 @@ export function TRPCReactProvider(props: {
                   method,
                   async e => {
                     const event = e as unknown as UnsignedEvent
+                    // The event id hashes only pubkey, created_at (seconds) and
+                    // tags, so two identical requests in the same second (two
+                    // tabs, two devices, a duplicated query) would share an id
+                    // and the server's single-use check would reject all but the
+                    // first as a replay. A random nonce keeps every id unique.
+                    event.tags = [...event.tags, ['nonce', randomHex(16)]]
                     if (payloadHash) {
                       event.tags = [...event.tags, ['payload', payloadHash]]
                     }
