@@ -602,7 +602,25 @@ async function tryRestoreAuthFromOpenTabs(): Promise<boolean> {
   return false;
 }
 
-async function refreshFeeds(forceSync = false): Promise<{ newItemCount: number; error?: string }> {
+type RefreshResult = { newItemCount: number; error?: string };
+
+// An alarm wakes the service worker, so the onAlarm listener and the top-level
+// overdue check both start a refresh in the same second. Concurrent refreshes
+// sign identical NIP-98 events, and the server rejects the duplicates as
+// replays. Share the in-flight refresh instead; a forced one waits its turn.
+let refreshInFlight: Promise<RefreshResult> | null = null;
+
+function refreshFeeds(forceSync = false): Promise<RefreshResult> {
+  if (refreshInFlight && !forceSync) return refreshInFlight;
+  const run = (refreshInFlight ?? Promise.resolve()).then(() => runRefreshFeeds(forceSync));
+  const tracked = run.finally(() => {
+    if (refreshInFlight === tracked) refreshInFlight = null;
+  });
+  refreshInFlight = tracked;
+  return tracked;
+}
+
+async function runRefreshFeeds(forceSync: boolean): Promise<RefreshResult> {
   const storage = await getStorageData();
   const { settings, authToken, seenItemIds, nostrAuth } = storage;
 
