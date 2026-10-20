@@ -604,21 +604,35 @@ async function tryRestoreAuthFromOpenTabs(): Promise<boolean> {
 
 type RefreshResult = { newItemCount: number; error?: string };
 
-// An alarm wakes the service worker, so the onAlarm listener and the top-level
-// overdue check both start a refresh in the same second. Concurrent refreshes
-// sign identical NIP-98 events, and the server rejects the duplicates as
-// replays. Share the in-flight refresh instead; a forced one waits its turn.
+// Refreshes run one at a time. A call made while one runs queues a single
+// trailing refresh, shared by every caller until it starts, so it sees state
+// changed after the running one began.
 let refreshInFlight: Promise<RefreshResult> | null = null;
+let refreshQueued: Promise<RefreshResult> | null = null;
+let queuedForceSync = false;
 
 function refreshFeeds(forceSync = false): Promise<RefreshResult> {
-  if (refreshInFlight && !forceSync) return refreshInFlight;
-  const start = () => runRefreshFeeds(forceSync);
+  queuedForceSync ||= forceSync;
+  if (refreshQueued) return refreshQueued;
+  const start = () => {
+    refreshQueued = null;
+    const force = queuedForceSync;
+    queuedForceSync = false;
+    return runRefreshFeeds(force);
+  };
   const run = (refreshInFlight ?? Promise.resolve()).then(start, start);
   const tracked = run.finally(() => {
     if (refreshInFlight === tracked) refreshInFlight = null;
   });
-  refreshInFlight = tracked;
+  refreshInFlight = refreshQueued = tracked;
   return tracked;
+}
+
+// An alarm wakes the service worker, so the onAlarm listener and the wake-time
+// overdue check both fire in the same second. Share any pending refresh rather
+// than doing the same work twice.
+function coalesceRefreshFeeds(): Promise<RefreshResult> {
+  return refreshInFlight ?? refreshFeeds();
 }
 
 async function runRefreshFeeds(forceSync: boolean): Promise<RefreshResult> {
@@ -1363,7 +1377,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_NAME) {
-    void refreshFeeds();
+    void coalesceRefreshFeeds();
   }
 });
 
@@ -1474,6 +1488,6 @@ void (async () => {
   const totalUnread = storage.feeds.reduce((sum, feed) => sum + feed.unreadCount, 0);
   updateBadge(totalUnread);
   if (await isSyncOverdue()) {
-    void refreshFeeds();
+    void coalesceRefreshFeeds();
   }
 })();
