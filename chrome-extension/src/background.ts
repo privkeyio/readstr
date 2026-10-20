@@ -795,8 +795,8 @@ async function handleMessage(
 
     case 'SET_AUTH_TOKEN': {
       const token = message['token'] as string;
+      // The storage.onChanged authToken listener refreshes on a new token.
       await saveStorageData({ authToken: token });
-      void refreshFeeds();
       return { success: true };
     }
 
