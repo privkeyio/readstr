@@ -12,12 +12,19 @@ import { type UnsignedEvent, type Event as NostrEvent } from 'nostr-tools'
 
 export const api = createTRPCReact<AppRouter>()
 
-async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input)
-  const digest = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(digest))
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
     .map(b => b.toString(16).padStart(2, '0'))
     .join('')
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input)
+  return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', data)))
+}
+
+function randomHex(bytes: number): string {
+  return toHex(crypto.getRandomValues(new Uint8Array(bytes)))
 }
 
 // Current signer, kept in a module-scoped ref so the per-request fetch wrapper
@@ -111,6 +118,13 @@ export function TRPCReactProvider(props: {
                   method,
                   async e => {
                     const event = e as unknown as UnsignedEvent
+                    // The event id hashes only pubkey, created_at (seconds),
+                    // kind, tags and content, so two identical requests in the
+                    // same second (two tabs, two devices, a duplicated query)
+                    // would share an id and the server's single-use check would
+                    // reject all but the first as a replay. A random nonce keeps
+                    // every id unique.
+                    event.tags = [...event.tags, ['nonce', randomHex(16)]]
                     if (payloadHash) {
                       event.tags = [...event.tags, ['payload', payloadHash]]
                     }

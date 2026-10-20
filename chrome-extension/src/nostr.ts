@@ -1,5 +1,5 @@
 import { sha256 } from '@noble/hashes/sha256';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
+import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
 import * as secp256k1 from '@noble/secp256k1';
 import { schnorr } from '@noble/curves/secp256k1';
 import { bech32 } from '@scure/base';
@@ -106,6 +106,11 @@ export function buildUnsignedNip98Event(
   const tags: string[][] = [
     ['u', url],
     ['method', method.toUpperCase()],
+    // The event id covers only pubkey, created_at (seconds), kind, tags and
+    // content, so identical requests in the same second would share an id and
+    // the server would reject all but the first as a replay. A random nonce
+    // keeps every id unique.
+    ['nonce', bytesToHex(randomBytes(16))],
   ];
 
   // Bind the request body into the signature via the NIP-98 `payload` tag so a

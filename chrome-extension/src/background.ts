@@ -602,7 +602,40 @@ async function tryRestoreAuthFromOpenTabs(): Promise<boolean> {
   return false;
 }
 
-async function refreshFeeds(forceSync = false): Promise<{ newItemCount: number; error?: string }> {
+type RefreshResult = { newItemCount: number; error?: string };
+
+// Refreshes run one at a time. A call made while one runs queues a single
+// trailing refresh, shared by every caller until it starts, so it sees state
+// changed after the running one began.
+let refreshInFlight: Promise<RefreshResult> | null = null;
+let refreshQueued: Promise<RefreshResult> | null = null;
+let queuedForceSync = false;
+
+function refreshFeeds(forceSync = false): Promise<RefreshResult> {
+  queuedForceSync ||= forceSync;
+  if (refreshQueued) return refreshQueued;
+  const start = () => {
+    refreshQueued = null;
+    const force = queuedForceSync;
+    queuedForceSync = false;
+    return runRefreshFeeds(force);
+  };
+  const run = (refreshInFlight ?? Promise.resolve()).then(start, start);
+  const tracked = run.finally(() => {
+    if (refreshInFlight === tracked) refreshInFlight = null;
+  });
+  refreshInFlight = refreshQueued = tracked;
+  return tracked;
+}
+
+// An alarm wakes the service worker, so the onAlarm listener and the wake-time
+// overdue check both fire in the same second. Share any pending refresh rather
+// than doing the same work twice.
+function coalesceRefreshFeeds(): Promise<RefreshResult> {
+  return refreshInFlight ?? refreshFeeds();
+}
+
+async function runRefreshFeeds(forceSync: boolean): Promise<RefreshResult> {
   const storage = await getStorageData();
   const { settings, authToken, seenItemIds, nostrAuth } = storage;
 
@@ -762,8 +795,8 @@ async function handleMessage(
 
     case 'SET_AUTH_TOKEN': {
       const token = message['token'] as string;
+      // The storage.onChanged authToken listener refreshes on a new token.
       await saveStorageData({ authToken: token });
-      void refreshFeeds();
       return { success: true };
     }
 
@@ -1344,7 +1377,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_NAME) {
-    void refreshFeeds();
+    void coalesceRefreshFeeds();
   }
 });
 
@@ -1455,6 +1488,6 @@ void (async () => {
   const totalUnread = storage.feeds.reduce((sum, feed) => sum + feed.unreadCount, 0);
   updateBadge(totalUnread);
   if (await isSyncOverdue()) {
-    void refreshFeeds();
+    void coalesceRefreshFeeds();
   }
 })();
