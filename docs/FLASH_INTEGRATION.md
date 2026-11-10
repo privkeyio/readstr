@@ -1,170 +1,105 @@
-# PayWithFlash Integration
+# Flash Integration
 
-Readstr uses [PayWithFlash](https://paywithflash.com) for Bitcoin Lightning subscription payments.
+Readstr uses [Flash](https://flashpay-1.gitbook.io/flash-documentation/subscriptions) for
+Bitcoin Lightning subscriptions. The paywall (`SubscriptionGate`) is currently **disabled**,
+so the web app is free. This describes how payments work when it is switched on.
 
 ## Setup
 
-### 1. Create a Subscription Plan on Flash
+### 1. Service and plan
 
-1. Go to [Flash Dashboard](https://app.paywithflash.com)
-2. Navigate to **New Subs > Create a Subscription Plan**
-3. Configure your plan:
-   - **Name**: Readstr Reader
-   - **Price**: 1750 sats
-   - **Billing Period**: Monthly
-   - **Trial Period**: 7 days
+In the Flash dashboard, open **Subscriptions** and add a service ("Readstr Reader") with
+these settings:
 
-### 2. Configure Webhook
+- **Dunning:** 3 attempts, every 3 days, 7-day grace, cancel after the final failure.
+  The server's `GRACE_DAYS` matches this.
+- **Cancellation:** at the end of the current period.
 
-1. Click **"Use Advanced Webhook Features"** checkbox
-2. Set **Webhook URL**: `https://readstr.privkey.io/api/webhooks/flash`
-3. Save and copy your **Subscription Key** (you'll need this for JWT verification)
-4. Copy your **Checkout Page URL**
+Then add a plan to the service:
 
-### 3. Set Environment Variables
+- **Price:** 1750 sats per month.
+- **Trial days:** 0. Readstr gives its own 7-day trial before checkout.
+- **Payment method:** the Lightning wallet.
 
-Add to your `.env.production` file:
+Copy the plan's **signup URL**.
+
+### 2. Webhook endpoint
+
+Under **Settings → API & Webhooks → Webhooks**, add an endpoint:
+
+- **URL:** `https://readstr.privkey.io/api/webhooks/flash`
+- **Events:** Subscription Activated, Renewed, Canceled, Expired, Past Due
+
+Copy the endpoint's **signing secret** (`whsec_...`).
+
+### 3. Environment (`.env.production`, read at runtime)
 
 ```bash
-# Flash Configuration
-NEXT_PUBLIC_FLASH_CHECKOUT_URL="https://app.paywithflash.com/subscription-page?flashId=3238"
-FLASH_SUBSCRIPTION_KEY="<subscription key from the Flash dashboard>"
+FLASH_CHECKOUT_URL="https://.../subscriptions/signup/<serviceId>/<planId>"
+FLASH_WEBHOOK_SECRET="<signing secret from the Flash dashboard>"
 ```
 
-**Note**: The checkout URL is public. `FLASH_SUBSCRIPTION_KEY` is a secret, because
-it is the HS256 key that verifies webhook JWTs, and anyone holding it can mint a
-valid "user signed up" event. Keep it only in the server's environment (never in
-docs, `docker-compose.yml`, or git), and rotate it in the Flash dashboard if it
-is ever exposed.
+`FLASH_CHECKOUT_URL` is public. `FLASH_WEBHOOK_SECRET` is a secret: anyone holding it
+can forge webhooks. Keep it only in the server's environment, never in docs, compose
+files or git, and roll it in Flash if it is ever exposed.
 
-> **Security notice**: A real `FLASH_SUBSCRIPTION_KEY` was previously published in
-> this repo (this doc and `docker-compose.yml`) and remains in git history, so treat
-> it as compromised. Anyone holding it can forge valid webhooks and grant
-> subscriptions to arbitrary npubs. Stop trusting it: if you control the Flash
-> account that issued it, rotate the key in its dashboard; either way, replace or
-> remove `FLASH_SUBSCRIPTION_KEY` in the server environment and redeploy. Then check
-> every environment's `.env.production` / secrets against the Flash dashboard to
-> confirm none still uses the old key (never paste the value anywhere).
+> **Security notice**: the legacy `FLASH_SUBSCRIPTION_KEY` (the old JWT scheme) was
+> published in this repo and remains in git history, so treat it as compromised.
+> The server no longer reads it. Remove it from every environment's
+> `.env.production` and secrets, and if you control the old Flash account that
+> issued it, revoke it there.
 
-## How It Works
+## How it works
 
-### Payment Flow
+1. **Checkout.** `subscription.createCheckoutSession` returns the signup URL with
+   `?ref=<hex pubkey>` for the NIP-98-authenticated user. Flash stores `ref` as the
+   subscription's `externalRef` and echoes it in every webhook. If the call fails, the
+   paywall shows an error rather than falling back to the bare URL, because a payment
+   without `ref` can't be linked to an account.
+2. **Webhook verification** (`src/server/auth/flash-webhook.ts`). The verifier checks
+   `Flash-Signature: t=<unix>,v1=<hex>` as an HMAC-SHA256 of `"<t>.<raw body>"` with
+   `FLASH_WEBHOOK_SECRET`, using a constant-time comparison. It rejects timestamps more
+   than 5 minutes off (replay). The signature covers the whole body, so `externalRef`
+   is trusted once it verifies.
+3. **Applying events** (`src/app/api/webhooks/flash/route.ts`). Each event sets an
+   absolute state, so duplicate deliveries are harmless. A delivery older than the
+   row's `flashEventAt` is skipped, which handles out-of-order arrival.
 
-1. **User subscribes**: User clicks "Subscribe" button → tRPC creates checkout URL with pre-filled npub
-2. **Pre-filled form**: Flash checkout page auto-fills user's Nostr npub (no manual entry needed)
-3. **Payment completed**: Flash sends webhook to `/api/webhooks/flash`
-4. **Webhook verified**: JWT token is verified using `FLASH_SUBSCRIPTION_KEY`
-5. **Subscription activated**: User record created/updated in database with 30-day access
+| Flash event | Row change | Access |
+|---|---|---|
+| `subscription.activated` | `ACTIVE`, paid until `activatedAt` + 30 days | Paid period + 7-day grace |
+| `subscription.renewed` | `ACTIVE`, paid until `paidAt` + 30 days | Paid period + 7-day grace |
+| `subscription.past_due` | `PAST_DUE`, period unchanged | Paid period + 7-day grace (Flash retries) |
+| `subscription.canceled` | `CANCELLED`, ends at `canceledAt` | Ends immediately (immediate cancel or dunning exhausted) |
+| `subscription.expired` | `EXPIRED` | None (end-of-period cancellation reached its date) |
 
-### Pre-Filled User Details
+Other signed events are acknowledged and ignored. Events without a usable `externalRef`
+are acknowledged and logged with their `subscriptionId` for manual linking.
 
-When authenticated users click subscribe, their Nostr npub is automatically passed to Flash using Base64-encoded JSON:
+4. **Access** (`accessFor` in `src/lib/subscription.ts`). The first time `getStatus`
+   sees a user, it saves a `TRIAL` row ending 7 days later. Access is then decided only
+   from the stored row.
 
-```javascript
-{
-  "npub": "npub1...",
-  "external_uuid": "npub1...",  // Same as npub for user mapping
-  "is_verified": true            // Skip verification (already logged in)
-}
-```
+## Delivery caveats
 
-This saves users from manually entering their npub and ensures the webhook links to the correct account.
-
-### Webhook Events
-
-Flash sends the following events:
-
-- `user_signed_up`: New subscription created → Status: ACTIVE
-- `renewal_successful`: Monthly renewal succeeded → Extend 30 days
-- `renewal_failed`: Payment failed → Status: PAST_DUE
-- `user_paused_subscription`: User paused → Status: CANCELLED
-- `user_cancelled_subscription`: User cancelled → Status: CANCELLED
-
-### Security
-
-- All webhooks include a JWT token in the `Authorization` header
-- Token is verified using HS256 algorithm with your subscription key
-- Tokens expire after 1 hour
-- Invalid tokens are rejected with 401 status
+Flash retries a failed delivery 3 times (1 s, 2 s, 4 s apart) and then drops it. There
+is no replay. The grace window keeps a paying user's access if a `renewed` delivery is
+lost. `flashSubscriptionId` is stored so rows can be reconciled against Flash's API
+(`GET /api/v1/external/subscriptions/{id}/verify`). That reconciliation is not built yet.
 
 ## Testing
 
-### Test Webhook Locally
+`npx vitest run src/server/auth/flash-webhook.test.ts src/lib/subscription.test.ts` covers
+signatures, the replay window, secret rotation, event mapping and access rules.
 
-1. Use ngrok to expose your local server:
-   ```bash
-   ngrok http 3000
-   ```
-
-2. Update Flash webhook URL to: `https://your-ngrok-url.ngrok.io/api/webhooks/flash`
-
-3. Make a test payment on Flash checkout page
-
-4. Check your server logs for webhook processing
-
-### Manual Webhook Testing
+To send a signed delivery by hand (substitute your own secret and pubkey):
 
 ```bash
-# Get a valid JWT token from Flash (check their test tools)
-curl -X POST https://readstr.privkey.io/api/webhooks/flash \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "eventType": {"id": "1", "name": "user_signed_up"},
-    "data": {
-      "npub": "npub1test...",
-      "email": "test@example.com"
-    }
-  }'
+BODY='{"event":"subscription.activated","timestamp":"2026-11-10T12:00:00.000Z","data":{"accountId":"a","subscriptionId":"s1","externalRef":"<hex pubkey>"}}'
+T=$(date +%s)
+SIG=$(printf '%s.%s' "$T" "$BODY" | openssl dgst -sha256 -hmac "$FLASH_WEBHOOK_SECRET" -hex | sed 's/^.* //')
+curl -X POST http://localhost:3000/api/webhooks/flash \
+  -H 'Content-Type: application/json' \
+  -H "Flash-Signature: t=$T,v1=$SIG" \
+  --data "$BODY"
 ```
-
-## Database Schema
-
-Subscriptions are stored in the `UserSubscription` table:
-
-```prisma
-model UserSubscription {
-  userPubkey         String   @unique // Nostr npub or external_uuid
-  status             SubscriptionStatus
-  trialEndsAt        DateTime
-  subscriptionEndsAt DateTime?
-  cancelledAt        DateTime?
-  ...
-}
-```
-
-### Subscription Statuses
-
-- `TRIAL`: In 7-day free trial (not used with Flash, goes directly to ACTIVE)
-- `ACTIVE`: Paid and active subscription
-- `PAST_DUE`: Payment failed, grace period
-- `CANCELLED`: User cancelled, valid until end date
-- `EXPIRED`: Subscription expired
-
-## Troubleshooting
-
-### Webhooks not received
-
-1. Check Flash dashboard for webhook delivery logs
-2. Verify webhook URL is accessible publicly (use curl)
-3. Check server logs for errors
-4. Ensure HTTPS is enabled (Flash requires HTTPS)
-
-### JWT verification fails
-
-1. Verify `FLASH_SUBSCRIPTION_KEY` matches the key in Flash dashboard
-2. Check token hasn't expired (1 hour validity)
-3. Ensure secret key has no extra whitespace
-
-### User not getting access
-
-1. Check if webhook was received (server logs)
-2. Verify user identifier (npub/external_uuid) is correct
-3. Check database for UserSubscription record
-4. Verify subscription status is ACTIVE
-
-## Documentation
-
-- [Flash Documentation](https://docs.paywithflash.com/)
-- [Subscription API](https://docs.paywithflash.com/products/editor)
-- [Webhooks](https://docs.paywithflash.com/products/editor/webhooks)
