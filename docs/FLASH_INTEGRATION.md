@@ -43,6 +43,12 @@ FLASH_WEBHOOK_SECRET="<signing secret from the Flash dashboard>"
 can forge webhooks. Keep it only in the server's environment, never in docs, compose
 files or git, and roll it in Flash if it is ever exposed.
 
+> **Security notice**: the legacy `FLASH_SUBSCRIPTION_KEY` (the old JWT scheme) was
+> published in this repo and remains in git history, so treat it as compromised.
+> The server no longer reads it. Remove it from every environment's
+> `.env.production` and secrets, and if you control the old Flash account that
+> issued it, revoke it there.
+
 ## How it works
 
 1. **Checkout.** `subscription.createCheckoutSession` returns the signup URL with
