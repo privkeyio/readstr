@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
 import { changeFor, verifyFlashWebhook } from '@/server/auth/flash-webhook'
+import { readBodyWithLimit } from '@/server/http/read-body'
+
+/** Flash's subscription events are well under 10 KB; anything bigger isn't one. */
+const MAX_WEBHOOK_BODY_BYTES = 64_000
 
 /**
  * Flash subscription webhooks.
@@ -12,7 +16,11 @@ import { changeFor, verifyFlashWebhook } from '@/server/auth/flash-webhook'
  */
 export async function POST(request: NextRequest) {
   try {
-    const rawBody = await request.text()
+    const read = await readBodyWithLimit(request, MAX_WEBHOOK_BODY_BYTES)
+    if (!read.ok) {
+      return NextResponse.json({ error: 'Invalid body' }, { status: read.status })
+    }
+    const rawBody = read.body
     const result = verifyFlashWebhook(
       request.headers.get('flash-signature'),
       rawBody,

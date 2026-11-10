@@ -3,6 +3,12 @@
 }
 
 readstr.privkey.io {
+    # Refuse oversized API bodies at the edge as well; the app caps tRPC and
+    # webhook bodies at 64 KB itself.
+    request_body /api/* {
+        max_size 64KB
+    }
+
     # Reverse proxy to the Next.js app
     reverse_proxy app:3000 {
         # Overwrite X-Forwarded-For at the trust boundary so clients cannot
