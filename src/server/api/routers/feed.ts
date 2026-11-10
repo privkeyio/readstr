@@ -236,7 +236,7 @@ export const feedRouter = createTRPCRouter({
   // Update user's Nostr relays (deprecated - relays are managed client-side now)
   updateNostrRelays: protectedProcedure
     .input(z.object({
-      relays: z.array(z.string()),
+      relays: z.array(z.string()).max(50),
     }))
     .mutation(async ({ ctx, input }) => {
       // This endpoint is kept for backward compatibility but no longer stores relays
@@ -247,7 +247,7 @@ export const feedRouter = createTRPCRouter({
   // Get all user feeds with unread counts
   getFeeds: protectedProcedure
     .input(z.object({
-      tags: z.array(z.string()).optional(),
+      tags: z.array(z.string()).max(100).optional(),
       categoryId: z.string().optional(),
       autoSync: z.boolean().default(true),
       forceSync: z.boolean().optional(),
@@ -675,7 +675,7 @@ export const feedRouter = createTRPCRouter({
       url: z.string().optional(),
       npub: z.string().optional(),
       title: z.string().optional(),
-      tags: z.array(z.string()).optional(),
+      tags: z.array(z.string()).max(100).optional(),
       categoryId: z.string().optional().transform(v => v || null),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -1108,7 +1108,7 @@ export const feedRouter = createTRPCRouter({
   updateSubscriptionTags: protectedProcedure
     .input(z.object({
       feedId: z.string(),
-      tags: z.array(z.string()),
+      tags: z.array(z.string()).max(100),
     }))
     .mutation(async ({ ctx, input }) => {
       await ctx.db.subscription.update({
@@ -1637,7 +1637,7 @@ export const feedRouter = createTRPCRouter({
     .input(z.object({
       query: z.string().min(1),
       limit: z.number().min(1).max(20).default(10),
-      relays: z.array(z.string()).optional(),
+      relays: z.array(z.string()).max(50).optional(),
     }))
     .mutation(async ({ input }) => {
       const nostrFetcher = input.relays ? new NostrFeedFetcher(input.relays) : getNostrFetcher()
@@ -1649,7 +1649,7 @@ export const feedRouter = createTRPCRouter({
   getPopularUsers: protectedProcedure
     .input(z.object({
       limit: z.number().min(1).max(50).default(20),
-      relays: z.array(z.string()).optional(),
+      relays: z.array(z.string()).max(50).optional(),
     }))
     .mutation(async ({ input }) => {
       const nostrFetcher = input.relays ? new NostrFeedFetcher(input.relays) : getNostrFetcher()
@@ -1760,7 +1760,7 @@ export const feedRouter = createTRPCRouter({
   // Reorder categories
   reorderCategories: protectedProcedure
     .input(z.object({
-      categoryIds: z.array(z.string()),
+      categoryIds: z.array(z.string()).max(500),
     }))
     .mutation(async ({ ctx, input }) => {
       // Update sortOrder for each category
@@ -1962,7 +1962,7 @@ export const feedRouter = createTRPCRouter({
   // Mark read items as synced
   markReadItemsSynced: protectedProcedure
     .input(z.object({
-      itemIds: z.array(z.string()),
+      itemIds: z.array(z.string()).max(1000),
     }))
     .mutation(async ({ ctx, input }) => {
       await ctx.db.readItem.updateMany({

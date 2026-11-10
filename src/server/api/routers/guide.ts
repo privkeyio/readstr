@@ -9,7 +9,7 @@ export const guideRouter = createTRPCRouter({
   // Get all guide feeds with optional tag filtering
   getGuideFeeds: publicProcedure
     .input(z.object({
-      tags: z.array(z.string()).optional(),
+      tags: z.array(z.string()).max(100).optional(),
       limit: z.number().min(1).max(100).default(50),
       orderBy: z.enum(['newest', 'popular', 'recent_posts']).default('popular'),
     }).optional())
