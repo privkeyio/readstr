@@ -24,9 +24,10 @@ export function SubscriptionGate({ children }: SubscriptionGateProps) {
       const result = await createCheckout.mutateAsync()
       window.location.href = result.checkoutUrl
     } catch (error) {
+      // Don't fall back to the bare signup URL: without our `ref` the payment
+      // can't be linked to this account. Let the user retry instead.
       console.error('Failed to create checkout session:', error)
-      // Fallback to direct URL if tRPC fails
-      window.location.href = process.env.NEXT_PUBLIC_FLASH_CHECKOUT_URL || '#'
+      setIsRedirecting(false)
     }
   }
 

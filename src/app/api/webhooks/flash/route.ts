@@ -1,100 +1,63 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
-import { verifyFlashWebhook } from '@/server/auth/flash-webhook'
+import { changeFor, verifyFlashWebhook } from '@/server/auth/flash-webhook'
 
-const TRIAL_DAYS = 7
-
+/**
+ * Flash subscription webhooks.
+ *
+ * Flash retries a failed delivery only 3 times within seconds and then drops
+ * it, and deliveries can repeat or arrive out of order. So every event is
+ * applied as an absolute state (never "extend by 30 days"), and a delivery
+ * older than the last one applied to the row is acknowledged and skipped.
+ */
 export async function POST(request: NextRequest) {
   try {
-    const authHeader = request.headers.get('authorization') ?? undefined
+    const rawBody = await request.text()
+    const result = verifyFlashWebhook(
+      request.headers.get('flash-signature'),
+      rawBody,
+      process.env.FLASH_WEBHOOK_SECRET
+    )
 
-    let rawBody: unknown
-    try {
-      rawBody = await request.json()
-    } catch {
-      return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
-    }
-
-    const result = verifyFlashWebhook(authHeader, rawBody)
     if (!result.ok) {
       return NextResponse.json({ error: result.error }, { status: result.status })
     }
-
-    const { userPubkey, eventName } = result
-
-    console.log('Flash webhook received:', {
-      event: eventName,
-      userPubkey: userPubkey.substring(0, 10) + '...',
-    })
-
-    // Handle different event types
-    switch (eventName) {
-      case 'user_signed_up':
-        // Create or update subscription to ACTIVE
-        await db.userSubscription.upsert({
-          where: { userPubkey },
-          create: {
-            userPubkey,
-            status: 'ACTIVE',
-            trialEndsAt: new Date(Date.now() + TRIAL_DAYS * 24 * 60 * 60 * 1000),
-            subscriptionEndsAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
-          },
-          update: {
-            status: 'ACTIVE',
-            subscriptionEndsAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-            cancelledAt: null,
-          },
-        })
-        console.log('User subscription activated:', userPubkey.substring(0, 10) + '...')
-        break
-
-      case 'renewal_successful': {
-        // Extend subscription by 30 days. Upsert so a webhook for a row we have
-        // not seen yet does not 500 and trigger infinite Flash retries.
-        const subscriptionEndsAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
-        await db.userSubscription.upsert({
-          where: { userPubkey },
-          create: {
-            userPubkey,
-            status: 'ACTIVE',
-            trialEndsAt: new Date(),
-            subscriptionEndsAt,
-            cancelledAt: null,
-          },
-          update: { status: 'ACTIVE', subscriptionEndsAt, cancelledAt: null },
-        })
-        console.log('Subscription renewed:', userPubkey.substring(0, 10) + '...')
-        break
-      }
-
-      case 'renewal_failed':
-        // Mark as PAST_DUE
-        await db.userSubscription.upsert({
-          where: { userPubkey },
-          create: { userPubkey, status: 'PAST_DUE', trialEndsAt: new Date() },
-          update: { status: 'PAST_DUE' },
-        })
-        console.log('Renewal failed:', userPubkey.substring(0, 10) + '...')
-        break
-
-      case 'user_paused_subscription':
-      case 'user_cancelled_subscription':
-        // Mark as cancelled but keep until end date
-        await db.userSubscription.upsert({
-          where: { userPubkey },
-          create: { userPubkey, status: 'CANCELLED', trialEndsAt: new Date(), cancelledAt: new Date() },
-          update: { status: 'CANCELLED', cancelledAt: new Date() },
-        })
-        console.log('Subscription cancelled:', userPubkey.substring(0, 10) + '...')
-        break
+    if ('ignored' in result) {
+      console.log('[flash-webhook] ignored:', result.ignored)
+      return NextResponse.json({ ok: true })
     }
 
+    const { event } = result
+    if (!event.userPubkey) {
+      // Signed up without our `ref` (e.g. from a bare signup link), so there is
+      // no account to apply it to. Acknowledge so Flash stops retrying, and log
+      // the id so it can be linked by hand.
+      console.warn('[flash-webhook] no usable externalRef; subscription needs manual linking:', {
+        event: event.event,
+        subscriptionId: event.subscriptionId,
+      })
+      return NextResponse.json({ ok: true })
+    }
+
+    const { userPubkey, occurredAt, subscriptionId } = event
+    const existing = await db.userSubscription.findUnique({ where: { userPubkey } })
+    if (existing?.flashEventAt && existing.flashEventAt > occurredAt) {
+      console.log('[flash-webhook] skipped out-of-order delivery:', event.event, subscriptionId)
+      return NextResponse.json({ ok: true })
+    }
+
+    const change = changeFor(event)
+    const tracking = { flashSubscriptionId: subscriptionId, flashEventAt: occurredAt }
+    await db.userSubscription.upsert({
+      where: { userPubkey },
+      create: { userPubkey, trialEndsAt: occurredAt, ...change, ...tracking },
+      update: { ...change, ...tracking },
+    })
+
+    console.log('[flash-webhook] applied:', event.event, userPubkey.substring(0, 10) + '...')
     return NextResponse.json({ ok: true })
   } catch (error) {
-    console.error('Flash webhook error:', error)
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    )
+    console.error('[flash-webhook] error:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

@@ -47,33 +47,10 @@ export const subscriptionRouter = createTRPCRouter({
       }
     }),
 
-  // Create Flash checkout session
+  // Create Flash checkout session. FLASH_CHECKOUT_URL is read at runtime (not
+  // NEXT_PUBLIC_, which is baked in at build time and absent from the image).
   createCheckoutSession: protectedProcedure
     .mutation(({ ctx }) => ({
-      checkoutUrl: buildCheckoutUrl(process.env.NEXT_PUBLIC_FLASH_CHECKOUT_URL ?? '', ctx.nostrPubkey),
+      checkoutUrl: buildCheckoutUrl(process.env.FLASH_CHECKOUT_URL ?? '', ctx.nostrPubkey),
     })),
-
-  // Cancel subscription
-  cancelSubscription: protectedProcedure
-    .mutation(async ({ ctx }) => {
-      const subscription = await ctx.db.userSubscription.findUnique({
-        where: { userPubkey: ctx.nostrPubkey },
-      })
-
-      if (!subscription || subscription.status !== 'ACTIVE') {
-        throw new Error('No active subscription to cancel')
-      }
-
-      // TODO: Cancel in Square
-      
-      await ctx.db.userSubscription.update({
-        where: { userPubkey: ctx.nostrPubkey },
-        data: {
-          status: 'CANCELLED',
-          cancelledAt: new Date(),
-        },
-      })
-
-      return { success: true }
-    }),
 })

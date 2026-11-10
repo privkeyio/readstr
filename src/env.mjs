@@ -18,30 +18,16 @@ const server = z.object({
   // trust-equivalent — the check only confirms the signed host is in the set,
   // not that it matches the host actually serving the request.
   NIP98_ALLOWED_HOSTS: z.string().optional(),
-  FLASH_SUBSCRIPTION_KEY: z.string().optional(),
-  // Temporary fallback escape hatch. When 'true', the Flash webhook verifier
-  // falls back to the unsigned request body identity when the verified JWT
-  // carries no user_public_key. MUST stay unset once Flash's token schema is
-  // confirmed to populate user_public_key.
-  ALLOW_FLASH_BODY_IDENTITY: z.string().optional(),
+  // Signing secret (whsec_...) of the Flash webhook endpoint. Verifies the
+  // Flash-Signature HMAC on /api/webhooks/flash. Secret: server env only.
+  FLASH_WEBHOOK_SECRET: z.string().optional(),
+  // Plan signup URL from the Flash dashboard. Read at runtime by the server.
+  FLASH_CHECKOUT_URL: z.string().url().optional(),
 })
 
 const client = z.object({
   NEXT_PUBLIC_ADMIN_NPUB: z.string().default('npub13hyx3qsqk3r7ctjqrr49uskut4yqjsxt8uvu4rekr55p08wyhf0qq90nt7'),
 })
-
-// The escape-hatch flag is a full auth-bypass foot-gun. Refuse to boot if it
-// is enabled in production.
-const refineInsecureFlags = (val, ctx) => {
-  if (val.NODE_ENV !== 'production') return
-  if (val.ALLOW_FLASH_BODY_IDENTITY === 'true') {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['ALLOW_FLASH_BODY_IDENTITY'],
-      message: `ALLOW_FLASH_BODY_IDENTITY must not be 'true' in production (auth bypass)`,
-    })
-  }
-}
 
 const processEnv = {
   DATABASE_URL: process.env.DATABASE_URL,
@@ -49,12 +35,12 @@ const processEnv = {
   DEFAULT_RELAYS: process.env.DEFAULT_RELAYS,
   NOSTR_BUNKER_URL: process.env.NOSTR_BUNKER_URL,
   NIP98_ALLOWED_HOSTS: process.env.NIP98_ALLOWED_HOSTS,
-  FLASH_SUBSCRIPTION_KEY: process.env.FLASH_SUBSCRIPTION_KEY,
-  ALLOW_FLASH_BODY_IDENTITY: process.env.ALLOW_FLASH_BODY_IDENTITY,
+  FLASH_WEBHOOK_SECRET: process.env.FLASH_WEBHOOK_SECRET,
+  FLASH_CHECKOUT_URL: process.env.FLASH_CHECKOUT_URL,
   NEXT_PUBLIC_ADMIN_NPUB: process.env.NEXT_PUBLIC_ADMIN_NPUB,
 }
 
-const merged = server.merge(client).superRefine(refineInsecureFlags)
+const merged = server.merge(client)
 
 /** @type {z.infer<typeof merged>} */
 let env = {}

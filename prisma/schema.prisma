@@ -178,6 +178,8 @@ model UserSubscription {
     squareCustomerId  String?  // Square customer ID
     squareSubscriptionId String? // Square subscription ID
     cancelledAt       DateTime? // When user cancelled (still valid until subscriptionEndsAt)
+    flashSubscriptionId String? @unique // Flash subscriptionId, for reconciling with Flash's API
+    flashEventAt      DateTime? // Occurrence time of the last applied Flash webhook; older deliveries are dropped
     createdAt         DateTime @default(now())
     updatedAt         DateTime @updatedAt
     
