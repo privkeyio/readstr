@@ -1,17 +1,11 @@
 import { SimplePool, Event, Filter } from 'nostr-tools'
-
-export const DEFAULT_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.nostr.band',
-  'wss://relay.snort.social',
-]
+import { getDefaultRelays } from './relays'
 
 export class NostrClient {
   private pool: SimplePool
   private relays: string[]
 
-  constructor(relays: string[] = DEFAULT_RELAYS) {
+  constructor(relays: string[] = getDefaultRelays()) {
     this.pool = new SimplePool()
     this.relays = relays
   }

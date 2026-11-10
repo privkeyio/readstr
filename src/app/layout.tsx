@@ -6,6 +6,8 @@ import { ThemeProvider } from '@/contexts/ThemeContext'
 import { AiConfigProvider } from '@/lib/ai/config'
 import { Footer } from '@/components/footer'
 import { ServiceWorkerUpdater } from '@/components/service-worker-updater'
+import { DefaultRelays } from '@/components/default-relays'
+import { getDefaultRelays } from '@/lib/relays'
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
 const spaceGrotesk = Space_Grotesk({
@@ -45,6 +47,10 @@ export const metadata = {
   },
 }
 
+// DEFAULT_RELAYS is read from the container env at request time, so the layout
+// must not be prerendered at build time with whatever value the builder had.
+export const dynamic = 'force-dynamic'
+
 export const viewport = {
   width: 'device-width',
   initialScale: 1,
@@ -66,6 +72,7 @@ export default function RootLayout({
         <meta name="theme-color" content="#27ae60" />
       </head>
       <body className={`${inter.className} flex flex-col min-h-screen`}>
+        <DefaultRelays relays={getDefaultRelays()} />
         <ThemeProvider>
           <AiConfigProvider>
             <ServiceWorkerUpdater />

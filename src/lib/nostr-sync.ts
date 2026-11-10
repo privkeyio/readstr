@@ -2,6 +2,7 @@ import { SimplePool, Event, nip19 } from 'nostr-tools'
 import type { UnsignedEvent } from 'nostr-tools'
 import { z } from 'zod'
 import { normalizeViews, type SavedView } from './saved-views'
+import { getDefaultRelays } from './relays'
 import type { ReadingPrefs, Theme } from '@/contexts/ThemeContext'
 
 // Privacy note: sync events (kinds 30404, 30405 and 30406) are published to
@@ -144,18 +145,9 @@ const readingPrefsSyncSchema = z.object({
   lastUpdated: z.number().int().nonnegative().optional(),
 })
 
-// Default relays for sync operations
-const DEFAULT_SYNC_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.snort.social',
-  'wss://relay.nostr.band',
-  'wss://nostr-pub.wellorder.net',
-]
-
 // Helper to get relays from localStorage or use defaults
 export function getSyncRelays(): string[] {
-  if (typeof window === 'undefined') return DEFAULT_SYNC_RELAYS
+  if (typeof window === 'undefined') return getDefaultRelays()
   
   const savedRelays = localStorage.getItem('nostr_relays')
   if (savedRelays) {
@@ -168,7 +160,7 @@ export function getSyncRelays(): string[] {
       console.error('Failed to parse saved relays:', e)
     }
   }
-  return DEFAULT_SYNC_RELAYS
+  return getDefaultRelays()
 }
 
 /**
@@ -178,7 +170,7 @@ export function getSyncRelaysFromServer(providedRelays?: string[]): string[] {
   if (providedRelays && providedRelays.length > 0) {
     return providedRelays
   }
-  return DEFAULT_SYNC_RELAYS
+  return getDefaultRelays()
 }
 
 // Get the user's pubkey in hex format

@@ -6,6 +6,7 @@ import rehypeParse from 'rehype-parse';
 import rehypeSanitize, { defaultSchema, type Options as SanitizeSchema } from 'rehype-sanitize';
 import rehypeStringify from 'rehype-stringify';
 import { rateLimit, clientIpFromRequest } from '@/server/rate-limit';
+import { getDefaultRelays } from '@/lib/relays';
 
 // Sanitize generated HTML before it lands in content:encoded. readstr's own UI
 // renders feeds through rehype-sanitize, but third-party RSS readers consume this
@@ -53,13 +54,6 @@ async function stripHtml(input: string): Promise<string> {
   const tree = await stripProcessor.run(stripProcessor.parse(String(input)));
   return hastToText(tree).replace(/[<>]/g, '');
 }
-
-const DEFAULT_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://relay.primal.net',
-  'wss://relay.snort.social',
-  'wss://nos.lol',
-];
 
 // Habla.news is a dedicated long-form content viewer that handles naddr links well
 const NOSTR_ARTICLE_VIEWER_URL = 'https://habla.news';
@@ -178,6 +172,7 @@ export async function GET(request: NextRequest) {
     return new NextResponse('Error decoding npub.', { status: 400 });
   }
 
+  const relays = getDefaultRelays();
   const pool = new SimplePool();
   const filter: Filter = {
     authors: [pubkey],
@@ -190,7 +185,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const events = await pool.querySync(DEFAULT_RELAYS, filter);
+    const events = await pool.querySync(relays, filter);
 
     if (!events || events.length === 0) {
       return new NextResponse('No long-form posts found for this user with the specified tags.', { 
@@ -200,7 +195,7 @@ export async function GET(request: NextRequest) {
     }
     
     // Fetch user profile (kind 0) to get metadata
-    const profileEvents = await pool.querySync(DEFAULT_RELAYS, {
+    const profileEvents = await pool.querySync(relays, {
       authors: [pubkey],
       kinds: [0],
       limit: 1,
@@ -267,7 +262,7 @@ export async function GET(request: NextRequest) {
           articleUrl = `${NOSTR_ARTICLE_VIEWER_URL}/a/${naddr}`;
         } else {
           // Fallback to njump.me with nevent if no d-tag
-          const nevent = nip19.neventEncode({ id: event.id, relays: DEFAULT_RELAYS.slice(0, 2) });
+          const nevent = nip19.neventEncode({ id: event.id, relays: relays.slice(0, 2) });
           articleUrl = `https://njump.me/${nevent}`;
         }
 
@@ -293,7 +288,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    pool.close(DEFAULT_RELAYS);
+    pool.close(relays);
 
     const xml = feed.xml({ indent: true });
     return new NextResponse(xml, {
@@ -303,7 +298,7 @@ export async function GET(request: NextRequest) {
 
   } catch (error) {
     console.error('Failed to fetch Nostr events or generate RSS feed:', error);
-    pool.close(DEFAULT_RELAYS);
+    pool.close(relays);
     return new NextResponse('Error generating RSS feed.', { status: 500 });
   }
 }

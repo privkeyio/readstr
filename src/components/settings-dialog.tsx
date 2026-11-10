@@ -29,6 +29,7 @@ import {
   type FilterAction,
 } from '@/lib/keyword-filter'
 import type { SavedView } from '@/lib/saved-views'
+import { getDefaultRelays } from '@/lib/relays'
 
 export type MarkReadBehavior = 'on-open' | 'after-10s' | 'never'
 export type LayoutMode = 'split' | 'single' | 'grid'
@@ -87,14 +88,6 @@ interface Relay {
   url: string
   status: 'connected' | 'connecting' | 'disconnected' | 'error'
 }
-
-const DEFAULT_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.snort.social',
-  'wss://relay.nostr.band',
-  'wss://nostr-pub.wellorder.net',
-]
 
 const POPULAR_RELAYS = [
   { url: 'wss://relay.damus.io', name: 'Damus' },
@@ -425,14 +418,14 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
   // Load relays from localStorage on mount
   useEffect(() => {
     const savedRelays = localStorage.getItem('nostr_relays')
-    let urls: string[] = DEFAULT_RELAYS
+    let urls: string[] = getDefaultRelays()
     if (savedRelays) {
       try {
         const parsed = JSON.parse(savedRelays)
-        urls = Array.isArray(parsed) ? parsed : DEFAULT_RELAYS
+        urls = Array.isArray(parsed) ? parsed : getDefaultRelays()
       } catch (e) {
         // Use defaults if parsing fails
-        urls = DEFAULT_RELAYS
+        urls = getDefaultRelays()
       }
     }
     // Reading persisted relays from localStorage on mount; localStorage is
@@ -679,7 +672,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
 
   const resetToDefaults = () => {
     if (confirm('Reset to default relays? This will remove all custom relays.')) {
-      setRelays(DEFAULT_RELAYS.map(url => ({ url, status: 'disconnected' })))
+      setRelays(getDefaultRelays().map(url => ({ url, status: 'disconnected' })))
     }
   }
 
