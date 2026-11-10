@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { FALLBACK_RELAYS, parseRelayList, resolveDefaultRelays } from './relays'
+import { FALLBACK_RELAYS, parseRelayList, pickRelays, resolveDefaultRelays } from './relays'
 
 describe('parseRelayList', () => {
   it('returns [] when unset or empty', () => {
@@ -22,6 +22,55 @@ describe('parseRelayList', () => {
     expect(parseRelayList('https://a.example,not a url,wss://ok.example,relay.example')).toEqual([
       'wss://ok.example',
     ])
+  })
+
+  it('drops entries that carry credentials', () => {
+    expect(
+      parseRelayList('wss://user:pass@a.example,wss://user@b.example,wss://:secret@c.example,wss://ok.example'),
+    ).toEqual(['wss://ok.example'])
+  })
+
+  it('drops entries containing control characters', () => {
+    expect(
+      parseRelayList('wss://a\u0000.example,wss://b.example\u0007,wss://c\u007f.example,wss://d\u0085.example,wss://ok.example'),
+    ).toEqual(['wss://ok.example'])
+  })
+
+  it('keeps the raw entry instead of the normalized href', () => {
+    expect(parseRelayList('WSS://relay.damus.io')).toEqual(['WSS://relay.damus.io'])
+    expect(parseRelayList('wss://relay.damus.io')).toEqual(['wss://relay.damus.io'])
+  })
+})
+
+describe('pickRelays', () => {
+  const defaults = ['wss://default.example']
+
+  it('prefers the saved list', () => {
+    expect(pickRelays('["wss://saved.example"]', defaults)).toEqual(['wss://saved.example'])
+  })
+
+  it('falls back to defaults when nothing is saved', () => {
+    expect(pickRelays(null, defaults)).toEqual(defaults)
+  })
+
+  it('falls back to defaults on bad JSON', () => {
+    expect(pickRelays('{not json', defaults)).toEqual(defaults)
+  })
+
+  it('falls back to defaults on an empty array or a non-array', () => {
+    expect(pickRelays('[]', defaults)).toEqual(defaults)
+    expect(pickRelays('{"a":1}', defaults)).toEqual(defaults)
+  })
+
+  it('falls back to defaults when entries are not strings', () => {
+    expect(pickRelays('["wss://ok.example", 42]', defaults)).toEqual(defaults)
+    expect(pickRelays('[null]', defaults)).toEqual(defaults)
+  })
+
+  it('returns a copy of the defaults', () => {
+    const result = pickRelays(null, defaults)
+    result.push('wss://mutated.example')
+    expect(defaults).toEqual(['wss://default.example'])
   })
 })
 

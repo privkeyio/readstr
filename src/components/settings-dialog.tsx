@@ -29,7 +29,7 @@ import {
   type FilterAction,
 } from '@/lib/keyword-filter'
 import type { SavedView } from '@/lib/saved-views'
-import { getDefaultRelays } from '@/lib/relays'
+import { getDefaultRelays, pickRelays } from '@/lib/relays'
 
 export type MarkReadBehavior = 'on-open' | 'after-10s' | 'never'
 export type LayoutMode = 'split' | 'single' | 'grid'
@@ -417,17 +417,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
 
   // Load relays from localStorage on mount
   useEffect(() => {
-    const savedRelays = localStorage.getItem('nostr_relays')
-    let urls: string[] = getDefaultRelays()
-    if (savedRelays) {
-      try {
-        const parsed = JSON.parse(savedRelays)
-        urls = Array.isArray(parsed) ? parsed : getDefaultRelays()
-      } catch (e) {
-        // Use defaults if parsing fails
-        urls = getDefaultRelays()
-      }
-    }
+    const urls = pickRelays(localStorage.getItem('nostr_relays'), getDefaultRelays())
     // Reading persisted relays from localStorage on mount; localStorage is
     // unavailable during SSR so this must happen in an effect, not at render.
     // eslint-disable-next-line react-hooks/set-state-in-effect

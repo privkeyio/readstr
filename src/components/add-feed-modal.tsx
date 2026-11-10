@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { api } from '@/trpc/react'
+import { pickRelays } from '@/lib/relays'
 import type { OrganizationMode } from './settings-dialog'
 
 interface NostrProfile {
@@ -50,16 +51,8 @@ export function AddFeedModal({ isOpen, onClose, onAddFeed, isLoading = false, er
   // Helper to get relays from localStorage
   const getRelays = (): string[] | undefined => {
     if (typeof window === 'undefined') return undefined
-    const saved = localStorage.getItem('nostr_relays')
-    if (saved) {
-      try {
-        const relays = JSON.parse(saved)
-        return Array.isArray(relays) && relays.length > 0 ? relays : undefined
-      } catch {
-        return undefined
-      }
-    }
-    return undefined
+    const relays = pickRelays(localStorage.getItem('nostr_relays'), [])
+    return relays.length > 0 ? relays : undefined
   }
 
   // tRPC mutations

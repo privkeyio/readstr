@@ -2,7 +2,7 @@ import { SimplePool, Event, nip19 } from 'nostr-tools'
 import type { UnsignedEvent } from 'nostr-tools'
 import { z } from 'zod'
 import { normalizeViews, type SavedView } from './saved-views'
-import { getDefaultRelays } from './relays'
+import { getDefaultRelays, getUserOrDefaultRelays } from './relays'
 import type { ReadingPrefs, Theme } from '@/contexts/ThemeContext'
 
 // Privacy note: sync events (kinds 30404, 30405 and 30406) are published to
@@ -147,20 +147,7 @@ const readingPrefsSyncSchema = z.object({
 
 // Helper to get relays from localStorage or use defaults
 export function getSyncRelays(): string[] {
-  if (typeof window === 'undefined') return getDefaultRelays()
-  
-  const savedRelays = localStorage.getItem('nostr_relays')
-  if (savedRelays) {
-    try {
-      const relays = JSON.parse(savedRelays)
-      if (Array.isArray(relays) && relays.length > 0) {
-        return relays
-      }
-    } catch (e) {
-      console.error('Failed to parse saved relays:', e)
-    }
-  }
-  return getDefaultRelays()
+  return getUserOrDefaultRelays()
 }
 
 /**
