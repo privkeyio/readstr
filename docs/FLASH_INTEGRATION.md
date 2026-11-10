@@ -28,10 +28,14 @@ Add to your `.env.production` file:
 ```bash
 # Flash Configuration
 NEXT_PUBLIC_FLASH_CHECKOUT_URL="https://app.paywithflash.com/subscription-page?flashId=3238"
-FLASH_SUBSCRIPTION_KEY="97ee08713791860b5c849941dd596d0208928ab7ae9a468cec993504b06daca4"
+FLASH_SUBSCRIPTION_KEY="<subscription key from the Flash dashboard>"
 ```
 
-**Note**: These values are already configured in the production environment.
+**Note**: The checkout URL is public. `FLASH_SUBSCRIPTION_KEY` is a secret, because
+it is the HS256 key that verifies webhook JWTs, and anyone holding it can mint a
+valid "user signed up" event. Keep it only in the server's environment (never in
+docs, `docker-compose.yml`, or git), and rotate it in the Flash dashboard if it
+is ever exposed.
 
 ## How It Works
 
