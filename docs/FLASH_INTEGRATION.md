@@ -28,10 +28,23 @@ Add to your `.env.production` file:
 ```bash
 # Flash Configuration
 NEXT_PUBLIC_FLASH_CHECKOUT_URL="https://app.paywithflash.com/subscription-page?flashId=3238"
-FLASH_SUBSCRIPTION_KEY="97ee08713791860b5c849941dd596d0208928ab7ae9a468cec993504b06daca4"
+FLASH_SUBSCRIPTION_KEY="<subscription key from the Flash dashboard>"
 ```
 
-**Note**: These values are already configured in the production environment.
+**Note**: The checkout URL is public. `FLASH_SUBSCRIPTION_KEY` is a secret, because
+it is the HS256 key that verifies webhook JWTs, and anyone holding it can mint a
+valid "user signed up" event. Keep it only in the server's environment (never in
+docs, `docker-compose.yml`, or git), and rotate it in the Flash dashboard if it
+is ever exposed.
+
+> **Security notice**: A real `FLASH_SUBSCRIPTION_KEY` was previously published in
+> this repo (this doc and `docker-compose.yml`) and remains in git history, so treat
+> it as compromised. Anyone holding it can forge valid webhooks and grant
+> subscriptions to arbitrary npubs. Stop trusting it: if you control the Flash
+> account that issued it, rotate the key in its dashboard; either way, replace or
+> remove `FLASH_SUBSCRIPTION_KEY` in the server environment and redeploy. Then check
+> every environment's `.env.production` / secrets against the Flash dashboard to
+> confirm none still uses the old key (never paste the value anywhere).
 
 ## How It Works
 
