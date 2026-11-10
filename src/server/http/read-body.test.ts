@@ -85,6 +85,16 @@ describe('readBodyWithLimit', () => {
     expect(await readBodyWithLimit(req, 10)).toEqual({ ok: true, body: 'é' })
   })
 
+  it('rejects invalid UTF-8 rather than inflating it with replacement characters', async () => {
+    const req = streamedRequest([new Uint8Array([0x7b, 0xff, 0xfe, 0x7d])])
+    expect(await readBodyWithLimit(req, 100)).toEqual({ ok: false, status: 400 })
+  })
+
+  it('rejects a body that ends mid-character', async () => {
+    const req = streamedRequest([new TextEncoder().encode('é').slice(0, 1)])
+    expect(await readBodyWithLimit(req, 100)).toEqual({ ok: false, status: 400 })
+  })
+
   it('treats a missing body as empty', async () => {
     const req = new Request('http://localhost/', { method: 'POST' })
     expect(await readBodyWithLimit(req, 10)).toEqual({ ok: true, body: '' })

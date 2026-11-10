@@ -11,6 +11,10 @@
  * without reading. The stream is still counted as it is read, because the
  * header can be missing (chunked) or wrong, and reading stops as soon as the
  * limit is passed rather than buffering the rest.
+ *
+ * Invalid UTF-8 is refused rather than replaced: each bad byte would become a
+ * U+FFFD that re-encodes to 3 bytes, so the body handed on to tRPC could be up
+ * to 3x the cap, and no legitimate client sends malformed UTF-8.
  */
 
 export type ReadBodyResult = { ok: true; body: string } | { ok: false; status: 400 | 413 }
@@ -25,7 +29,7 @@ export async function readBodyWithLimit(req: Request, maxBytes: number): Promise
   if (!req.body) return { ok: true, body: '' }
 
   const reader = req.body.getReader()
-  const decoder = new TextDecoder()
+  const decoder = new TextDecoder('utf-8', { fatal: true })
   let received = 0
   let body = ''
   for (;;) {
@@ -36,7 +40,16 @@ export async function readBodyWithLimit(req: Request, maxBytes: number): Promise
       await reader.cancel().catch(() => {})
       return { ok: false, status: 413 }
     }
-    body += decoder.decode(value, { stream: true })
+    try {
+      body += decoder.decode(value, { stream: true })
+    } catch {
+      await reader.cancel().catch(() => {})
+      return { ok: false, status: 400 }
+    }
   }
-  return { ok: true, body: body + decoder.decode() }
+  try {
+    return { ok: true, body: body + decoder.decode() }
+  } catch {
+    return { ok: false, status: 400 }
+  }
 }
