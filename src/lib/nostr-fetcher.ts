@@ -1,5 +1,6 @@
 import { SimplePool, Event, Filter, nip19 } from 'nostr-tools'
 import { safeFetch } from './safe-fetch'
+import { getUserOrDefaultRelays } from './relays'
 
 export interface NostrLongFormPost {
   id: string // event id
@@ -25,31 +26,9 @@ export interface NostrVideoEvent {
   kind: 21 | 22 // 21 = normal video, 22 = short-form portrait
 }
 
-// Default relays for fetching Nostr content
-const DEFAULT_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.snort.social',
-  'wss://relay.nostr.band',
-  'wss://nostr-pub.wellorder.net',
-]
-
 // Helper to get relays from localStorage or use defaults
 function getRelaysFromStorage(): string[] {
-  if (typeof window === 'undefined') return DEFAULT_RELAYS
-  
-  const savedRelays = localStorage.getItem('nostr_relays')
-  if (savedRelays) {
-    try {
-      const relays = JSON.parse(savedRelays)
-      if (Array.isArray(relays) && relays.length > 0) {
-        return relays
-      }
-    } catch (e) {
-      console.error('Failed to parse saved relays:', e)
-    }
-  }
-  return DEFAULT_RELAYS
+  return getUserOrDefaultRelays()
 }
 
 export class NostrFeedFetcher {
