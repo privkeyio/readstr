@@ -60,3 +60,6 @@ CLAUDE.md
 
 # mdbook build output
 /book
+
+# Beads / Dolt files (added by bd init)
+*.gate.lock*
