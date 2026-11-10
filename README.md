@@ -226,11 +226,21 @@ Feed content is written by strangers, so scripts and AI agents should treat arti
 The `overrides` block in `package.json` pins transitive dependencies to patched
 versions that remediate known advisories:
 
-- **serialize-javascript** `^7.0.5` — fixes RCE via `RegExp.flags` /
-  `Date.prototype.toISOString()` ([GHSA-5c6j-r48x-rmvq](https://github.com/advisories/GHSA-5c6j-r48x-rmvq), affected `<= 7.0.2`).
-- **postcss** `$postcss` — forces transitive consumers onto the top-level
-  `postcss` (`^8.5.10`), past the line-return parsing flaw
-  ([GHSA-7fh5-64p2-3v2j](https://github.com/advisories/GHSA-7fh5-64p2-3v2j), affected `< 8.4.31`).
+- **serialize-javascript** `^7.1.3` — fixes RCE via `RegExp.flags` /
+  `Date.prototype.toISOString()` ([GHSA-5c6j-r48x-rmvq](https://github.com/advisories/GHSA-5c6j-r48x-rmvq), affected `<= 7.0.2`)
+  and XSS via an unescaped `</script` at the end of a serialized function body
+  ([GHSA-m5mm-p8h7-m29v](https://github.com/advisories/GHSA-m5mm-p8h7-m29v), affected `< 7.1.3`).
+- **postcss** `$postcss` — forces transitive consumers (including `next`'s
+  pinned copy) onto the top-level `postcss` (`^8.5.23`), past the line-return
+  parsing flaw ([GHSA-7fh5-64p2-3v2j](https://github.com/advisories/GHSA-7fh5-64p2-3v2j), affected `< 8.4.31`)
+  and the `sourceMappingURL` arbitrary `.map` file reads
+  ([GHSA-r28c-9q8g-f849](https://github.com/advisories/GHSA-r28c-9q8g-f849), affected `<= 8.5.17`;
+  [GHSA-fxqj-rqcc-2cmp](https://github.com/advisories/GHSA-fxqj-rqcc-2cmp), affected `<= 8.5.22`).
+- **postcss-selector-parser** `^6.1.5` (scoped to `@tailwindcss/typography`,
+  which pins `6.0.10`) — fixes quadratic-time parsing of flat selectors
+  ([GHSA-rj75-hqrm-r3gf](https://github.com/advisories/GHSA-rj75-hqrm-r3gf), affected `< 6.1.5`)
+  and uncontrolled AST recursion
+  ([GHSA-w9m9-85wc-3x92](https://github.com/advisories/GHSA-w9m9-85wc-3x92), affected `>= 6.1.0, < 6.1.3`).
 
 ## Getting Started
 
