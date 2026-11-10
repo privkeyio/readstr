@@ -11,4 +11,5 @@
   - [Sync Improvements](./SYNC_IMPROVEMENTS.md)
 - [Guide API](./GUIDE_API.md)
 - [CLI Development Guide](./CLI_DEVELOPMENT_GUIDE.md)
+- [Omarchy Desktop App Plan](./OMARCHY_APP_PLAN.md)
 - [Flash Integration](./FLASH_INTEGRATION.md)
