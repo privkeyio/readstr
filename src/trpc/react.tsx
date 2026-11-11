@@ -1,7 +1,7 @@
 'use client'
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { httpBatchLink, loggerLink } from '@trpc/client'
+import { loggerLink } from '@trpc/client'
 import { createTRPCReact } from '@trpc/react-query'
 import { useState, useEffect } from 'react'
 import superjson from 'superjson'
@@ -9,6 +9,7 @@ import { nip98 } from 'nostr-tools'
 import { type AppRouter } from '@/server/api/root'
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
 import { type UnsignedEvent, type Event as NostrEvent } from 'nostr-tools'
+import { createTrpcHttpLinks } from '@/trpc/links'
 
 export const api = createTRPCReact<AppRouter>()
 
@@ -70,7 +71,9 @@ export function TRPCReactProvider(props: {
         loggerLink({
           enabled: () => process.env.NODE_ENV === 'development',
         }),
-        httpBatchLink({
+        // Batches split by URL length to stay under the server's batch cap;
+        // single queries too long to batch go unbatched. See links.ts.
+        createTrpcHttpLinks<AppRouter>({
           url: '/api/trpc',
           headers() {
             const headers: Record<string, string> = {}
