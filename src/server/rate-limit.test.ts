@@ -12,6 +12,14 @@ beforeEach(() => {
 })
 
 describe('rateLimit', () => {
+  it('charges weighted calls and refuses one that would overrun the limit', () => {
+    expect(rateLimit('ep', 'ip', 10, 1000, 0, 6).allowed).toBe(true)
+    expect(rateLimit('ep', 'ip', 10, 1000, 0, 5).allowed).toBe(false)
+    expect(rateLimit('ep', 'ip', 10, 1000, 0, 4).allowed).toBe(true)
+    expect(rateLimit('ep', 'ip', 10, 1000, 0, 1).allowed).toBe(false)
+    expect(rateLimit('other', 'ip', 10, 1000, 0, 11).allowed).toBe(false)
+  })
+
   it('allows calls under the limit', () => {
     const r1 = rateLimit('ep', 'ip', 3, 1000, 0)
     const r2 = rateLimit('ep', 'ip', 3, 1000, 0)

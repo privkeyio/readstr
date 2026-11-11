@@ -9,6 +9,7 @@ import { nip98 } from 'nostr-tools'
 import { type AppRouter } from '@/server/api/root'
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
 import { type UnsignedEvent, type Event as NostrEvent } from 'nostr-tools'
+import { TRPC_MAX_URL_LENGTH } from '@/trpc/batch-limits'
 
 export const api = createTRPCReact<AppRouter>()
 
@@ -72,6 +73,9 @@ export function TRPCReactProvider(props: {
         }),
         httpBatchLink({
           url: '/api/trpc',
+          // Splits large batches so none exceeds the server's batch cap; see
+          // batch-limits.ts for how the URL length bounds the call count.
+          maxURLLength: TRPC_MAX_URL_LENGTH,
           headers() {
             const headers: Record<string, string> = {}
             if (props.cookies) {

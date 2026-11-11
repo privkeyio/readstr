@@ -29,15 +29,18 @@ export interface RateLimitResult {
 
 /**
  * Fixed-window rate limit. `name` scopes the limit per endpoint, `identifier`
- * is typically the client IP. Returns whether the call is allowed and, when
- * not, how many seconds until the window resets.
+ * is typically the client IP. `cost` is how many units this call consumes, so
+ * one request can be charged for the work it fans out to. Returns whether the
+ * call is allowed and, when not, how many seconds until the window resets. A
+ * denied call consumes nothing.
  */
 export function rateLimit(
   name: string,
   identifier: string,
   limit: number,
   windowMs: number,
-  now: number = Date.now()
+  now: number = Date.now(),
+  cost: number = 1
 ): RateLimitResult {
   prune(now)
 
@@ -47,24 +50,24 @@ export function rateLimit(
   if (!state || state.resetAt <= now) {
     // Hard cap the map to bound memory under key-flooding. When full and the key
     // is new, deny rather than grow unbounded.
-    if (!state && buckets.size >= MAX_BUCKETS) {
+    if ((!state && buckets.size >= MAX_BUCKETS) || cost > limit) {
       return {
         allowed: false,
         retryAfterSeconds: Math.max(1, Math.ceil(windowMs / 1000)),
       }
     }
-    buckets.set(key, { count: 1, resetAt: now + windowMs })
+    buckets.set(key, { count: cost, resetAt: now + windowMs })
     return { allowed: true, retryAfterSeconds: 0 }
   }
 
-  if (state.count >= limit) {
+  if (state.count + cost > limit) {
     return {
       allowed: false,
       retryAfterSeconds: Math.max(1, Math.ceil((state.resetAt - now) / 1000)),
     }
   }
 
-  state.count++
+  state.count += cost
   return { allowed: true, retryAfterSeconds: 0 }
 }
 
