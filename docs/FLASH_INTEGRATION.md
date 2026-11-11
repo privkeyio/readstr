@@ -70,8 +70,8 @@ files or git, and roll it in Flash if it is ever exposed.
 | `subscription.activated` | `ACTIVE`, paid until `activatedAt` + 30 days | Paid period + 7-day grace |
 | `subscription.renewed` | `ACTIVE`, paid until `paidAt` + 30 days | Paid period + 7-day grace |
 | `subscription.past_due` | `PAST_DUE`, period unchanged | Paid period + 7-day grace (Flash retries) |
-| `subscription.canceled` | `CANCELLED`, ends at `canceledAt` | Ends immediately (immediate cancel or dunning exhausted) |
-| `subscription.expired` | `EXPIRED` | None (end-of-period cancellation reached its date) |
+| `subscription.canceled` | `CANCELLED`, `cancelledAt` set, period unchanged | Until the paid period ends, no grace. Flash sends this as soon as any cancellation is requested, including one scheduled for the period end |
+| `subscription.expired` | `EXPIRED` | None (the scheduled end date was reached) |
 
 Other signed events are acknowledged and ignored. Events without a usable `externalRef`
 are acknowledged and logged with their `subscriptionId` for manual linking.

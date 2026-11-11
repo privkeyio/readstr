@@ -84,14 +84,14 @@ describe('changeFor', () => {
     )
   })
 
-  it('keeps the period on past_due, ends access at cancel time, and expires', () => {
+  it('keeps the paid period on past_due and canceled, and expires', () => {
     expect(changeFor(verified(body('subscription.past_due')))).toEqual({ status: 'PAST_DUE' })
+    // Flash sends `canceled` when an end-of-period cancel is requested, so the
+    // paid-through date must survive it; `expired` ends access later.
     const canceledAt = new Date('2026-11-10T11:00:00.000Z')
-    expect(changeFor(verified(body('subscription.canceled', { canceledAt: canceledAt.toISOString() })))).toEqual({
-      status: 'CANCELLED',
-      subscriptionEndsAt: canceledAt,
-      cancelledAt: canceledAt,
-    })
+    const canceled = changeFor(verified(body('subscription.canceled', { canceledAt: canceledAt.toISOString() })))
+    expect(canceled).toEqual({ status: 'CANCELLED', cancelledAt: canceledAt })
+    expect('subscriptionEndsAt' in canceled).toBe(false)
     expect(changeFor(verified(body('subscription.expired'))).status).toBe('EXPIRED')
   })
 })

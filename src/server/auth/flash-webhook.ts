@@ -158,10 +158,12 @@ export interface SubscriptionChange {
 /**
  * Map a Flash lifecycle event onto our subscription row.
  *
- * Flash is the source of truth for the lifecycle: an end-of-period
- * cancellation keeps the subscription active and later arrives as `expired`,
- * while `canceled` means access ends now (immediate cancel, or dunning
- * exhausted). Webhooks carry no period end, so a paid period is assumed to run
+ * Flash is the source of truth for the lifecycle. It sends `canceled` as soon
+ * as a cancellation is requested, including one scheduled for the end of the
+ * period, and sends `expired` when access actually ends. So `canceled` keeps
+ * the paid-through date, and `expired` ends access. A cancel after dunning is
+ * exhausted still ends access, because that period's end is already past.
+ * Webhooks carry no period end, so a paid period is assumed to run
  * PERIOD_DAYS from payment; accessFor adds a grace window on top so a late or
  * dropped `renewed` delivery doesn't lock out a paying user.
  */
@@ -180,7 +182,7 @@ export function changeFor(event: FlashEvent): SubscriptionChange {
       return { status: 'PAST_DUE' }
     case 'subscription.canceled': {
       const at = asDate(data.canceledAt) ?? occurredAt
-      return { status: 'CANCELLED', subscriptionEndsAt: at, cancelledAt: at }
+      return { status: 'CANCELLED', cancelledAt: at }
     }
     case 'subscription.expired':
       return { status: 'EXPIRED', subscriptionEndsAt: asDate(data.expiredAt) ?? occurredAt }
