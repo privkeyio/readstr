@@ -52,6 +52,16 @@ const serializePrefs = (reading: Partial<ReadingPrefs>, themeVal: Theme) =>
 const FAVORITES_QUERY_INPUT = { limit: 50 } as const
 // Attempts per item before the auto-mark-read filter stops retrying a failed mark.
 const MAX_AUTO_MARK_ATTEMPTS = 3
+const AUTO_MARK_RETRY_FALLBACK_MS = 60_000
+
+// The tRPC route's 429 is plain JSON, so the TRPCClientError carries no code,
+// but its meta keeps the raw Response and with it the Retry-After header.
+function autoMarkRetryDelayMs(err: unknown): number {
+  const response = (err as { meta?: { response?: unknown } } | null)?.meta?.response
+  const header = response instanceof Response ? response.headers.get('Retry-After') : null
+  const seconds = Number(header)
+  return header && Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : AUTO_MARK_RETRY_FALLBACK_MS
+}
 const QUICK_MARK_READ_OPTIONS: { value: MarkReadBehavior; label: string; helper: string }[] = [
   { value: 'on-open', label: 'On open', helper: 'Mark as soon as I open the story' },
   { value: 'after-10s', label: 'After 10 seconds', helper: 'Give me a short buffer before marking read' },
@@ -108,6 +118,9 @@ export function FeedReader() {
   const autoMarkReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoMarkedRef = useRef<Set<string>>(new Set())
   const autoMarkFailuresRef = useRef<Map<string, number>>(new Map())
+  const autoMarkGenerationRef = useRef(0)
+  const autoMarkRetryTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
+  const [autoMarkRetryTick, setAutoMarkRetryTick] = useState(0)
   const hasCheckedSyncRef = useRef(false)
   const hasSyncedViewsRef = useRef(false)
   const hasSyncedPrefsRef = useRef(false)
@@ -593,8 +606,10 @@ export function FeedReader() {
 
       return { previousFeeds }
     },
-    onError: (_err, _vars, context) => {
-      // Rollback on error
+    onError: (_err, { itemId }, context) => {
+      // Rollback on error. Every caller marks only unread items, and the
+      // refetch in onSettled may fail too (a 429), so restore isRead directly.
+      updateFeedItemCache(itemId, () => ({ isRead: false }))
       if (context?.previousFeeds) {
         utils.feed.getFeeds.setData(undefined, context.previousFeeds)
       }
@@ -762,8 +777,16 @@ export function FeedReader() {
   }, [selectedItem, markReadBehavior, selectedItemIsRead, markAsReadMutation])
 
   useEffect(() => {
+    const retryTimers = autoMarkRetryTimersRef.current
+    autoMarkGenerationRef.current += 1
     autoMarkedRef.current.clear()
     autoMarkFailuresRef.current.clear()
+    retryTimers.forEach(clearTimeout)
+    retryTimers.clear()
+    return () => {
+      retryTimers.forEach(clearTimeout)
+      retryTimers.clear()
+    }
   }, [filterRules])
 
   // Auto-mark-read filter action: applied post-render (never in the pure
@@ -782,18 +805,29 @@ export function FeedReader() {
     )
     if (pending.length === 0) return
     autoMarkReadTimerRef.current = setTimeout(() => {
+      const generation = autoMarkGenerationRef.current
       for (const item of pending) {
         if (autoMarkedRef.current.has(item.id)) continue
         autoMarkedRef.current.add(item.id)
-        // Forget a failed mark (a 429, say) so a later pass retries it, but
-        // only a few times: a persistent failure would otherwise re-sign and
-        // re-post every pass, prompting remote signers each time. This uses
-        // mutateAsync because React Query only runs per-call mutate callbacks
-        // for the most recent call, and this loop fires many.
-        markAsReadMutation.mutateAsync({ itemId: item.id }).catch(() => {
+        // Retry a failed mark (a 429, say) once its rate-limit window has
+        // passed, but only a few times: a persistent failure would otherwise
+        // re-sign and re-post every pass, prompting remote signers each time.
+        // Completions from before a filter change are ignored, as that change
+        // already reset the bookkeeping. This uses mutateAsync because React
+        // Query only runs per-call mutate callbacks for the most recent call,
+        // and this loop fires many.
+        markAsReadMutation.mutateAsync({ itemId: item.id }).catch((err: unknown) => {
+          if (generation !== autoMarkGenerationRef.current) return
           const failures = (autoMarkFailuresRef.current.get(item.id) ?? 0) + 1
           autoMarkFailuresRef.current.set(item.id, failures)
-          if (failures < MAX_AUTO_MARK_ATTEMPTS) autoMarkedRef.current.delete(item.id)
+          if (failures >= MAX_AUTO_MARK_ATTEMPTS) return
+          const timer = setTimeout(() => {
+            autoMarkRetryTimersRef.current.delete(timer)
+            if (generation !== autoMarkGenerationRef.current) return
+            autoMarkedRef.current.delete(item.id)
+            setAutoMarkRetryTick((tick) => tick + 1)
+          }, autoMarkRetryDelayMs(err))
+          autoMarkRetryTimersRef.current.add(timer)
         })
       }
     }, 500)
@@ -803,7 +837,7 @@ export function FeedReader() {
         autoMarkReadTimerRef.current = null
       }
     }
-  }, [filteredItems, filterOutcomes, markAsReadMutation])
+  }, [filteredItems, filterOutcomes, markAsReadMutation, autoMarkRetryTick])
 
   // Handle adding new feed
   const handleAddFeed = async (type: 'RSS' | 'NOSTR', url?: string, npub?: string, title?: string, tags?: string[], categoryId?: string) => {

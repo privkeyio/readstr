@@ -74,9 +74,17 @@ describe('tRPC client links', () => {
     expect(urls.some(u => u.includes('feed.getFeeds?batch=1'))).toBe(true)
   })
 
-  it('measures the URL the batch link would build', () => {
-    expect(singleQueryBatchUrlLength('/api/trpc', 'feed.getFeeds', undefined)).toBe(
-      '/api/trpc/feed.getFeeds?batch=1'.length
+  it.each([
+    ['feed.getFeeds', undefined],
+    ['feed.getFeedItems', { tags: ['a b', 'ü'], limit: 5 }],
+  ])('measures the URL the batch link would build for %s', async (path, input) => {
+    const { client, urls } = recordingClient()
+    await client.query(path, input)
+
+    expect(urls).toHaveLength(1)
+    const sent = new URL(urls[0]!)
+    expect(singleQueryBatchUrlLength('/api/trpc', path, input)).toBe(
+      (sent.pathname + sent.search).length
     )
   })
 })

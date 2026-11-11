@@ -10,10 +10,8 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
  * mirroring tRPC 10's getUrl for a batch of one.
  */
 export function singleQueryBatchUrlLength(url: string, path: string, input: unknown): number {
-  const base = `${url}/${path}?batch=1`
-  if (input === undefined) return base.length
   const serialized = JSON.stringify({ 0: superjson.serialize(input) })
-  return base.length + '&input='.length + encodeURIComponent(serialized).length
+  return `${url}/${path}?batch=1&input=`.length + encodeURIComponent(serialized).length
 }
 
 /**
