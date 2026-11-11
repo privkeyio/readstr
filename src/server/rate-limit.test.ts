@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
+  MAX_KEYS_PER_LIMITER,
   __rateLimitBucketCountForTests,
   __resetRateLimitForTests,
   clientIpFromHeaders,
   clientIpFromRequest,
   rateLimit,
+  rateLimitKeyForIp,
 } from './rate-limit'
 
 beforeEach(() => {
@@ -73,34 +75,131 @@ describe('rateLimit', () => {
     expect(rateLimit('a', 'other', 1, 1000, 0).allowed).toBe(true)
   })
 
-  it('denies new keys when MAX_BUCKETS is full but keeps serving existing keys', () => {
-    const MAX_BUCKETS = 10_000
-    // Constant now keeps prune from firing (now - lastPrune < PRUNE_INTERVAL_MS),
-    // so the map fills to exactly MAX_BUCKETS.
-    for (let i = 0; i < MAX_BUCKETS; i++) {
-      expect(rateLimit('ep', `ip-${i}`, 5, 1000, 1000).allowed).toBe(true)
+  it('evicts the oldest window instead of locking out new keys when a limiter is full', () => {
+    for (let i = 0; i < MAX_KEYS_PER_LIMITER; i++) {
+      expect(rateLimit('trpc', `ip-${i}`, 5, 60_000, 1000).allowed).toBe(true)
     }
-    expect(__rateLimitBucketCountForTests()).toBe(MAX_BUCKETS)
+    expect(__rateLimitBucketCountForTests()).toBe(MAX_KEYS_PER_LIMITER)
 
-    const newKey = rateLimit('ep', 'ip-new', 5, 1000, 1000)
-    expect(newKey.allowed).toBe(false)
-    expect(newKey.retryAfterSeconds).toBe(1)
-    expect(__rateLimitBucketCountForTests()).toBe(MAX_BUCKETS)
+    // A legitimate new visitor is still served, and memory stays capped.
+    expect(rateLimit('trpc', 'legit', 5, 60_000, 1000).allowed).toBe(true)
+    expect(__rateLimitBucketCountForTests()).toBe(MAX_KEYS_PER_LIMITER)
 
-    // Existing keys are still served while the map is full.
-    expect(rateLimit('ep', 'ip-0', 5, 1000, 1000).allowed).toBe(true)
+    // The oldest window made room; a newer one keeps its count.
+    expect(rateLimit('trpc', `ip-${MAX_KEYS_PER_LIMITER - 1}`, 5, 60_000, 1000, 5).allowed).toBe(
+      false
+    )
   })
 
-  it('prunes expired windows once the prune interval elapses', () => {
-    // Seed a short window at t=1000; resetAt = 1100. lastPrune stays 0 because
-    // 1000 - 0 < PRUNE_INTERVAL_MS, so this key is not yet pruned.
+  it('keeps limiters isolated so an hour-long flood on one cannot affect another', () => {
+    for (let i = 0; i < MAX_KEYS_PER_LIMITER; i++) {
+      rateLimit('guide.submitFeed', `ip-${i}`, 5, 60 * 60 * 1000, 0)
+    }
+    expect(rateLimit('trpc', 'legit', 1, 60_000, 0).allowed).toBe(true)
+    expect(rateLimit('trpc', 'legit', 1, 60_000, 0).allowed).toBe(false)
+    expect(__rateLimitBucketCountForTests()).toBe(MAX_KEYS_PER_LIMITER + 1)
+  })
+
+  it('restarts an expired window and keeps the oldest-first order', () => {
+    rateLimit('ep', 'first', 5, 1000, 0)
+    rateLimit('ep', 'second', 5, 1000, 500)
+    // 'first' expires at 1000 and restarts, so it now ends after 'second'.
+    rateLimit('ep', 'first', 5, 1000, 1000)
+    // At 1500 'second' has expired and is pruned; 'first' is still live.
+    rateLimit('ep', 'third', 5, 1000, 1500)
+    expect(__rateLimitBucketCountForTests()).toBe(2)
+    expect(rateLimit('ep', 'first', 1, 1000, 1500).allowed).toBe(false)
+  })
+
+  it('prunes expired windows on the next call', () => {
     rateLimit('ep', 'stale', 5, 100, 1000)
     expect(__rateLimitBucketCountForTests()).toBe(1)
 
-    // At t=65000 the prune interval (60s) has elapsed, so the expired 'stale'
-    // window is evicted before the new key is recorded.
-    rateLimit('ep', 'fresh', 5, 100, 65_000)
+    rateLimit('ep', 'fresh', 5, 100, 1100)
     expect(__rateLimitBucketCountForTests()).toBe(1)
+  })
+
+  it('charges a NaN, negative or fractional cost as at least one whole unit', () => {
+    expect(rateLimit('ep', 'ip', 3, 1000, 0, Number.NaN).allowed).toBe(true)
+    expect(rateLimit('ep', 'ip', 3, 1000, 0, -5).allowed).toBe(true)
+    expect(rateLimit('ep', 'ip', 3, 1000, 0, Number.NEGATIVE_INFINITY).allowed).toBe(true)
+    expect(rateLimit('ep', 'ip', 3, 1000, 0, 0).allowed).toBe(false)
+    expect(rateLimit('ep', 'ip', 3, 1000, 0, Number.NaN).allowed).toBe(false)
+
+    expect(rateLimit('frac', 'ip', 2, 1000, 0, 1.5).allowed).toBe(true)
+    expect(rateLimit('frac', 'ip', 2, 1000, 0, 0.5).allowed).toBe(false)
+  })
+
+  it('refuses an infinite cost', () => {
+    expect(rateLimit('ep', 'ip', 3, 1000, 0, Number.POSITIVE_INFINITY).allowed).toBe(false)
+    expect(rateLimit('ep', 'ip', 3, 1000, 0, 3).allowed).toBe(true)
+  })
+})
+
+describe('rateLimitKeyForIp', () => {
+  it('keeps IPv4 addresses as they are', () => {
+    expect(rateLimitKeyForIp('203.0.113.5')).toBe('203.0.113.5')
+  })
+
+  it('drops a port from IPv4', () => {
+    expect(rateLimitKeyForIp('203.0.113.5:4433')).toBe('203.0.113.5')
+  })
+
+  it('keys IPv6 on its /64 prefix', () => {
+    expect(rateLimitKeyForIp('2001:db8:1:2:aaaa:bbbb:cccc:dddd')).toBe('2001:db8:1:2::/64')
+    expect(rateLimitKeyForIp('2001:db8:1:2::1')).toBe('2001:db8:1:2::/64')
+    expect(rateLimitKeyForIp('2001:DB8:1:2::ffff')).toBe('2001:db8:1:2::/64')
+  })
+
+  it('expands :: compression wherever it appears', () => {
+    expect(rateLimitKeyForIp('2001:db8::1')).toBe('2001:db8:0:0::/64')
+    expect(rateLimitKeyForIp('2001:0db8:0000:0000::1')).toBe('2001:db8:0:0::/64')
+    expect(rateLimitKeyForIp('::1')).toBe('0:0:0:0::/64')
+    expect(rateLimitKeyForIp('::')).toBe('0:0:0:0::/64')
+    expect(rateLimitKeyForIp('fe80::')).toBe('fe80:0:0:0::/64')
+    expect(rateLimitKeyForIp('1:2:3:4:5:6:7::')).toBe('1:2:3:4::/64')
+  })
+
+  it('strips brackets, ports and zone ids', () => {
+    expect(rateLimitKeyForIp('[2001:db8:1:2::1]')).toBe('2001:db8:1:2::/64')
+    expect(rateLimitKeyForIp('[2001:db8:1:2::1]:443')).toBe('2001:db8:1:2::/64')
+    expect(rateLimitKeyForIp('fe80::1%eth0')).toBe('fe80:0:0:0::/64')
+  })
+
+  it('keys IPv4-mapped IPv6 as the IPv4 address', () => {
+    expect(rateLimitKeyForIp('::ffff:203.0.113.5')).toBe('203.0.113.5')
+    expect(rateLimitKeyForIp('::FFFF:cb00:7105')).toBe('203.0.113.5')
+    expect(rateLimitKeyForIp('0:0:0:0:0:ffff:203.0.113.5')).toBe('203.0.113.5')
+  })
+
+  it('keys other embedded-IPv4 forms by their /64 like any IPv6 address', () => {
+    expect(rateLimitKeyForIp('64:ff9b::203.0.113.5')).toBe('64:ff9b:0:0::/64')
+  })
+
+  it('returns unparseable values unchanged', () => {
+    for (const raw of [
+      'unknown',
+      'not-an-ip',
+      '1:2:3:4:5:6:7:8:9',
+      '1:2:3:4:5:6:7',
+      '1::2::3',
+      '12345::1',
+      'g::1',
+      '1:2:3:4:5:6:7:8::',
+      '1.2.3.4::1',
+      '::ffff:1.2.3.256',
+      '[2001:db8::1',
+      '[2001:db8::1]x',
+      '999.1.1.1',
+    ]) {
+      expect(rateLimitKeyForIp(raw)).toBe(raw)
+    }
+  })
+
+  it('gives every address in one /64 the same budget', () => {
+    expect(rateLimit('ep', rateLimitKeyForIp('2001:db8:1:2::1'), 1, 1000, 0).allowed).toBe(true)
+    expect(rateLimit('ep', rateLimitKeyForIp('2001:db8:1:2::2'), 1, 1000, 0).allowed).toBe(false)
+    expect(rateLimit('ep', rateLimitKeyForIp('2001:db8:1:3::1'), 1, 1000, 0).allowed).toBe(true)
   })
 })
 
@@ -115,6 +214,10 @@ describe('clientIpFromHeaders', () => {
 
   it('returns the single value when there is one hop', () => {
     expect(fromXff('203.0.113.5')).toBe('203.0.113.5')
+  })
+
+  it('reduces an IPv6 peer to its /64', () => {
+    expect(fromXff('198.51.100.1, 2001:db8:1:2::abcd')).toBe('2001:db8:1:2::/64')
   })
 
   it('trims surrounding whitespace on the selected entry', () => {

@@ -27,6 +27,9 @@ const MAX_TRPC_BODY_BYTES = 64_000
  * to four refetches, so reading one item a second is ~300 a minute and the
  * auto-mark-read filter on a full 50-item page is a ~250 call burst. 1,200
  * leaves room for both together while holding one IP to ~20 calls a second.
+ * The budget is per client IP (per /64 for IPv6), so users behind one NAT or
+ * carrier-grade NAT share it; that is an accepted trade-off for a limiter that
+ * runs before authentication.
  * Requests without X-Forwarded-For (local dev, or anything bypassing Caddy)
  * share the 'unknown' bucket; in dev that is a single user, so it is fine.
  */

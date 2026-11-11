@@ -19,10 +19,12 @@ describe('tRPC batch limits', () => {
       transformer: superjson,
       links: [
         httpBatchLink({
-          url: 'http://localhost/api/trpc',
+          // The real client uses this relative URL, so batch splitting here
+          // sees the same URL lengths it does in the browser.
+          url: '/api/trpc',
           maxURLLength: TRPC_MAX_URL_LENGTH,
           fetch: async input => {
-            const url = String(input)
+            const url = new URL(String(input), 'http://localhost').href
             urls.push(url)
             const n = countTrpcCalls(url, '/api/trpc') ?? 0
             const body = Array.from({ length: n }, () => ({ result: { data: { json: null } } }))

@@ -50,6 +50,8 @@ const serializePrefs = (reading: Partial<ReadingPrefs>, themeVal: Theme) =>
   JSON.stringify({ reading: normalizeReading(reading), theme: themeVal })
 
 const FAVORITES_QUERY_INPUT = { limit: 50 } as const
+// Attempts per item before the auto-mark-read filter stops retrying a failed mark.
+const MAX_AUTO_MARK_ATTEMPTS = 3
 const QUICK_MARK_READ_OPTIONS: { value: MarkReadBehavior; label: string; helper: string }[] = [
   { value: 'on-open', label: 'On open', helper: 'Mark as soon as I open the story' },
   { value: 'after-10s', label: 'After 10 seconds', helper: 'Give me a short buffer before marking read' },
@@ -105,6 +107,7 @@ export function FeedReader() {
   const viewsExportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoMarkReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoMarkedRef = useRef<Set<string>>(new Set())
+  const autoMarkFailuresRef = useRef<Map<string, number>>(new Map())
   const hasCheckedSyncRef = useRef(false)
   const hasSyncedViewsRef = useRef(false)
   const hasSyncedPrefsRef = useRef(false)
@@ -760,6 +763,7 @@ export function FeedReader() {
 
   useEffect(() => {
     autoMarkedRef.current.clear()
+    autoMarkFailuresRef.current.clear()
   }, [filterRules])
 
   // Auto-mark-read filter action: applied post-render (never in the pure
@@ -781,7 +785,16 @@ export function FeedReader() {
       for (const item of pending) {
         if (autoMarkedRef.current.has(item.id)) continue
         autoMarkedRef.current.add(item.id)
-        markAsReadMutation.mutate({ itemId: item.id })
+        // Forget a failed mark (a 429, say) so a later pass retries it, but
+        // only a few times: a persistent failure would otherwise re-sign and
+        // re-post every pass, prompting remote signers each time. This uses
+        // mutateAsync because React Query only runs per-call mutate callbacks
+        // for the most recent call, and this loop fires many.
+        markAsReadMutation.mutateAsync({ itemId: item.id }).catch(() => {
+          const failures = (autoMarkFailuresRef.current.get(item.id) ?? 0) + 1
+          autoMarkFailuresRef.current.set(item.id, failures)
+          if (failures < MAX_AUTO_MARK_ATTEMPTS) autoMarkedRef.current.delete(item.id)
+        })
       }
     }, 500)
     return () => {

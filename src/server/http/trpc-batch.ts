@@ -18,5 +18,9 @@ export function countTrpcCalls(url: string, endpoint: string): number | null {
   } catch {
     return null
   }
-  return decoded.split(',').length
+  // Count commas in place rather than splitting, so a long path does not
+  // allocate an array of every segment just to measure it.
+  let calls = 1
+  for (let i = decoded.indexOf(','); i !== -1; i = decoded.indexOf(',', i + 1)) calls++
+  return calls
 }
