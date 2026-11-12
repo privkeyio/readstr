@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { finalizeEvent, generateSecretKey } from 'nostr-tools'
-import { verifyNip98Header } from './nip98'
+import { __resetNip98LogBudgetsForTests, verifyNip98Header } from './nip98'
 
 const url = 'http://localhost/api/trpc/feed.getFeeds?batch=1'
 
@@ -18,6 +18,11 @@ const header = (sk: Uint8Array, createdAt: number, extraTags: string[][] = []) =
 }
 
 describe('verifyNip98Header replay check', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    __resetNip98LogBudgetsForTests()
+  })
+
   it('rejects a second identical event in the same second', async () => {
     const sk = generateSecretKey()
     const now = Math.floor(Date.now() / 1000)
@@ -53,8 +58,29 @@ describe('verifyNip98Header replay check', () => {
       path: '/api/trpc/feed.getFeeds',
       userAgent: 'Mozilla/5.0 test',
     })
-    expect((call?.[1] as { ageSeconds: number }).ageSeconds).toBeGreaterThanOrEqual(3)
+    const detail = call?.[1] as { ageSeconds: number; sinceFirstMs: number }
+    expect(detail.ageSeconds).toBeGreaterThanOrEqual(3)
+    expect(detail.sinceFirstMs).toBeGreaterThanOrEqual(0)
+    expect(detail.sinceFirstMs).toBeLessThan(3000)
     expect(JSON.stringify(call?.[1])).not.toContain('batch=1')
-    warn.mockRestore()
+  })
+
+  it('still logs replays after junk headers use up the general log budget', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    for (let i = 0; i < 40; i++) await verifyNip98Header('Nostr garbage', { url, method: 'GET' })
+    const token = header(generateSecretKey(), Math.floor(Date.now() / 1000), [['nonce', 'flood']])
+    await verifyNip98Header(token, { url, method: 'GET' })
+    expect(await verifyNip98Header(token, { url, method: 'GET' })).toBeNull()
+    expect(warn.mock.calls.some(c => String(c[0]).includes('replayed event id'))).toBe(true)
+  })
+
+  it('logs only paths on a u tag mismatch', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const token = header(generateSecretKey(), Math.floor(Date.now() / 1000))
+    const other = 'http://localhost/api/trpc/feed.getFeeds?batch=1&input=secret'
+    expect(await verifyNip98Header(token, { url: other, method: 'GET' })).toBeNull()
+    const call = warn.mock.calls.find(c => String(c[0]).includes('u tag mismatch'))
+    expect(call).toBeDefined()
+    expect(JSON.stringify(call?.[1])).not.toContain('secret')
   })
 })
