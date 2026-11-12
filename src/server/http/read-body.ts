@@ -1,5 +1,5 @@
 /**
- * Read a request body as text, refusing anything over `maxBytes`.
+ * Read a request (or fetch response) body as text, refusing anything over `maxBytes`.
  *
  * Request bodies feed JSON.parse and then zod. zod v3 keeps parsing every
  * array element even after `.max()` fails, so a ~1 MB array can cost ~150 MB
@@ -19,7 +19,10 @@
 
 export type ReadBodyResult = { ok: true; body: string } | { ok: false; status: 400 | 413 }
 
-export async function readBodyWithLimit(req: Request, maxBytes: number): Promise<ReadBodyResult> {
+export async function readBodyWithLimit(
+  req: Pick<Request, 'headers' | 'body'>,
+  maxBytes: number
+): Promise<ReadBodyResult> {
   const declared = req.headers.get('content-length')
   if (declared !== null) {
     if (!/^\d+$/.test(declared.trim())) return { ok: false, status: 400 }

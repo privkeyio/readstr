@@ -5,6 +5,8 @@ import {
   buildCheckoutUrl,
   trialEndFrom,
 } from '@/lib/subscription'
+import { flashApiConfig, KEPT, reconcileWithFlash, shouldCheckFlashOnStatus } from '@/server/flash-reconcile'
+import { rateLimit } from '@/server/rate-limit'
 
 export const subscriptionRouter = createTRPCRouter({
   // Get current user's subscription status
@@ -16,11 +18,18 @@ export const subscriptionRouter = createTRPCRouter({
       if (ctx.nostrPubkey) {
         // Start the trial on first sight and persist it, so it really ends.
         // The empty update keeps an existing row (and its dates) untouched.
-        const subscription = await ctx.db.userSubscription.upsert({
+        let subscription = await ctx.db.userSubscription.upsert({
           where: { userPubkey: ctx.nostrPubkey },
           create: { userPubkey: ctx.nostrPubkey, status: 'TRIAL', trialEndsAt: trialEndFrom(now) },
           update: {},
         })
+
+        // A lost webhook shows up as a row that denies access or is about to
+        // run out, so re-check Flash then (throttled, and best effort).
+        if (flashApiConfig() && shouldCheckFlashOnStatus(subscription, now, rateLimit)) {
+          const reconciled = await reconcileWithFlash(ctx.db, ctx.nostrPubkey, now).catch(() => null)
+          if (reconciled && reconciled !== KEPT) subscription = { ...subscription, ...reconciled }
+        }
 
         return {
           userPubkey: ctx.nostrPubkey,
