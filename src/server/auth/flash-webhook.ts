@@ -159,6 +159,10 @@ export function verifyFlashWebhook(
  * subscription. "Live" is judged by access at the event's time, not by status
  * alone: if S1's `expired` was dropped, its row would otherwise stay "live"
  * forever and every later S2 event would be skipped.
+ *
+ * `renewed` may also relink a row whose linked subscription is CANCELLED: a
+ * cancelled subscription never renews, so a renewal from another one is a new
+ * payment (e.g. S2 whose `activated` was dropped), not a stale S1 event.
  */
 export function isForeignSubscriptionEvent(
   row: {
@@ -171,6 +175,7 @@ export function isForeignSubscriptionEvent(
 ): boolean {
   if (!row?.flashSubscriptionId || row.flashSubscriptionId === event.subscriptionId) return false
   if (event.event === 'subscription.activated') return false
+  if (event.event === 'subscription.renewed' && row.status === 'CANCELLED') return false
   return accessFor(row, event.occurredAt).hasAccess
 }
 

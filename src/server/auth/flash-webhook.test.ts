@@ -130,6 +130,15 @@ describe('isForeignSubscriptionEvent', () => {
     expect(isForeignSubscriptionEvent(row('CANCELLED', 'S1', 10), ev('subscription.activated', 'S2'))).toBe(false)
   })
 
+  it('lets renewed relink a cancelled row that still grants access, but not other events', () => {
+    // S1 cancelled with time left; S2's activated was dropped, so its renewal must land.
+    const cancelled = row('CANCELLED', 'S1', 10)
+    expect(isForeignSubscriptionEvent(cancelled, ev('subscription.renewed', 'S2'))).toBe(false)
+    for (const e of ['subscription.expired', 'subscription.canceled', 'subscription.past_due']) {
+      expect(isForeignSubscriptionEvent(cancelled, ev(e, 'S2'))).toBe(true)
+    }
+  })
+
   it('applies any event once the linked subscription no longer grants access', () => {
     // S1's expired and S2's activated were both dropped: S2's renewals must still land.
     expect(isForeignSubscriptionEvent(row('CANCELLED', 'S1', -1), ev('subscription.renewed', 'S2'))).toBe(false)

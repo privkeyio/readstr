@@ -88,7 +88,8 @@ lost. `flashSubscriptionId` is stored so rows can be reconciled against Flash's 
 (`GET /api/v1/external/subscriptions/{id}/verify`). That reconciliation is not built yet.
 
 A row follows one Flash subscription at a time. While the row still grants access, only
-`activated` can link it to a new one, and other events from a different subscription are
+`activated` can link it to a new one (or `renewed`, when the linked subscription is
+cancelled and so can't renew), and other events from a different subscription are
 logged and skipped, so an old subscription's `expired` cannot end a newer paid one. Once
 the row no longer grants access, any event can relink it.
 
