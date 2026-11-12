@@ -4,12 +4,17 @@ import { createTRPCRouter, publicProcedure, protectedProcedure } from '@/server/
 import { getNostrFetcher } from '@/lib/nostr-fetcher'
 import { rateLimit } from '@/server/rate-limit'
 import { nip19 } from 'nostr-tools'
+import { getGuideTagsCached, invalidateGuideTags } from '@/server/guide-tags'
+
+// Tags are public and served to every visitor by getGuideTags, so bound them.
+const MAX_TAG_LENGTH = 50
 
 export const guideRouter = createTRPCRouter({
   // Get all guide feeds with optional tag filtering
   getGuideFeeds: publicProcedure
     .input(z.object({
-      tags: z.array(z.string()).max(100).optional(),
+      // Loose: rows stored before MAX_TAG_LENGTH existed may hold longer tags.
+      tags: z.array(z.string().max(200)).max(100).optional(),
       limit: z.number().min(1).max(100).default(50),
       orderBy: z.enum(['newest', 'popular', 'recent_posts']).default('popular'),
     }).optional())
@@ -42,35 +47,16 @@ export const guideRouter = createTRPCRouter({
       return feeds
     }),
 
-  // Get all unique tags from guide feeds
+  // Get all unique tags from guide feeds (cached; see guide-tags.ts)
   getGuideTags: publicProcedure
-    .query(async ({ ctx }) => {
-      const feeds = await ctx.db.guideFeed.findMany({
-        where: { isActive: true },
-        select: { tags: true },
-      })
-
-      // Aggregate all tags and count occurrences
-      const tagCounts = new Map<string, number>()
-      
-      for (const feed of feeds) {
-        for (const tag of feed.tags) {
-          tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1)
-        }
-      }
-
-      // Convert to array and sort by count
-      return Array.from(tagCounts.entries())
-        .map(([tag, count]) => ({ tag, count }))
-        .sort((a, b) => b.count - a.count)
-    }),
+    .query(({ ctx }) => getGuideTagsCached(ctx.db)),
 
   // Submit a new feed to the guide
   // Allow anonymous submissions so people can add feeds without signing in
   submitFeed: publicProcedure
     .input(z.object({
       npub: z.string().startsWith('npub1'),
-      tags: z.array(z.string()).min(1).max(10),
+      tags: z.array(z.string().trim().min(1).max(MAX_TAG_LENGTH)).min(1).max(10),
     }))
     .mutation(async ({ ctx, input }) => {
       const limit = rateLimit('guide.submitFeed', ctx.clientIp, 5, 60 * 60 * 1000)
@@ -126,6 +112,7 @@ export const guideRouter = createTRPCRouter({
           postCount: posts.length,
         },
       })
+      invalidateGuideTags()
 
       return guideFeed
     }),
@@ -205,7 +192,7 @@ export const guideRouter = createTRPCRouter({
   // Update tags for own guide entry (user must be logged in as this npub)
   updateOwnTags: protectedProcedure
     .input(z.object({
-      tags: z.array(z.string()).min(1).max(10),
+      tags: z.array(z.string().trim().min(1).max(MAX_TAG_LENGTH)).min(1).max(10),
     }))
     .mutation(async ({ ctx, input }) => {
       // Convert hex pubkey to npub
@@ -223,6 +210,7 @@ export const guideRouter = createTRPCRouter({
         where: { npub },
         data: { tags: input.tags },
       })
+      invalidateGuideTags()
 
       return { success: true, tags: input.tags }
     }),
@@ -244,6 +232,7 @@ export const guideRouter = createTRPCRouter({
       await ctx.db.guideFeed.delete({
         where: { npub },
       })
+      invalidateGuideTags()
 
       return { success: true }
     }),
