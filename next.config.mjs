@@ -5,8 +5,20 @@ const withPWA = withPWAInit({
   dest: 'public',
   register: true,
   disable: process.env.NODE_ENV === 'development',
+  // Keep next-pwa's default routes, but replace its `apis` entry (same
+  // cacheName, so it stays in place): API responses are per-user and signed,
+  // so caching them by URL would serve one user's data to the next sign-in.
+  extendDefaultRuntimeCaching: true,
   workboxOptions: {
     skipWaiting: true,
+    runtimeCaching: [
+      {
+        urlPattern: ({ sameOrigin, url: { pathname } }) => sameOrigin && pathname.startsWith('/api/'),
+        handler: 'NetworkOnly',
+        options: { cacheName: 'apis' },
+        method: 'GET',
+      },
+    ],
   },
 })
 
