@@ -18,6 +18,8 @@ const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000
 
 export function ServiceWorkerUpdater() {
   useEffect(() => {
+    // Earlier versions cached signed-in API responses under 'apis'; drop them.
+    if ('caches' in window) void caches.delete('apis').catch(() => {})
     if (!('serviceWorker' in navigator)) return
 
     const abort = new AbortController()
