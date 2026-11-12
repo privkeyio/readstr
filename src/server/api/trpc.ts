@@ -57,13 +57,43 @@ export function formatError({ shape, error }: { shape: DefaultErrorShape; error:
   }
 }
 
+const MAX_INPUT_DEPTH = 32
+const MAX_INPUT_NODES = 10_000
+// The superjson envelope adds `json` or `meta.values` levels around the data,
+// and the sanitizer enforces MAX_INPUT_DEPTH on the data itself afterwards.
+const MAX_ENVELOPE_DEPTH = MAX_INPUT_DEPTH + 4
+
+/**
+ * Reject input nested deeper than MAX_ENVELOPE_DEPTH, without recursion.
+ *
+ * superjson.deserialize copies its input recursively, so ~30k levels of
+ * nested arrays (which fit in a 64 KB body or a GET URL) overflow the stack
+ * before the sanitizer's depth bound ever runs. This walk uses an explicit
+ * stack, so hostile nesting is a 400 instead of a caught RangeError.
+ */
+export function assertInputDepth(value: unknown, maxDepth: number = MAX_ENVELOPE_DEPTH): void {
+  const stack: [unknown, number][] = [[value, 0]]
+  while (stack.length > 0) {
+    const [current, depth] = stack.pop()!
+    if (!current || typeof current !== 'object') continue
+    if (depth >= maxDepth) {
+      throw new TRPCError({ code: 'BAD_REQUEST', message: 'Input is too large or too deeply nested' })
+    }
+    for (const child of Array.isArray(current) ? current : Object.values(current)) {
+      stack.push([child, depth + 1])
+    }
+  }
+}
+
 // Wire-compatible with the client's plain `superjson`; only the server's
 // parsing of client input differs.
 export const transformer = {
   input: {
     serialize: (value: unknown) => superjson.serialize(value),
-    deserialize: (value: unknown) =>
-      superjson.deserialize(stripReferentialEqualities(value) as Parameters<typeof superjson.deserialize>[0]),
+    deserialize: (value: unknown) => {
+      assertInputDepth(value)
+      return superjson.deserialize(stripReferentialEqualities(value) as Parameters<typeof superjson.deserialize>[0])
+    },
   },
   output: superjson,
 }
@@ -72,9 +102,6 @@ const t = initTRPC.context<TRPCContext>().create({
   transformer,
   errorFormatter: formatError,
 })
-
-const MAX_INPUT_DEPTH = 32
-const MAX_INPUT_NODES = 10_000
 
 /**
  * Remove 'undefined' strings, null values, and empty strings from arrays to

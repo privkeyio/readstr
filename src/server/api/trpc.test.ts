@@ -1,7 +1,16 @@
 import { TRPCError, type DefaultErrorShape } from '@trpc/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z, type ZodError } from 'zod'
-import { formatError, sanitizeValue, stripReferentialEqualities, transformer } from './trpc'
+import { fetchRequestHandler } from '@trpc/server/adapters/fetch'
+import {
+  assertInputDepth,
+  createTRPCRouter,
+  formatError,
+  publicProcedure,
+  sanitizeValue,
+  stripReferentialEqualities,
+  transformer,
+} from './trpc'
 
 function countObjects(value: unknown): number {
   if (!value || typeof value !== 'object') return 0
@@ -81,6 +90,50 @@ describe('sanitizeValue', () => {
   it('accepts the largest real inputs', () => {
     const ids = Array.from({ length: 1000 }, (_, i) => `id${i}`)
     expect(sanitizeValue({ itemIds: ids })).toEqual({ itemIds: ids })
+  })
+})
+
+function nestedArrays(depth: number): unknown {
+  let deep: unknown = 0
+  for (let i = 0; i < depth; i++) deep = [deep]
+  return deep
+}
+
+describe('assertInputDepth', () => {
+  it('rejects hostile nesting without overflowing the stack', () => {
+    expect(thrownBy(() => assertInputDepth({ json: nestedArrays(30_000) }))).toMatchObject({ code: 'BAD_REQUEST' })
+    expect(thrownBy(() => transformer.input.deserialize({ json: nestedArrays(30_000) }))).toMatchObject({
+      code: 'BAD_REQUEST',
+    })
+  })
+
+  it('accepts input as deep as the sanitizer allows', () => {
+    const json = nestedArrays(32)
+    expect(transformer.input.deserialize({ json, meta: { values: {} } })).toEqual(json)
+  })
+})
+
+describe('deeply nested input through tRPC', () => {
+  const router = createTRPCRouter({ echo: publicProcedure.input(z.unknown()).query(({ input }) => input) })
+  const call = (rawInput: string) =>
+    fetchRequestHandler({
+      endpoint: '/api/trpc',
+      router,
+      req: new Request(`http://localhost/api/trpc/echo?input=${encodeURIComponent(rawInput)}`),
+      createContext: () => ({}) as never,
+    })
+
+  it('answers 400, not 500', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    // Sent as raw text, the way a client would: ~60 KB, under the body cap.
+    const n = 30_000
+    const res = await call(`{"json":${'['.repeat(n)}0${']'.repeat(n)}}`)
+    expect(res.status).toBe(400)
+  })
+
+  it('still serves normal input', async () => {
+    const res = await call(JSON.stringify({ json: { tags: ['a', 'b'] } }))
+    expect(res.status).toBe(200)
   })
 })
 

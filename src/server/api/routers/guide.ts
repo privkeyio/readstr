@@ -4,6 +4,7 @@ import { createTRPCRouter, publicProcedure, protectedProcedure } from '@/server/
 import { getNostrFetcher } from '@/lib/nostr-fetcher'
 import { rateLimit } from '@/server/rate-limit'
 import { nip19 } from 'nostr-tools'
+import { getGuideTagsCached, invalidateGuideTags } from '@/server/guide-tags'
 
 export const guideRouter = createTRPCRouter({
   // Get all guide feeds with optional tag filtering
@@ -42,28 +43,9 @@ export const guideRouter = createTRPCRouter({
       return feeds
     }),
 
-  // Get all unique tags from guide feeds
+  // Get all unique tags from guide feeds (cached; see guide-tags.ts)
   getGuideTags: publicProcedure
-    .query(async ({ ctx }) => {
-      const feeds = await ctx.db.guideFeed.findMany({
-        where: { isActive: true },
-        select: { tags: true },
-      })
-
-      // Aggregate all tags and count occurrences
-      const tagCounts = new Map<string, number>()
-      
-      for (const feed of feeds) {
-        for (const tag of feed.tags) {
-          tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1)
-        }
-      }
-
-      // Convert to array and sort by count
-      return Array.from(tagCounts.entries())
-        .map(([tag, count]) => ({ tag, count }))
-        .sort((a, b) => b.count - a.count)
-    }),
+    .query(({ ctx }) => getGuideTagsCached(ctx.db)),
 
   // Submit a new feed to the guide
   // Allow anonymous submissions so people can add feeds without signing in
@@ -126,6 +108,7 @@ export const guideRouter = createTRPCRouter({
           postCount: posts.length,
         },
       })
+      invalidateGuideTags()
 
       return guideFeed
     }),
@@ -223,6 +206,7 @@ export const guideRouter = createTRPCRouter({
         where: { npub },
         data: { tags: input.tags },
       })
+      invalidateGuideTags()
 
       return { success: true, tags: input.tags }
     }),
@@ -244,6 +228,7 @@ export const guideRouter = createTRPCRouter({
       await ctx.db.guideFeed.delete({
         where: { npub },
       })
+      invalidateGuideTags()
 
       return { success: true }
     }),
