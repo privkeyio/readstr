@@ -258,8 +258,28 @@ interface LogBudget {
 const generalLogBudget: LogBudget = { windowStart: 0, count: 0 }
 const replayLogBudget: LogBudget = { windowStart: 0, count: 0 }
 
+// A GET repeated within this long of its first copy is a transport-level
+// retry: production logs show proxies re-sending idempotent requests 100-600 ms
+// later while the browser only ever sees the first (accepted) response. Those
+// are still rejected, but summarized instead of logged one by one.
+const TRANSPORT_RETRY_MS = 2_000
+const transportRetries: LogBudget = { windowStart: 0, count: 0 }
+
+function noteTransportRetry(): null {
+  const now = Date.now()
+  if (now - transportRetries.windowStart >= REJECT_LOG_WINDOW_MS) {
+    if (transportRetries.count > 0) {
+      console.info(`nip98: rejected ${transportRetries.count} repeated GET(s) within ${TRANSPORT_RETRY_MS} ms (transport retries)`)
+    }
+    transportRetries.windowStart = now
+    transportRetries.count = 0
+  }
+  transportRetries.count++
+  return null
+}
+
 export function __resetNip98LogBudgetsForTests(): void {
-  for (const budget of [generalLogBudget, replayLogBudget]) {
+  for (const budget of [generalLogBudget, replayLogBudget, transportRetries]) {
     budget.windowStart = 0
     budget.count = 0
   }
@@ -360,6 +380,8 @@ export async function verifyNip98Header(
     // 7. Single-use: reject an event id we have already accepted in-window.
     const firstSeenMs = consumeEventId(event.id, event.created_at, now)
     if (firstSeenMs !== null) {
+      const sinceFirstMs = Date.now() - firstSeenMs
+      if ((method === 'GET' || method === 'HEAD') && sinceFirstMs < TRANSPORT_RETRY_MS) return noteTransportRetry()
       // The client signs every request with a fresh nonce, so a repeat id means
       // the same HTTP request arrived twice. sinceFirstMs tells a transport
       // retry (milliseconds) from a resend; ageSeconds counts from signing,
@@ -372,7 +394,7 @@ export async function verifyNip98Header(
           id: event.id,
           method,
           path: requestPath(opts.url),
-          sinceFirstMs: Date.now() - firstSeenMs,
+          sinceFirstMs,
           ageSeconds: Math.round(now - event.created_at),
           userAgent: opts.userAgent ?? '(none)',
         },

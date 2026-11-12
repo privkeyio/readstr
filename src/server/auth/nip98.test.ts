@@ -20,6 +20,7 @@ const header = (sk: Uint8Array, createdAt: number, extraTags: string[][] = []) =
 describe('verifyNip98Header replay check', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.useRealTimers()
     __resetNip98LogBudgetsForTests()
   })
 
@@ -49,7 +50,9 @@ describe('verifyNip98Header replay check', () => {
     const now = Math.floor(Date.now() / 1000)
     const token = header(sk, now - 3)
 
+    vi.useFakeTimers({ toFake: ['Date'] })
     await verifyNip98Header(token, { url, method: 'GET', userAgent: 'Mozilla/5.0 test' })
+    vi.setSystemTime(Date.now() + 2_500)
     await verifyNip98Header(token, { url, method: 'GET', userAgent: 'Mozilla/5.0 test' })
 
     const call = warn.mock.calls.find(c => String(c[0]).includes('replayed event id'))
@@ -60,8 +63,8 @@ describe('verifyNip98Header replay check', () => {
     })
     const detail = call?.[1] as { ageSeconds: number; sinceFirstMs: number }
     expect(detail.ageSeconds).toBeGreaterThanOrEqual(3)
-    expect(detail.sinceFirstMs).toBeGreaterThanOrEqual(0)
-    expect(detail.sinceFirstMs).toBeLessThan(3000)
+    expect(detail.sinceFirstMs).toBeGreaterThanOrEqual(2_500)
+    expect(detail.sinceFirstMs).toBeLessThan(3_000)
     expect(JSON.stringify(call?.[1])).not.toContain('batch=1')
   })
 
@@ -69,9 +72,29 @@ describe('verifyNip98Header replay check', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     for (let i = 0; i < 40; i++) await verifyNip98Header('Nostr garbage', { url, method: 'GET' })
     const token = header(generateSecretKey(), Math.floor(Date.now() / 1000), [['nonce', 'flood']])
+    vi.useFakeTimers({ toFake: ['Date'] })
     await verifyNip98Header(token, { url, method: 'GET' })
+    vi.setSystemTime(Date.now() + 2_500)
     expect(await verifyNip98Header(token, { url, method: 'GET' })).toBeNull()
     expect(warn.mock.calls.some(c => String(c[0]).includes('replayed event id'))).toBe(true)
+  })
+
+  it('rejects a GET repeated within 2 s but only counts it as a transport retry', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const token = header(generateSecretKey(), Math.floor(Date.now() / 1000), [['nonce', 'retry']])
+    expect(await verifyNip98Header(token, { url, method: 'GET' })).not.toBeNull()
+    expect(await verifyNip98Header(token, { url, method: 'GET' })).toBeNull()
+    expect(await verifyNip98Header(token, { url, method: 'GET' })).toBeNull()
+    expect(warn).not.toHaveBeenCalled()
+
+    // The count is summarized when the next window starts.
+    vi.setSystemTime(Date.now() + 61_000)
+    const later = header(generateSecretKey(), Math.floor(Date.now() / 1000), [['nonce', 'later']])
+    await verifyNip98Header(later, { url, method: 'GET' })
+    await verifyNip98Header(later, { url, method: 'GET' })
+    expect(info.mock.calls.some(c => String(c[0]).includes('rejected 2 repeated GET(s)'))).toBe(true)
   })
 
   it('logs only paths on a u tag mismatch', async () => {
