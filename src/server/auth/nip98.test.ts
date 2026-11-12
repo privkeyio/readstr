@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { finalizeEvent, generateSecretKey } from 'nostr-tools'
 import { __resetNip98LogBudgetsForTests, verifyNip98Header } from './nip98'
@@ -20,6 +21,7 @@ const header = (sk: Uint8Array, createdAt: number, extraTags: string[][] = []) =
 describe('verifyNip98Header replay check', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.useRealTimers()
     __resetNip98LogBudgetsForTests()
   })
 
@@ -49,7 +51,9 @@ describe('verifyNip98Header replay check', () => {
     const now = Math.floor(Date.now() / 1000)
     const token = header(sk, now - 3)
 
+    vi.useFakeTimers({ toFake: ['Date'] })
     await verifyNip98Header(token, { url, method: 'GET', userAgent: 'Mozilla/5.0 test' })
+    vi.setSystemTime(Date.now() + 2_500)
     await verifyNip98Header(token, { url, method: 'GET', userAgent: 'Mozilla/5.0 test' })
 
     const call = warn.mock.calls.find(c => String(c[0]).includes('replayed event id'))
@@ -60,8 +64,8 @@ describe('verifyNip98Header replay check', () => {
     })
     const detail = call?.[1] as { ageSeconds: number; sinceFirstMs: number }
     expect(detail.ageSeconds).toBeGreaterThanOrEqual(3)
-    expect(detail.sinceFirstMs).toBeGreaterThanOrEqual(0)
-    expect(detail.sinceFirstMs).toBeLessThan(3000)
+    expect(detail.sinceFirstMs).toBeGreaterThanOrEqual(2_500)
+    expect(detail.sinceFirstMs).toBeLessThan(3_000)
     expect(JSON.stringify(call?.[1])).not.toContain('batch=1')
   })
 
@@ -69,7 +73,86 @@ describe('verifyNip98Header replay check', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     for (let i = 0; i < 40; i++) await verifyNip98Header('Nostr garbage', { url, method: 'GET' })
     const token = header(generateSecretKey(), Math.floor(Date.now() / 1000), [['nonce', 'flood']])
+    vi.useFakeTimers({ toFake: ['Date'] })
     await verifyNip98Header(token, { url, method: 'GET' })
+    vi.setSystemTime(Date.now() + 2_500)
+    expect(await verifyNip98Header(token, { url, method: 'GET' })).toBeNull()
+    expect(warn.mock.calls.some(c => String(c[0]).includes('replayed event id'))).toBe(true)
+  })
+
+  it('logs a few fast GET repeats in full, then only counts them', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const token = header(generateSecretKey(), Math.floor(Date.now() / 1000), [['nonce', 'retry']])
+    expect(await verifyNip98Header(token, { url, method: 'GET' })).not.toBeNull()
+    for (let i = 0; i < 6; i++) expect(await verifyNip98Header(token, { url, method: 'GET' })).toBeNull()
+    const replays = () => warn.mock.calls.filter(c => String(c[0]).includes('replayed event id')).length
+    expect(replays()).toBe(3)
+
+    // The count is written once the window ends, even if the next log is another kind of rejection.
+    vi.setSystemTime(Date.now() + 61_000)
+    await verifyNip98Header('Nostr garbage', { url, method: 'GET' })
+    expect(info.mock.calls.some(c => String(c[0]).includes('rejected 3 more repeated GET/HEAD request(s)'))).toBe(true)
+  })
+
+  it('logs fast GET repeat samples even after slow replays use up the replay budget', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const sk = generateSecretKey()
+    const created = Math.floor(Date.now() / 1000)
+    const slow = header(sk, created, [['nonce', 'slow']])
+    await verifyNip98Header(slow, { url, method: 'GET' })
+    vi.setSystemTime(Date.now() + 2_500)
+    for (let i = 0; i < 35; i++) await verifyNip98Header(slow, { url, method: 'GET' })
+    const replays = () => warn.mock.calls.filter(c => String(c[0]).includes('replayed event id')).length
+    expect(replays()).toBe(30)
+
+    const fast = header(sk, Math.floor(Date.now() / 1000), [['nonce', 'fast']])
+    await verifyNip98Header(fast, { url, method: 'GET' })
+    for (let i = 0; i < 5; i++) await verifyNip98Header(fast, { url, method: 'GET' })
+    expect(replays()).toBe(33)
+  })
+
+  it('still logs a POST repeated within 2 s in full', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const body = '{"a":1}'
+    const sk = generateSecretKey()
+    const event = finalizeEvent(
+      {
+        kind: 27235,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['u', url],
+          ['method', 'POST'],
+          ['payload', createHash('sha256').update(body).digest('hex')],
+        ],
+        content: '',
+      },
+      sk
+    )
+    const token = `Nostr ${Buffer.from(JSON.stringify(event)).toString('base64')}`
+    expect(await verifyNip98Header(token, { url, method: 'POST', body })).not.toBeNull()
+    expect(await verifyNip98Header(token, { url, method: 'POST', body })).toBeNull()
+    expect(warn.mock.calls.some(c => String(c[0]).includes('replayed event id'))).toBe(true)
+  })
+
+  it('logs a repeat in full when the clock has gone backwards', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.useFakeTimers({ toFake: ['Date'] })
+    // Use up this window's full samples so only the clock check can make it warn.
+    const t0 = Date.now()
+    const filler = header(generateSecretKey(), Math.floor(t0 / 1000), [['nonce', 'filler']])
+    await verifyNip98Header(filler, { url, method: 'GET' })
+    for (let i = 0; i < 3; i++) await verifyNip98Header(filler, { url, method: 'GET' })
+    warn.mockClear()
+
+    // Accept at t0+10 s, then step back to t0+5 s: the replay looks 5 s older
+    // than its first copy, but the clock is still inside the current window.
+    vi.setSystemTime(t0 + 10_000)
+    const token = header(generateSecretKey(), Math.floor(Date.now() / 1000), [['nonce', 'clock']])
+    await verifyNip98Header(token, { url, method: 'GET' })
+    vi.setSystemTime(t0 + 5_000)
     expect(await verifyNip98Header(token, { url, method: 'GET' })).toBeNull()
     expect(warn.mock.calls.some(c => String(c[0]).includes('replayed event id'))).toBe(true)
   })

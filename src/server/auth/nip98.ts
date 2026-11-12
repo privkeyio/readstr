@@ -258,8 +258,43 @@ interface LogBudget {
 const generalLogBudget: LogBudget = { windowStart: 0, count: 0 }
 const replayLogBudget: LogBudget = { windowStart: 0, count: 0 }
 
+// A GET or HEAD repeated within this long of its first copy is a
+// transport-level retry: production logs show proxies re-sending idempotent
+// requests 100-600 ms later while the browser only ever sees the first
+// (accepted) response. Those are still rejected, but beyond a few full samples
+// per window (kept so an attacker's copy winning the race against the real
+// request still leaves a trace) they are only counted.
+const TRANSPORT_RETRY_MS = 2_000
+const TRANSPORT_RETRY_SAMPLES = 3
+const transportRetries: LogBudget = { windowStart: 0, count: 0 }
+// The full samples log on their own budget, so slow replays using up
+// replayLogBudget can't hide them (they aren't in the summary count either).
+const transportSampleLogBudget: LogBudget = { windowStart: 0, count: 0 }
+
+// Logs the previous window's count once it has ended. A clock stepped
+// backwards starts a new window instead of stalling the current one.
+function flushTransportRetries(now: number): void {
+  const elapsed = now - transportRetries.windowStart
+  if (elapsed >= 0 && elapsed < REJECT_LOG_WINDOW_MS) return
+  const quiet = transportRetries.count - TRANSPORT_RETRY_SAMPLES
+  if (quiet > 0) {
+    console.info(
+      `nip98: rejected ${quiet} more repeated GET/HEAD request(s) within ${TRANSPORT_RETRY_MS} ms of their first copy in the minute from ${new Date(transportRetries.windowStart).toISOString()} (transport retries)`
+    )
+  }
+  transportRetries.windowStart = now
+  transportRetries.count = 0
+}
+
+/** Counts a fast GET/HEAD replay; true once it should be counted rather than logged. */
+function isQuietTransportRetry(now: number): boolean {
+  flushTransportRetries(now)
+  transportRetries.count++
+  return transportRetries.count > TRANSPORT_RETRY_SAMPLES
+}
+
 export function __resetNip98LogBudgetsForTests(): void {
-  for (const budget of [generalLogBudget, replayLogBudget]) {
+  for (const budget of [generalLogBudget, replayLogBudget, transportRetries, transportSampleLogBudget]) {
     budget.windowStart = 0
     budget.count = 0
   }
@@ -286,6 +321,8 @@ function reject(
   budget: LogBudget = generalLogBudget
 ): null {
   const now = Date.now()
+  // So a window's count still gets logged when retries stop arriving.
+  flushTransportRetries(now)
   if (now - budget.windowStart >= REJECT_LOG_WINDOW_MS) {
     if (budget.count > REJECT_LOG_MAX_PER_WINDOW) {
       console.warn(
@@ -360,6 +397,9 @@ export async function verifyNip98Header(
     // 7. Single-use: reject an event id we have already accepted in-window.
     const firstSeenMs = consumeEventId(event.id, event.created_at, now)
     if (firstSeenMs !== null) {
+      const sinceFirstMs = Date.now() - firstSeenMs
+      const fastRetry = (method === 'GET' || method === 'HEAD') && sinceFirstMs >= 0 && sinceFirstMs < TRANSPORT_RETRY_MS
+      if (fastRetry && isQuietTransportRetry(Date.now())) return null
       // The client signs every request with a fresh nonce, so a repeat id means
       // the same HTTP request arrived twice. sinceFirstMs tells a transport
       // retry (milliseconds) from a resend; ageSeconds counts from signing,
@@ -372,11 +412,11 @@ export async function verifyNip98Header(
           id: event.id,
           method,
           path: requestPath(opts.url),
-          sinceFirstMs: Date.now() - firstSeenMs,
+          sinceFirstMs,
           ageSeconds: Math.round(now - event.created_at),
           userAgent: opts.userAgent ?? '(none)',
         },
-        replayLogBudget
+        fastRetry ? transportSampleLogBudget : replayLogBudget
       )
     }
 
