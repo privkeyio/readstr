@@ -166,6 +166,14 @@ function decodeAuthEvent(authHeader: string): NostrToolsEvent | null {
   }
 }
 
+function requestPath(url: string): string {
+  try {
+    return new URL(url, 'http://localhost').pathname
+  } catch {
+    return '(unparseable)'
+  }
+}
+
 function getTag(event: NostrToolsEvent, name: string): string | undefined {
   const tag = event.tags.find(t => t[0] === name)
   return tag?.[1]
@@ -189,27 +197,31 @@ function getTag(event: NostrToolsEvent, name: string): string | undefined {
 // unique events inside the window, and only the attacker's own token becomes
 // replayable, so the memory bound is worth it.
 const MAX_SEEN_EVENT_IDS = 50_000
-const seenEventIds = new Map<string, number>()
+// Each entry keeps when the id was first accepted (ms), so a replay log can
+// tell a transport retry (milliseconds later) from a deliberate resend.
+const seenEventIds = new Map<string, { expiresAt: number; firstSeenMs: number }>()
 
 function pruneSeen(now: number): void {
-  for (const [id, expiresAt] of seenEventIds) {
+  for (const [id, { expiresAt }] of seenEventIds) {
     if (expiresAt <= now) seenEventIds.delete(id)
   }
 }
 
-// Returns true if the id was already consumed; otherwise records it. The entry
+// Returns when the id was first accepted (ms) if it was already consumed;
+// otherwise records it and returns null. The entry
 // is retained until the event's own acceptance window closes
 // (`created_at + tolerance`) so a future-dated event cannot be evicted early and
 // replayed while its timestamp is still valid.
-function consumeEventId(id: string, createdAt: number, now: number): boolean {
+function consumeEventId(id: string, createdAt: number, now: number): number | null {
   pruneSeen(now)
-  if (seenEventIds.has(id)) return true
+  const seen = seenEventIds.get(id)
+  if (seen) return seen.firstSeenMs
   if (seenEventIds.size >= MAX_SEEN_EVENT_IDS) {
     const oldest = seenEventIds.keys().next().value
     if (oldest !== undefined) seenEventIds.delete(oldest)
   }
-  seenEventIds.set(id, createdAt + TIMESTAMP_TOLERANCE_SECONDS)
-  return false
+  seenEventIds.set(id, { expiresAt: createdAt + TIMESTAMP_TOLERANCE_SECONDS, firstSeenMs: Date.now() })
+  return null
 }
 
 /**
@@ -233,34 +245,58 @@ function consumeEventId(id: string, createdAt: number, now: number): boolean {
 const REJECT_LOG_WINDOW_MS = 60_000
 const REJECT_LOG_MAX_PER_WINDOW = 30
 const REJECT_LOG_VALUE_MAX_LENGTH = 256
-let rejectLogWindowStart = 0
-let rejectLogCount = 0
+// Bidi controls would let a logged value reorder how the line displays.
+const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/g
+
+interface LogBudget {
+  windowStart: number
+  count: number
+}
+
+// Replays get their own budget: they need a valid signature, so their volume
+// is naturally limited, and unauthenticated junk must not crowd them out.
+const generalLogBudget: LogBudget = { windowStart: 0, count: 0 }
+const replayLogBudget: LogBudget = { windowStart: 0, count: 0 }
+
+export function __resetNip98LogBudgetsForTests(): void {
+  for (const budget of [generalLogBudget, replayLogBudget]) {
+    budget.windowStart = 0
+    budget.count = 0
+  }
+}
 
 function truncateDetail(detail?: Record<string, string | number>): Record<string, string | number> | undefined {
   if (!detail) return undefined
   const out: Record<string, string | number> = {}
   for (const [key, value] of Object.entries(detail)) {
+    if (typeof value !== 'string') {
+      out[key] = value
+      continue
+    }
+    const clean = value.replace(BIDI_CONTROLS, '\uFFFD')
     out[key] =
-      typeof value === 'string' && value.length > REJECT_LOG_VALUE_MAX_LENGTH
-        ? `${value.slice(0, REJECT_LOG_VALUE_MAX_LENGTH)}…`
-        : value
+      clean.length > REJECT_LOG_VALUE_MAX_LENGTH ? `${clean.slice(0, REJECT_LOG_VALUE_MAX_LENGTH)}…` : clean
   }
   return out
 }
 
-function reject(reason: string, detail?: Record<string, string | number>): null {
+function reject(
+  reason: string,
+  detail?: Record<string, string | number>,
+  budget: LogBudget = generalLogBudget
+): null {
   const now = Date.now()
-  if (now - rejectLogWindowStart >= REJECT_LOG_WINDOW_MS) {
-    if (rejectLogCount > REJECT_LOG_MAX_PER_WINDOW) {
+  if (now - budget.windowStart >= REJECT_LOG_WINDOW_MS) {
+    if (budget.count > REJECT_LOG_MAX_PER_WINDOW) {
       console.warn(
-        `nip98: suppressed ${rejectLogCount - REJECT_LOG_MAX_PER_WINDOW} rejection log(s) in the last window`
+        `nip98: suppressed ${budget.count - REJECT_LOG_MAX_PER_WINDOW} rejection log(s) in the last window`
       )
     }
-    rejectLogWindowStart = now
-    rejectLogCount = 0
+    budget.windowStart = now
+    budget.count = 0
   }
-  rejectLogCount++
-  if (rejectLogCount <= REJECT_LOG_MAX_PER_WINDOW) {
+  budget.count++
+  if (budget.count <= REJECT_LOG_MAX_PER_WINDOW) {
     console.warn(`nip98: rejected (${reason})`, truncateDetail(detail) ?? '')
   }
   return null
@@ -268,7 +304,7 @@ function reject(reason: string, detail?: Record<string, string | number>): null 
 
 export async function verifyNip98Header(
   authHeader: string | undefined,
-  opts: { url: string; method: string; body?: string | null }
+  opts: { url: string; method: string; body?: string | null; userAgent?: string }
 ): Promise<string | null> {
   try {
     if (!authHeader) return null
@@ -301,7 +337,8 @@ export async function verifyNip98Header(
     const uTag = getTag(event, 'u')
     if (!uTag) return reject('missing u tag', { pubkey: event.pubkey })
     if (!urlTagMatches(uTag, opts.url)) {
-      return reject('u tag mismatch', { signed: uTag, request: opts.url })
+      // Paths only: queries carry user input (tRPC `input=`).
+      return reject('u tag mismatch', { signed: requestPath(uTag), request: requestPath(opts.url) })
     }
 
     // 6. Body binding via `payload` tag (NIP-98). For non-GET methods the body
@@ -321,8 +358,26 @@ export async function verifyNip98Header(
     }
 
     // 7. Single-use: reject an event id we have already accepted in-window.
-    if (consumeEventId(event.id, event.created_at, now)) {
-      return reject('replayed event id', { id: event.id })
+    const firstSeenMs = consumeEventId(event.id, event.created_at, now)
+    if (firstSeenMs !== null) {
+      // The client signs every request with a fresh nonce, so a repeat id means
+      // the same HTTP request arrived twice. sinceFirstMs tells a transport
+      // retry (milliseconds) from a resend; ageSeconds counts from signing,
+      // which slow remote signers inflate. The user agent is client-chosen, so
+      // it is a hint, not attribution. The path is logged without its query,
+      // which carries user input.
+      return reject(
+        'replayed event id',
+        {
+          id: event.id,
+          method,
+          path: requestPath(opts.url),
+          sinceFirstMs: Date.now() - firstSeenMs,
+          ageSeconds: Math.round(now - event.created_at),
+          userAgent: opts.userAgent ?? '(none)',
+        },
+        replayLogBudget
+      )
     }
 
     // All checks passed; the pubkey is now trustworthy.
