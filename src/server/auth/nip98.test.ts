@@ -96,6 +96,24 @@ describe('verifyNip98Header replay check', () => {
     expect(info.mock.calls.some(c => String(c[0]).includes('rejected 3 more repeated GET/HEAD request(s)'))).toBe(true)
   })
 
+  it('logs fast GET repeat samples even after slow replays use up the replay budget', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const sk = generateSecretKey()
+    const created = Math.floor(Date.now() / 1000)
+    const slow = header(sk, created, [['nonce', 'slow']])
+    await verifyNip98Header(slow, { url, method: 'GET' })
+    vi.setSystemTime(Date.now() + 2_500)
+    for (let i = 0; i < 35; i++) await verifyNip98Header(slow, { url, method: 'GET' })
+    const replays = () => warn.mock.calls.filter(c => String(c[0]).includes('replayed event id')).length
+    expect(replays()).toBe(30)
+
+    const fast = header(sk, Math.floor(Date.now() / 1000), [['nonce', 'fast']])
+    await verifyNip98Header(fast, { url, method: 'GET' })
+    for (let i = 0; i < 5; i++) await verifyNip98Header(fast, { url, method: 'GET' })
+    expect(replays()).toBe(33)
+  })
+
   it('still logs a POST repeated within 2 s in full', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const body = '{"a":1}'

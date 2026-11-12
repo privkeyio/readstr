@@ -267,6 +267,9 @@ const replayLogBudget: LogBudget = { windowStart: 0, count: 0 }
 const TRANSPORT_RETRY_MS = 2_000
 const TRANSPORT_RETRY_SAMPLES = 3
 const transportRetries: LogBudget = { windowStart: 0, count: 0 }
+// The full samples log on their own budget, so slow replays using up
+// replayLogBudget can't hide them (they aren't in the summary count either).
+const transportSampleLogBudget: LogBudget = { windowStart: 0, count: 0 }
 
 // Logs the previous window's count once it has ended. A clock stepped
 // backwards starts a new window instead of stalling the current one.
@@ -291,7 +294,7 @@ function isQuietTransportRetry(now: number): boolean {
 }
 
 export function __resetNip98LogBudgetsForTests(): void {
-  for (const budget of [generalLogBudget, replayLogBudget, transportRetries]) {
+  for (const budget of [generalLogBudget, replayLogBudget, transportRetries, transportSampleLogBudget]) {
     budget.windowStart = 0
     budget.count = 0
   }
@@ -413,7 +416,7 @@ export async function verifyNip98Header(
           ageSeconds: Math.round(now - event.created_at),
           userAgent: opts.userAgent ?? '(none)',
         },
-        replayLogBudget
+        fastRetry ? transportSampleLogBudget : replayLogBudget
       )
     }
 
