@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'crypto'
-import { normalizePubkey, PERIOD_DAYS } from '@/lib/subscription'
+import { accessFor, normalizePubkey, PERIOD_DAYS } from '@/lib/subscription'
 
 /**
  * Verifier and event mapping for Flash subscription webhooks.
@@ -146,6 +146,32 @@ export function verifyFlashWebhook(
       data,
     },
   }
+}
+
+/**
+ * True when an event belongs to a different Flash subscription than the one a
+ * live row is linked to, and must not touch the row.
+ *
+ * Rows are keyed by pubkey, but one pubkey can have several Flash subscriptions
+ * over time: after cancelling S1 a user may subscribe again as S2 while S1 is
+ * still running out. S1's later `expired` would then lock out the paying S2.
+ * So while the row still grants access, only `activated` may move it to a new
+ * subscription. "Live" is judged by access at the event's time, not by status
+ * alone: if S1's `expired` was dropped, its row would otherwise stay "live"
+ * forever and every later S2 event would be skipped.
+ */
+export function isForeignSubscriptionEvent(
+  row: {
+    status: string
+    trialEndsAt: Date
+    subscriptionEndsAt: Date | null
+    flashSubscriptionId: string | null
+  } | null,
+  event: Pick<FlashEvent, 'event' | 'subscriptionId' | 'occurredAt'>
+): boolean {
+  if (!row?.flashSubscriptionId || row.flashSubscriptionId === event.subscriptionId) return false
+  if (event.event === 'subscription.activated') return false
+  return accessFor(row, event.occurredAt).hasAccess
 }
 
 /** Fields to write to UserSubscription for an event. */

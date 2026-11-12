@@ -1,6 +1,12 @@
 import { createHmac } from 'crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { changeFor, TOLERANCE_SECONDS, verifyFlashWebhook, type FlashEvent } from './flash-webhook'
+import {
+  changeFor,
+  isForeignSubscriptionEvent,
+  TOLERANCE_SECONDS,
+  verifyFlashWebhook,
+  type FlashEvent,
+} from './flash-webhook'
 
 vi.spyOn(console, 'warn').mockImplementation(() => {})
 vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -93,5 +99,46 @@ describe('changeFor', () => {
     expect(canceled).toEqual({ status: 'CANCELLED', cancelledAt: canceledAt })
     expect('subscriptionEndsAt' in canceled).toBe(false)
     expect(changeFor(verified(body('subscription.expired'))).status).toBe('EXPIRED')
+  })
+})
+
+describe('isForeignSubscriptionEvent', () => {
+  const NOW = new Date('2026-11-15T00:00:00.000Z')
+  const days = (n: number) => new Date(NOW.getTime() + n * 86_400_000)
+  const row = (status: string, flashSubscriptionId: string | null, endsInDays: number | null) => ({
+    status,
+    flashSubscriptionId,
+    trialEndsAt: days(-30),
+    subscriptionEndsAt: endsInDays === null ? null : days(endsInDays),
+  })
+  const ev = (event: string, subscriptionId: string) =>
+    ({ event, subscriptionId, occurredAt: NOW }) as Pick<FlashEvent, 'event' | 'subscriptionId' | 'occurredAt'>
+
+  it('applies events from the linked subscription', () => {
+    expect(isForeignSubscriptionEvent(row('CANCELLED', 'S1', 10), ev('subscription.expired', 'S1'))).toBe(false)
+  })
+
+  it('ignores another subscription\'s events while the row still grants access', () => {
+    // Cancel S1, resubscribe as S2: S1's later expiry must not end S2.
+    const resubscribed = row('ACTIVE', 'S2', 25)
+    for (const e of ['subscription.expired', 'subscription.canceled', 'subscription.past_due', 'subscription.renewed']) {
+      expect(isForeignSubscriptionEvent(resubscribed, ev(e, 'S1'))).toBe(true)
+    }
+  })
+
+  it('lets activated relink a live row to a new subscription', () => {
+    expect(isForeignSubscriptionEvent(row('CANCELLED', 'S1', 10), ev('subscription.activated', 'S2'))).toBe(false)
+  })
+
+  it('applies any event once the linked subscription no longer grants access', () => {
+    // S1's expired and S2's activated were both dropped: S2's renewals must still land.
+    expect(isForeignSubscriptionEvent(row('CANCELLED', 'S1', -1), ev('subscription.renewed', 'S2'))).toBe(false)
+    expect(isForeignSubscriptionEvent(row('ACTIVE', 'S1', -8), ev('subscription.renewed', 'S2'))).toBe(false)
+    expect(isForeignSubscriptionEvent(row('EXPIRED', 'S1', 5), ev('subscription.renewed', 'S2'))).toBe(false)
+  })
+
+  it('applies any event to rows that are not linked', () => {
+    expect(isForeignSubscriptionEvent(null, ev('subscription.expired', 'S1'))).toBe(false)
+    expect(isForeignSubscriptionEvent(row('TRIAL', null, null), ev('subscription.canceled', 'S1'))).toBe(false)
   })
 })

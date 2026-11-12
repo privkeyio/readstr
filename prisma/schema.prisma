@@ -174,7 +174,7 @@ model UserSubscription {
     userPubkey        String   @unique // Nostr pubkey
     status            SubscriptionStatus @default(TRIAL)
     trialEndsAt       DateTime // When the 7 day trial ends
-    subscriptionEndsAt DateTime? // When current paid period ends (null if trial/cancelled)
+    subscriptionEndsAt DateTime? // End of the period paid for (null until first payment); kept on cancel
     squareCustomerId  String?  // Square customer ID
     squareSubscriptionId String? // Square subscription ID
     cancelledAt       DateTime? // When user cancelled (still valid until subscriptionEndsAt)

@@ -87,6 +87,15 @@ is no replay. The grace window keeps a paying user's access if a `renewed` deliv
 lost. `flashSubscriptionId` is stored so rows can be reconciled against Flash's API
 (`GET /api/v1/external/subscriptions/{id}/verify`). That reconciliation is not built yet.
 
+A row follows one Flash subscription at a time. While the row still grants access, only
+`activated` can link it to a new one, and other events from a different subscription are
+logged and skipped, so an old subscription's `expired` cannot end a newer paid one. Once
+the row no longer grants access, any event can relink it.
+
+A `CANCELLED` row has no grace: access stops at the paid-through date. If Flash sends
+only `canceled` for an immediate cancel or refund, the user keeps access until that
+date; end it by hand if a refund should end access sooner.
+
 ## Testing
 
 `npx vitest run src/server/auth/flash-webhook.test.ts src/lib/subscription.test.ts` covers
