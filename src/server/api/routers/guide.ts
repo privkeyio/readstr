@@ -6,11 +6,15 @@ import { rateLimit } from '@/server/rate-limit'
 import { nip19 } from 'nostr-tools'
 import { getGuideTagsCached, invalidateGuideTags } from '@/server/guide-tags'
 
+// Tags are public and served to every visitor by getGuideTags, so bound them.
+const MAX_TAG_LENGTH = 50
+
 export const guideRouter = createTRPCRouter({
   // Get all guide feeds with optional tag filtering
   getGuideFeeds: publicProcedure
     .input(z.object({
-      tags: z.array(z.string()).max(100).optional(),
+      // Loose: rows stored before MAX_TAG_LENGTH existed may hold longer tags.
+      tags: z.array(z.string().max(200)).max(100).optional(),
       limit: z.number().min(1).max(100).default(50),
       orderBy: z.enum(['newest', 'popular', 'recent_posts']).default('popular'),
     }).optional())
@@ -52,7 +56,7 @@ export const guideRouter = createTRPCRouter({
   submitFeed: publicProcedure
     .input(z.object({
       npub: z.string().startsWith('npub1'),
-      tags: z.array(z.string()).min(1).max(10),
+      tags: z.array(z.string().trim().min(1).max(MAX_TAG_LENGTH)).min(1).max(10),
     }))
     .mutation(async ({ ctx, input }) => {
       const limit = rateLimit('guide.submitFeed', ctx.clientIp, 5, 60 * 60 * 1000)
@@ -188,7 +192,7 @@ export const guideRouter = createTRPCRouter({
   // Update tags for own guide entry (user must be logged in as this npub)
   updateOwnTags: protectedProcedure
     .input(z.object({
-      tags: z.array(z.string()).min(1).max(10),
+      tags: z.array(z.string().trim().min(1).max(MAX_TAG_LENGTH)).min(1).max(10),
     }))
     .mutation(async ({ ctx, input }) => {
       // Convert hex pubkey to npub

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
 import { getNostrFetcher } from '@/lib/nostr-fetcher'
 import { requireCronSecret } from '@/server/auth/cron'
+import { invalidateGuideTags } from '@/server/guide-tags'
 
 interface SeedFeed {
   npub: string
@@ -128,6 +129,7 @@ export async function GET(request: NextRequest) {
           subscriberCount: 0,
         },
       })
+      invalidateGuideTags()
 
       results.success++
       results.details.push({

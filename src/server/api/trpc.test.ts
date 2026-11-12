@@ -1,9 +1,11 @@
 import { TRPCError, type DefaultErrorShape } from '@trpc/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import superjson from 'superjson'
 import { z, type ZodError } from 'zod'
 import { fetchRequestHandler } from '@trpc/server/adapters/fetch'
 import {
   assertInputDepth,
+  assertValueAnnotations,
   createTRPCRouter,
   formatError,
   publicProcedure,
@@ -110,6 +112,47 @@ describe('assertInputDepth', () => {
   it('accepts input as deep as the sanitizer allows', () => {
     const json = nestedArrays(32)
     expect(transformer.input.deserialize({ json, meta: { values: {} } })).toEqual(json)
+  })
+})
+
+describe('assertValueAnnotations', () => {
+  it('rejects a non-object annotation node, which superjson recurses into forever', () => {
+    const payload = { json: 0, meta: { values: { a: 'b' } } }
+    expect(thrownBy(() => transformer.input.deserialize(payload))).toMatchObject({ code: 'BAD_REQUEST' })
+    expect(thrownBy(() => assertValueAnnotations(payload))).toMatchObject({ code: 'BAD_REQUEST' })
+    expect(thrownBy(() => assertValueAnnotations({ json: 0, meta: { values: { a: ['class', 'X'] } } }))).toMatchObject({
+      code: 'BAD_REQUEST',
+    })
+  })
+
+  it('rejects long annotation paths quickly', () => {
+    const children = Object.fromEntries(Array.from({ length: 4500 }, (_, i) => [String(i), ['undefined']]))
+    const payload = { json: {}, meta: { values: { [Array(13_000).fill('a').join('.')]: ['undefined', children] } } }
+    const started = performance.now()
+    expect(thrownBy(() => transformer.input.deserialize(payload))).toMatchObject({ code: 'BAD_REQUEST' })
+    expect(performance.now() - started).toBeLessThan(200)
+  })
+
+  it('accepts what the client really sends', () => {
+    const deep: Record<string, unknown> = {}
+    let cursor = deep
+    for (let i = 0; i < 30; i++) cursor = (cursor.n = {}) as Record<string, unknown>
+    cursor.at = new Date(0)
+    const inputs = [
+      undefined,
+      { feedId: undefined, tags: ['a'] },
+      { at: new Date(0), s: new Set([1]), m: new Map([['k', new Date(0)]]), big: BigInt(1), 'dotted.key': undefined },
+      deep,
+    ]
+    for (const input of inputs) {
+      const wire = JSON.parse(JSON.stringify(superjson.serialize(input))) as unknown
+      expect(transformer.input.deserialize(wire)).toEqual(input)
+    }
+  })
+
+  it('turns superjson errors into 400s', () => {
+    const payload = { json: { a: 1 }, meta: { values: { a: ['bogus'] } } }
+    expect(thrownBy(() => transformer.input.deserialize(payload))).toMatchObject({ code: 'BAD_REQUEST' })
   })
 })
 

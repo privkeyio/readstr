@@ -85,6 +85,45 @@ export function assertInputDepth(value: unknown, maxDepth: number = MAX_ENVELOPE
   }
 }
 
+function badInput(): TRPCError {
+  return new TRPCError({ code: 'BAD_REQUEST', message: 'Invalid input' })
+}
+
+/**
+ * Check `meta.values` (superjson's type annotations) without recursion before
+ * superjson walks it.
+ *
+ * superjson's walk recurses into any non-array node as if it were an object,
+ * so a string node (`{"a":"b"}`, 38 bytes) recurses until the stack
+ * overflows, and it copies the whole path for every child, so one long dotted
+ * key with many children costs seconds of CPU per 64 KB request. Real
+ * annotations are a tree of plain objects and `[type]`/`[type, children]`
+ * nodes whose paths are no longer than the data is deep, so anything else is
+ * rejected. Counting `.` overestimates escaped keys, which only makes it stricter.
+ */
+export function assertValueAnnotations(payload: unknown, maxSegments: number = MAX_ENVELOPE_DEPTH): void {
+  const meta = (payload as { meta?: unknown } | null | undefined)?.meta
+  if (!meta || typeof meta !== 'object') return
+  const values = (meta as { values?: unknown }).values
+  if (values === undefined) return
+  const stack: [unknown, number][] = [[values, 0]]
+  while (stack.length > 0) {
+    const [node, segments] = stack.pop()!
+    let children: unknown = node
+    if (Array.isArray(node)) {
+      if (node.length < 1 || node.length > 2 || typeof node[0] !== 'string') throw badInput()
+      children = node[1]
+      if (children === undefined) continue
+    }
+    if (!children || typeof children !== 'object' || Array.isArray(children)) throw badInput()
+    for (const [key, child] of Object.entries(children)) {
+      const total = segments + key.split('.').length
+      if (total > maxSegments) throw badInput()
+      stack.push([child, total])
+    }
+  }
+}
+
 // Wire-compatible with the client's plain `superjson`; only the server's
 // parsing of client input differs.
 export const transformer = {
@@ -92,7 +131,14 @@ export const transformer = {
     serialize: (value: unknown) => superjson.serialize(value),
     deserialize: (value: unknown) => {
       assertInputDepth(value)
-      return superjson.deserialize(stripReferentialEqualities(value) as Parameters<typeof superjson.deserialize>[0])
+      assertValueAnnotations(value)
+      try {
+        return superjson.deserialize(stripReferentialEqualities(value) as Parameters<typeof superjson.deserialize>[0])
+      } catch {
+        // superjson throws plain Errors (unknown type, `__proto__` path) that
+        // would surface as 500s echoing client text; they are bad input.
+        throw badInput()
+      }
     },
   },
   output: superjson,
