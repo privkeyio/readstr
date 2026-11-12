@@ -52,7 +52,7 @@ export function formatError({ shape, error }: { shape: DefaultErrorShape; error:
     message,
     data: {
       ...shape.data,
-      zodError: zodError ? new ZodError(zodError.issues.slice(0, MAX_ZOD_ISSUES)).flatten() : null,
+      zodError: zodError ? (new ZodError(zodError.issues.slice(0, MAX_ZOD_ISSUES)) as ZodError<Record<string, unknown>>).flatten() : null,
     },
   }
 }
