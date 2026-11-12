@@ -132,6 +132,7 @@ export function FeedReader() {
   const hasRefreshedOnLoginRef = useRef(false)
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const feedDataRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingMarksRef = useRef(0)
   
   // Mobile responsive state
   const [showSidebar, setShowSidebar] = useState(false)
@@ -519,24 +520,25 @@ export function FeedReader() {
   })
   
   const invalidateFeedData = () => {
-    // Use refetch instead of invalidate for immediate UI updates. Requests
-    // aren't aborted on cancel (abortOnUnmount is off), so cancelRefetch would
-    // put a second copy of every in-flight query on the wire; reuse it instead.
-    const keep = { cancelRefetch: false }
-    void utils.feed.getFeeds.refetch(undefined, undefined, keep)
-    void utils.feed.getUserTags.refetch(undefined, undefined, keep)
-    void utils.feed.getFeedItems.invalidate(undefined, undefined, keep)
-    void utils.feed.getFavorites.invalidate(undefined, undefined, keep)
+    // Use refetch instead of invalidate for immediate UI updates
+    void utils.feed.getFeeds.refetch()
+    void utils.feed.getUserTags.refetch()
+    void utils.feed.getFeedItems.invalidate()
+    void utils.feed.getFavorites.invalidate()
   }
 
   // Marking items read or unread comes in bursts (auto-mark can fire one
   // mutation per item on a page), so refetch once after the burst settles
   // rather than once per item, which would spend the per-IP tRPC budget.
+  // A refetch while a mark is still in flight would read the server before
+  // that mark commits and overwrite its optimistic update, so wait for none.
   const scheduleFeedDataRefresh = () => {
     if (feedDataRefreshTimerRef.current) clearTimeout(feedDataRefreshTimerRef.current)
+    feedDataRefreshTimerRef.current = null
+    if (pendingMarksRef.current > 0) return // the last one to settle reschedules
     feedDataRefreshTimerRef.current = setTimeout(() => {
       feedDataRefreshTimerRef.current = null
-      invalidateFeedData()
+      if (pendingMarksRef.current === 0) invalidateFeedData()
     }, FEED_DATA_REFRESH_DELAY_MS)
   }
 
@@ -602,8 +604,9 @@ export function FeedReader() {
 
   const markAsReadMutation = api.feed.markAsRead.useMutation({
     onMutate: async ({ itemId }) => {
+      pendingMarksRef.current++
       // Cancel outgoing refetches to avoid overwriting optimistic update
-      await utils.feed.getFeeds.cancel()
+      await Promise.all([utils.feed.getFeeds.cancel(), utils.feed.getFeedItems.cancel()])
       
       // Optimistically update the feed item cache
       updateFeedItemCache(itemId, () => ({ isRead: true }))
@@ -636,12 +639,14 @@ export function FeedReader() {
       }
     },
     onSettled: () => {
+      pendingMarksRef.current = Math.max(0, pendingMarksRef.current - 1)
       scheduleFeedDataRefresh()
     },
   })
   const markAsUnreadMutation = api.feed.markAsUnread.useMutation({
     onMutate: async ({ itemId }) => {
-      await utils.feed.getFeeds.cancel()
+      pendingMarksRef.current++
+      await Promise.all([utils.feed.getFeeds.cancel(), utils.feed.getFeedItems.cancel()])
       updateFeedItemCache(itemId, () => ({ isRead: false }))
 
       const previousFeeds = utils.feed.getFeeds.getData()
@@ -668,6 +673,7 @@ export function FeedReader() {
       }
     },
     onSettled: () => {
+      pendingMarksRef.current = Math.max(0, pendingMarksRef.current - 1)
       scheduleFeedDataRefresh()
     },
   })
