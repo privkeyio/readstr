@@ -35,11 +35,17 @@ interface SubscriptionRow {
 export function accessFor(row: SubscriptionRow, now: Date) {
   const endsAt = row.subscriptionEndsAt ?? row.trialEndsAt
   const daysRemaining = Math.max(0, Math.ceil((endsAt.getTime() - now.getTime()) / DAY_MS))
-  const grace = row.status === 'ACTIVE' || row.status === 'PAST_DUE' ? GRACE_DAYS * DAY_MS : 0
   const hasAccess =
     ['TRIAL', 'ACTIVE', 'PAST_DUE', 'CANCELLED'].includes(row.status) &&
-    endsAt.getTime() + grace > now.getTime()
+    accessEndsAt(row).getTime() > now.getTime()
   return { hasAccess, daysRemaining }
+}
+
+/** When the row's access ends, including any grace (statuses aside). */
+export function accessEndsAt(row: SubscriptionRow): Date {
+  const endsAt = row.subscriptionEndsAt ?? row.trialEndsAt
+  const grace = row.status === 'ACTIVE' || row.status === 'PAST_DUE' ? GRACE_DAYS * DAY_MS : 0
+  return new Date(endsAt.getTime() + grace)
 }
 
 /**

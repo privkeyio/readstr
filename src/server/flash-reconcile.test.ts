@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   flashApiConfig,
   listFlashSubscriptions,
+  KEPT,
   reconcileWithFlash,
   shouldCheckFlashOnStatus,
   stateFromFlash,
@@ -61,6 +62,36 @@ describe('stateFromFlash', () => {
     expect(state).toMatchObject({ status: 'EXPIRED', flashSubscriptionId: 'S2' })
   })
 
+  it('prefers ACTIVE with grace over a CANCELLED sub ending a day later', () => {
+    const active = sub('A', 'active', 10)
+    const cancelled = sub('C', 'canceled', 11, { canceledAt: day(-1), cancelEffectiveDate: day(11) })
+    expect(stateFromFlash([cancelled, active], NOW)?.flashSubscriptionId).toBe('A')
+    expect(stateFromFlash([active, cancelled], NOW)?.flashSubscriptionId).toBe('A')
+  })
+
+  it('prefers ACTIVE on an equal access end', () => {
+    const active = sub('A', 'active', 10)
+    const cancelled = sub('C', 'canceled', 17, { canceledAt: day(-1), cancelEffectiveDate: day(17) })
+    expect(stateFromFlash([cancelled, active], NOW)?.flashSubscriptionId).toBe('A')
+  })
+
+  it("maps Flash's trial and past_due", () => {
+    expect(stateFromFlash([sub('S1', 'trial', 5)], NOW)?.status).toBe('ACTIVE')
+    expect(stateFromFlash([sub('S1', 'past_due', -2)], NOW)).toMatchObject({
+      status: 'PAST_DUE',
+      subscriptionEndsAt: new Date(day(-2)),
+    })
+  })
+
+  it('treats active with canceledAt but no cancelEffectiveDate as CANCELLED at the period end', () => {
+    const s = sub('S1', 'active', 12, { canceledAt: day(-1) })
+    expect(stateFromFlash([s], NOW)).toMatchObject({
+      status: 'CANCELLED',
+      subscriptionEndsAt: new Date(day(12)),
+      cancelledAt: new Date(day(-1)),
+    })
+  })
+
   it('ignores subscriptions that never started', () => {
     expect(stateFromFlash([sub('S1', 'pending', 30), sub('S2', 'abandoned', 30)], NOW)).toBeNull()
     expect(stateFromFlash([], NOW)).toBeNull()
@@ -80,6 +111,46 @@ describe('listFlashSubscriptions', () => {
   it("drops subscriptions for another ref even if Flash returns them", async () => {
     const other = { ...sub('X', 'active', 20), ref: 'someone-else' }
     expect(await listFlashSubscriptions(config, PUBKEY, jsonFetch({ subscriptions: [other] }))).toEqual([])
+  })
+
+  it('never follows a redirect with the key', async () => {
+    const fetchImpl = jsonFetch({ subscriptions: [] })
+    await listFlashSubscriptions(config, PUBKEY, fetchImpl)
+    expect((fetchImpl.mock.calls[0] as [URL, RequestInit])[1].redirect).toBe('error')
+  })
+
+  it('returns null for a body over the cap', async () => {
+    const big = 'x'.repeat(1_100_000)
+    const chunked = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(c) {
+              c.enqueue(new TextEncoder().encode(`{"subscriptions":[],"pad":"${big}"}`))
+              c.close()
+            },
+          })
+        )
+    ) as unknown as typeof fetch
+    expect(await listFlashSubscriptions(config, PUBKEY, chunked)).toBeNull()
+    const declared = vi.fn(
+      async () => new Response('{}', { headers: { 'content-length': '2000000' } })
+    ) as unknown as typeof fetch
+    expect(await listFlashSubscriptions(config, PUBKEY, declared)).toBeNull()
+  })
+
+  it('drops records with non-ISO or out-of-range dates', async () => {
+    const bad = ['+275760-09-13T00:00:00.000Z', '0000-01-01T00:00:00.000Z', '1', '2026-11-20', '1969-12-31T00:00:00Z']
+    const subs = bad.map((d, i) => sub(`B${i}`, 'active', 0, { currentPeriodEnd: d }))
+    const good = sub('G', 'active', 20, { currentPeriodEnd: '2026-12-05T00:00:00+02:00' })
+    const listed = await listFlashSubscriptions(config, PUBKEY, jsonFetch({ subscriptions: [...subs, good] }))
+    expect(listed?.map(s => s.id)).toEqual(['G'])
+  })
+
+  it('keeps good records when another is malformed', async () => {
+    const body = { subscriptions: [{ id: 'X', ref: PUBKEY, status: 7 }, 'junk', null, sub('S1', 'active', 20)] }
+    const listed = await listFlashSubscriptions(config, PUBKEY, jsonFetch(body))
+    expect(listed?.map(s => s.id)).toEqual(['S1'])
   })
 
   it('returns null when Flash fails or answers nonsense', async () => {
@@ -110,9 +181,61 @@ describe('reconcileWithFlash', () => {
     const upsert = vi.fn(async () => ({}))
     const fetchImpl = jsonFetch({ subscriptions: [sub('S1', 'active', 20)] })
     const state = await reconcileWithFlash({ userSubscription: { upsert } } as never, PUBKEY, NOW, { config, fetchImpl })
-    expect(state?.status).toBe('ACTIVE')
+    expect(state).toMatchObject({ status: 'ACTIVE' })
     const args = (upsert.mock.calls[0] as unknown as [{ update: Record<string, unknown> }])[0]
     expect(args.update).toMatchObject({ status: 'ACTIVE', flashSubscriptionId: 'S1', flashEventAt: NOW })
+  })
+
+  it("writes nothing when the triggering subscription isn't usable in Flash's list yet", async () => {
+    const upsert = vi.fn()
+    const db = { userSubscription: { upsert } } as never
+    const lagging = jsonFetch({ subscriptions: [sub('OLD', 'expired', -5), sub('NEW', 'pending', 30)] })
+    expect(await reconcileWithFlash(db, PUBKEY, NOW, { config, fetchImpl: lagging, subscriptionId: 'NEW' })).toBeNull()
+    const missing = jsonFetch({ subscriptions: [sub('OLD', 'expired', -5)] })
+    expect(await reconcileWithFlash(db, PUBKEY, NOW, { config, fetchImpl: missing, subscriptionId: 'NEW' })).toBeNull()
+    expect(upsert).not.toHaveBeenCalled()
+  })
+
+  it('does not end a running local trial for a foreign canceled sub', async () => {
+    const upsert = vi.fn()
+    const findUnique = vi.fn(async () => ({
+      status: 'TRIAL',
+      trialEndsAt: new Date(day(3)),
+      subscriptionEndsAt: null,
+      flashSubscriptionId: null,
+    }))
+    const fetchImpl = jsonFetch({ subscriptions: [sub('SPOOF', 'canceled', -1, { canceledAt: day(-2), cancelEffectiveDate: day(-1) })] })
+    const db = { userSubscription: { upsert, findUnique } } as never
+    expect(await reconcileWithFlash(db, PUBKEY, NOW, { config, fetchImpl })).toBe(KEPT)
+    expect(upsert).not.toHaveBeenCalled()
+  })
+
+  it("keeps a hand-linked active row whose sub ?ref= doesn't return", async () => {
+    const upsert = vi.fn()
+    const findUnique = vi.fn(async () => ({
+      status: 'ACTIVE',
+      trialEndsAt: new Date(day(-40)),
+      subscriptionEndsAt: new Date(day(20)),
+      flashSubscriptionId: 'LINKED',
+    }))
+    const fetchImpl = jsonFetch({ subscriptions: [sub('SPOOF', 'expired', -3)] })
+    const db = { userSubscription: { upsert, findUnique } } as never
+    expect(await reconcileWithFlash(db, PUBKEY, NOW, { config, fetchImpl })).toBe(KEPT)
+    expect(upsert).not.toHaveBeenCalled()
+  })
+
+  it("ends access when the row's own linked sub is listed as lapsed", async () => {
+    const upsert = vi.fn(async () => ({}))
+    const findUnique = vi.fn(async () => ({
+      status: 'ACTIVE',
+      trialEndsAt: new Date(day(-40)),
+      subscriptionEndsAt: new Date(day(20)),
+      flashSubscriptionId: 'S1',
+    }))
+    const fetchImpl = jsonFetch({ subscriptions: [sub('S1', 'expired', -1)] })
+    const db = { userSubscription: { upsert, findUnique } } as never
+    expect(await reconcileWithFlash(db, PUBKEY, NOW, { config, fetchImpl })).toMatchObject({ status: 'EXPIRED' })
+    expect(upsert).toHaveBeenCalledOnce()
   })
 
   it('does nothing without a config or when Flash has nothing usable', async () => {
@@ -142,7 +265,20 @@ describe('shouldCheckFlashOnStatus', () => {
   it('checks lapsed or nearly-ended rows, once per window per user', () => {
     expect(shouldCheckFlashOnStatus(row('EXPIRED', -3), NOW, rateLimit)).toBe(true)
     expect(shouldCheckFlashOnStatus(row('EXPIRED', -3), NOW, rateLimit)).toBe(false)
+    const soon = new Date(NOW.getTime() + 90_000)
+    expect(shouldCheckFlashOnStatus(row('EXPIRED', -3), soon, rateLimit)).toBe(false)
+    const later = new Date(NOW.getTime() + 121_000)
+    expect(shouldCheckFlashOnStatus(row('EXPIRED', -3), later, rateLimit)).toBe(true)
     const other = { ...row('CANCELLED', 0.5), userPubkey: 'cd'.repeat(32) }
     expect(shouldCheckFlashOnStatus(other, NOW, rateLimit)).toBe(true)
+  })
+
+  it("doesn't let a user refused by their own window spend the global budget", () => {
+    const t = NOW.getTime()
+    expect(shouldCheckFlashOnStatus(row('EXPIRED', -3), NOW, rateLimit)).toBe(true)
+    for (let i = 0; i < 10; i++) shouldCheckFlashOnStatus(row('EXPIRED', -3), new Date(t + i * 1000), rateLimit)
+    // 29 of the 30 global tokens are still there for others.
+    const others = Array.from({ length: 30 }, (_, i) => ({ ...row('EXPIRED', -3), userPubkey: String(i).padStart(64, '0') }))
+    expect(others.filter(r => shouldCheckFlashOnStatus(r, NOW, rateLimit)).length).toBe(29)
   })
 })

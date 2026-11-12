@@ -1,7 +1,8 @@
 import type { PrismaClient } from '@prisma/client'
 import { z } from 'zod'
-import { accessFor } from '@/lib/subscription'
+import { accessEndsAt, accessFor } from '@/lib/subscription'
 import type { SubscriptionChange } from '@/server/auth/flash-webhook'
+import { readBodyWithLimit } from '@/server/http/read-body'
 
 /**
  * Reconcile a user's subscription row with Flash's own records.
@@ -16,19 +17,33 @@ import type { SubscriptionChange } from '@/server/auth/flash-webhook'
  */
 
 const REQUEST_TIMEOUT_MS = 5_000
+/** 1000 records at a few hundred bytes each. */
+const MAX_LIST_BODY_BYTES = 1_000_000
+
+// ISO-8601 with a 4-digit year only: Prisma throws on years outside 0-9999,
+// and Date would accept loose forms like "1".
+const isoDate = z.iso
+  .datetime({ offset: true })
+  .refine(v => {
+    const year = new Date(v).getUTCFullYear()
+    return year >= 1970 && year <= 9999
+  })
+  .nullable()
+  .optional()
 
 const flashSubscription = z.object({
   id: z.string().min(1).max(100),
   ref: z.string().nullable(),
   status: z.string(),
-  currentPeriodEnd: z.string().nullable().optional(),
-  canceledAt: z.string().nullable().optional(),
-  cancelEffectiveDate: z.string().nullable().optional(),
-  updatedAt: z.string().nullable().optional(),
+  currentPeriodEnd: isoDate,
+  canceledAt: isoDate,
+  cancelEffectiveDate: isoDate,
 })
 
+// Records are checked one by one, so a single odd record (which anyone can
+// create with a victim's ref) can't make the whole list unusable.
 const listResponse = z.object({
-  subscriptions: z.array(flashSubscription).max(1000),
+  subscriptions: z.array(z.unknown()).max(1000),
 })
 
 export type FlashSubscription = z.infer<typeof flashSubscription>
@@ -74,18 +89,31 @@ export async function listFlashSubscriptions(
       headers: { Authorization: `Bearer ${config.apiKey}`, Accept: 'application/json' },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       cache: 'no-store',
+      // The API key must never follow a redirect anywhere.
+      redirect: 'error',
     })
     if (!res.ok) {
+      await res.body?.cancel().catch(() => {})
       console.warn('[flash-reconcile] list failed:', { status: res.status })
       return null
     }
-    const parsed = listResponse.safeParse(await res.json())
+    const read = await readBodyWithLimit(res, MAX_LIST_BODY_BYTES)
+    if (!read.ok) {
+      console.warn('[flash-reconcile] list body refused:', { status: read.status })
+      return null
+    }
+    const parsed = listResponse.safeParse(JSON.parse(read.body))
     if (!parsed.success) {
       console.warn('[flash-reconcile] unexpected list response')
       return null
     }
-    // The filter is Flash's; check it anyway so a bug there can't link another user's subscription.
-    return parsed.data.subscriptions.filter(s => s.ref === pubkey)
+    const subs: FlashSubscription[] = []
+    for (const raw of parsed.data.subscriptions) {
+      const record = flashSubscription.safeParse(raw)
+      // The filter is Flash's; check it anyway so a bug there can't link another user's subscription.
+      if (record.success && record.data.ref === pubkey) subs.push(record.data)
+    }
+    return subs
   } catch (error) {
     console.warn('[flash-reconcile] list error:', error instanceof Error ? error.name : 'unknown')
     return null
@@ -133,31 +161,58 @@ function candidateFor(sub: FlashSubscription): ReconciledState | null {
 export function stateFromFlash(subs: FlashSubscription[], now: Date): ReconciledState | null {
   const candidates = subs.map(candidateFor).filter((c): c is ReconciledState => c !== null)
   if (candidates.length === 0) return null
-  const grants = (c: ReconciledState) => accessFor({ ...c, trialEndsAt: new Date(0) }, now).hasAccess
-  const live = candidates.filter(grants)
+  const live = candidates.filter(c => grants(c, now))
   const pool = live.length > 0 ? live : candidates
-  return pool.reduce((best, c) => (c.subscriptionEndsAt > best.subscriptionEndsAt ? c : best))
+  // By access end including grace, so a CANCELLED sub ending a day later
+  // doesn't beat an ACTIVE one that keeps a week of grace; ACTIVE wins ties.
+  const end = (c: ReconciledState) => accessEndsAt({ ...c, trialEndsAt: c.subscriptionEndsAt }).getTime()
+  return pool.reduce((best, c) => {
+    const diff = end(c) - end(best)
+    return diff > 0 || (diff === 0 && c.status === 'ACTIVE' && best.status !== 'ACTIVE') ? c : best
+  })
+}
+
+function grants(state: ReconciledState, now: Date): boolean {
+  return accessFor({ ...state, trialEndsAt: state.subscriptionEndsAt }, now).hasAccess
 }
 
 type ReconcileDb = Pick<PrismaClient, 'userSubscription'>
 
+/** reconcileWithFlash's answer when the row is deliberately left unchanged. */
+export const KEPT = 'kept' as const
+
 /**
- * Rebuild the user's row from Flash. Returns the applied state, or null when
- * reconciliation is off, Flash is unreachable, or Flash knows no usable
- * subscription for the user; callers then keep their existing behaviour.
+ * Rebuild the user's row from Flash. Returns the applied state; KEPT when
+ * Flash answered but the row must stay as it is, because the result would end
+ * access the row grants through something Flash didn't list (callers must not
+ * apply the event either); or null when Flash couldn't decide: reconciliation
+ * is off, Flash is unreachable, Flash knows no usable subscription for the
+ * user, or `subscriptionId` (the triggering webhook's) isn't usable in Flash's
+ * list yet. On null callers keep their existing behaviour.
  */
 export async function reconcileWithFlash(
   db: ReconcileDb,
   pubkey: string,
   now: Date = new Date(),
-  opts: { config?: FlashApiConfig | null; fetchImpl?: typeof fetch } = {}
-): Promise<ReconciledState | null> {
+  opts: { config?: FlashApiConfig | null; fetchImpl?: typeof fetch; subscriptionId?: string } = {}
+): Promise<ReconciledState | typeof KEPT | null> {
   const config = opts.config === undefined ? flashApiConfig() : opts.config
   if (!config) return null
   const subs = await listFlashSubscriptions(config, pubkey, opts.fetchImpl)
   if (!subs) return null
+  // Flash's list can lag its webhooks (a new sub still pending or missing).
+  // Writing then would stamp flashEventAt past the event and drop it for good.
+  if (opts.subscriptionId && !subs.some(s => s.id === opts.subscriptionId && candidateFor(s))) return null
   const state = stateFromFlash(subs, now)
   if (!state) return null
+  if (!grants(state, now)) {
+    // A local trial, or a row linked by hand to a sub ?ref= doesn't return,
+    // must not be ended by a lapsed subscription anyone could create.
+    const current = await db.userSubscription.findUnique({ where: { userPubkey: pubkey } })
+    if (current && accessFor(current, now).hasAccess && !subs.some(s => s.id === current.flashSubscriptionId)) {
+      return KEPT
+    }
+  }
   // flashEventAt marks the state as current at `now`, so webhook deliveries
   // older than this check are dropped by the out-of-order guard.
   const fields = { ...state, flashEventAt: now }
@@ -169,7 +224,7 @@ export async function reconcileWithFlash(
   return state
 }
 
-const STATUS_CHECK_EVERY_MS = 10 * 60_000
+const STATUS_CHECK_EVERY_MS = 2 * 60_000
 const STATUS_CHECKS_PER_MINUTE = 30
 const NEAR_END_MS = 24 * 60 * 60_000
 
@@ -189,6 +244,9 @@ export function shouldCheckFlashOnStatus(
   const nearEnd = endsAt.getTime() - now.getTime() < NEAR_END_MS
   if (hasAccess && !nearEnd) return false
   const t = now.getTime()
+  // Only allowed calls are charged, so the per-user gate goes first: a user it
+  // refuses never spends a global token, and a global refusal costs the user
+  // one short window.
   if (!limiter('flash-reconcile-user', row.userPubkey, 1, STATUS_CHECK_EVERY_MS, t).allowed) return false
   return limiter('flash-reconcile-all', 'all', STATUS_CHECKS_PER_MINUTE, 60_000, t).allowed
 }

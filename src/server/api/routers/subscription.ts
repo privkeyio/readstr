@@ -5,7 +5,7 @@ import {
   buildCheckoutUrl,
   trialEndFrom,
 } from '@/lib/subscription'
-import { flashApiConfig, reconcileWithFlash, shouldCheckFlashOnStatus } from '@/server/flash-reconcile'
+import { flashApiConfig, KEPT, reconcileWithFlash, shouldCheckFlashOnStatus } from '@/server/flash-reconcile'
 import { rateLimit } from '@/server/rate-limit'
 
 export const subscriptionRouter = createTRPCRouter({
@@ -28,7 +28,7 @@ export const subscriptionRouter = createTRPCRouter({
         // run out, so re-check Flash then (throttled, and best effort).
         if (flashApiConfig() && shouldCheckFlashOnStatus(subscription, now, rateLimit)) {
           const reconciled = await reconcileWithFlash(ctx.db, ctx.nostrPubkey, now).catch(() => null)
-          if (reconciled) subscription = { ...subscription, ...reconciled }
+          if (reconciled && reconciled !== KEPT) subscription = { ...subscription, ...reconciled }
         }
 
         return {

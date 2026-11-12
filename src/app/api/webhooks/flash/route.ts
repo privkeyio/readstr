@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
 import { changeFor, isForeignSubscriptionEvent, verifyFlashWebhook } from '@/server/auth/flash-webhook'
 import { readBodyWithLimit } from '@/server/http/read-body'
-import { reconcileWithFlash } from '@/server/flash-reconcile'
+import { KEPT, reconcileWithFlash } from '@/server/flash-reconcile'
 
 /** Flash's subscription events are well under 10 KB; anything bigger isn't one. */
 const MAX_WEBHOOK_BODY_BYTES = 64_000
@@ -52,12 +52,20 @@ export async function POST(request: NextRequest) {
 
     // With an API key, treat the event as a prompt to re-read the user's
     // subscriptions from Flash, which fixes ordering and foreign-subscription
-    // problems at the source. Without one, or if Flash can't answer, apply the
-    // event itself as before.
-    const reconciled = await reconcileWithFlash(db, userPubkey).catch(error => {
+    // problems at the source. Without one, if Flash can't answer, or if its
+    // list doesn't show this event's subscription yet, apply the event itself
+    // as before: acking a reconcile that missed it would lose it for good.
+    const reconciled = await reconcileWithFlash(db, userPubkey, undefined, { subscriptionId }).catch(error => {
       console.warn('[flash-webhook] reconcile failed; applying the event instead:', error)
       return null
     })
+    if (reconciled === KEPT) {
+      // Flash shows nothing that grants access, but the row still does through
+      // something Flash doesn't list (a local trial, a hand-linked sub), so a
+      // lapsed subscription anyone could create mustn't end it.
+      console.log('[flash-webhook] kept row; Flash lists no sub it is linked to:', event.event, subscriptionId)
+      return NextResponse.json({ ok: true })
+    }
     if (reconciled) {
       console.log('[flash-webhook] reconciled from Flash:', event.event, userPubkey.substring(0, 10) + '...', {
         status: reconciled.status,

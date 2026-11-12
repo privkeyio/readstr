@@ -90,6 +90,61 @@ describe('POST /api/webhooks/flash', () => {
     expect(upsert).toHaveBeenCalledOnce()
   })
 
+  it("applies an activated event Flash's list doesn't reflect yet", async () => {
+    vi.stubEnv('FLASH_API_KEY', 'key_test')
+    vi.stubEnv('FLASH_CHECKOUT_URL', 'https://flash.example/subscriptions/signup/a/b')
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        subscriptions: [
+          { id: 'S1', ref: PUBKEY, status: 'expired', currentPeriodEnd: '2026-10-01T00:00:00.000Z' },
+          { id: 'S2', ref: PUBKEY, status: 'pending', currentPeriodEnd: null },
+        ],
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    findUnique.mockResolvedValue({
+      status: 'EXPIRED',
+      flashSubscriptionId: 'S1',
+      trialEndsAt: new Date('2026-08-01T00:00:00.000Z'),
+      subscriptionEndsAt: new Date('2026-10-01T00:00:00.000Z'),
+      flashEventAt: new Date('2026-10-01T00:00:00.000Z'),
+    })
+
+    const res = await POST(delivery('subscription.activated', 'S2', new Date().toISOString()))
+    expect(res.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(upsert).toHaveBeenCalledOnce()
+    expect(upsert.mock.calls[0]![0].update).toMatchObject({ status: 'ACTIVE', flashSubscriptionId: 'S2' })
+  })
+
+  it("doesn't end a running local trial for a foreign subscription's cancel", async () => {
+    vi.stubEnv('FLASH_API_KEY', 'key_test')
+    vi.stubEnv('FLASH_CHECKOUT_URL', 'https://flash.example/subscriptions/signup/a/b')
+    const now = Date.now()
+    const iso = (days: number) => new Date(now + days * 86_400_000).toISOString()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({
+          subscriptions: [
+            { id: 'SPOOF', ref: PUBKEY, status: 'canceled', currentPeriodEnd: iso(-1), canceledAt: iso(-1), cancelEffectiveDate: iso(-1) },
+          ],
+        })
+      )
+    )
+    findUnique.mockResolvedValue({
+      status: 'TRIAL',
+      flashSubscriptionId: null,
+      trialEndsAt: new Date(now + 3 * 86_400_000),
+      subscriptionEndsAt: null,
+      flashEventAt: null,
+    })
+
+    const res = await POST(delivery('subscription.canceled', 'SPOOF', new Date(now).toISOString()))
+    expect(res.status).toBe(200)
+    expect(upsert).not.toHaveBeenCalled()
+  })
+
   it('falls back to applying the event when Flash cannot be reached', async () => {
     vi.stubEnv('FLASH_API_KEY', 'key_test')
     vi.stubEnv('FLASH_CHECKOUT_URL', 'https://flash.example/subscriptions/signup/a/b')

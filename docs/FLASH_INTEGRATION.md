@@ -88,12 +88,18 @@ are acknowledged and logged with their `subscriptionId` for manual linking.
 4. **Reconciliation** (`src/server/flash-reconcile.ts`, only with `FLASH_API_KEY`). Each
    webhook instead triggers a call to `GET /api/v1/external/subscriptions?ref=<pubkey>`, and
    the row is rebuilt from every subscription Flash lists for that pubkey: the one granting
-   the latest access wins, using Flash's real `currentPeriodEnd` (or `cancelEffectiveDate`).
-   So an old or foreign subscription can't end a paid one, and event order doesn't matter.
-   `getStatus` makes the same check when a row denies access or ends within a day, at
-   most every 10 minutes per user and 30 times a minute overall, which repairs rows whose
-   webhook was lost. If Flash can't be reached or lists nothing usable, the webhook is
-   applied as in the table above.
+   the latest access (grace included, `ACTIVE` on ties) wins, using Flash's real
+   `currentPeriodEnd` (or `cancelEffectiveDate`). So an old or foreign subscription can't
+   end a paid one, and event order doesn't matter. Nothing is written, and the webhook is
+   applied as in the table above, when Flash can't be reached, lists nothing usable, doesn't
+   yet show the event's own subscription as started (its list can lag the webhook).
+   Separately, when Flash lists nothing that grants access while the row still grants it and
+   its linked subscription isn't in the list (a local trial, or a subscription linked by
+   hand), the row is kept and the webhook is acknowledged without being applied. Records
+   that fail validation (non-ISO dates, years outside 1970-9999) are skipped one by one, and responses over 1 MB
+   are refused. `getStatus` makes the same check when a row denies access or ends within a
+   day, at most every 2 minutes per user and 30 times a minute overall, which repairs rows
+   whose webhook was lost.
 5. **Access** (`accessFor` in `src/lib/subscription.ts`). The first time `getStatus`
    sees a user, it saves a `TRIAL` row ending 7 days later. Access is then decided only
    from the stored row.
