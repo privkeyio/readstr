@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
 import { changeFor, isForeignSubscriptionEvent, verifyFlashWebhook } from '@/server/auth/flash-webhook'
 import { readBodyWithLimit } from '@/server/http/read-body'
+import { reconcileWithFlash } from '@/server/flash-reconcile'
 
 /** Flash's subscription events are well under 10 KB; anything bigger isn't one. */
 const MAX_WEBHOOK_BODY_BYTES = 64_000
@@ -48,6 +49,23 @@ export async function POST(request: NextRequest) {
     }
 
     const { userPubkey, occurredAt, subscriptionId } = event
+
+    // With an API key, treat the event as a prompt to re-read the user's
+    // subscriptions from Flash, which fixes ordering and foreign-subscription
+    // problems at the source. Without one, or if Flash can't answer, apply the
+    // event itself as before.
+    const reconciled = await reconcileWithFlash(db, userPubkey).catch(error => {
+      console.warn('[flash-webhook] reconcile failed; applying the event instead:', error)
+      return null
+    })
+    if (reconciled) {
+      console.log('[flash-webhook] reconciled from Flash:', event.event, userPubkey.substring(0, 10) + '...', {
+        status: reconciled.status,
+        subscriptionId: reconciled.flashSubscriptionId,
+      })
+      return NextResponse.json({ ok: true })
+    }
+
     const existing = await db.userSubscription.findUnique({ where: { userPubkey } })
     if (existing?.flashEventAt && existing.flashEventAt > occurredAt) {
       console.log('[flash-webhook] skipped out-of-order delivery:', event.event, subscriptionId)

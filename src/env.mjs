@@ -23,6 +23,10 @@ const server = z.object({
   FLASH_WEBHOOK_SECRET: z.string().optional(),
   // Plan signup URL from the Flash dashboard. Read at runtime by the server.
   FLASH_CHECKOUT_URL: z.string().url().optional(),
+  // Flash API key with only the "View Subscriptions" scope. When set, the
+  // server re-reads a user's subscriptions from Flash on each webhook and when
+  // a row lapses (src/server/flash-reconcile.ts). Secret: server env only.
+  FLASH_API_KEY: z.string().optional(),
 })
 
 const client = z.object({
@@ -37,6 +41,7 @@ const processEnv = {
   NIP98_ALLOWED_HOSTS: process.env.NIP98_ALLOWED_HOSTS,
   FLASH_WEBHOOK_SECRET: process.env.FLASH_WEBHOOK_SECRET,
   FLASH_CHECKOUT_URL: process.env.FLASH_CHECKOUT_URL,
+  FLASH_API_KEY: process.env.FLASH_API_KEY,
   NEXT_PUBLIC_ADMIN_NPUB: process.env.NEXT_PUBLIC_ADMIN_NPUB,
 }
 

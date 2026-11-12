@@ -32,7 +32,10 @@ describe('POST /api/webhooks/flash', () => {
     findUnique.mockReset()
     upsert.mockReset()
   })
-  afterEach(() => vi.unstubAllEnvs())
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+  })
 
   it('skips an old subscription\'s expired without touching a newer paid row', async () => {
     // Cancelled S1, resubscribed as S2; S1's expiry arrives later.
@@ -62,5 +65,40 @@ describe('POST /api/webhooks/flash', () => {
     const { update } = upsert.mock.calls[0]![0]
     expect(update.status).toBe('CANCELLED')
     expect('subscriptionEndsAt' in update).toBe(false)
+  })
+
+  it("writes Flash's own state when an API key is set, whatever the event says", async () => {
+    vi.stubEnv('FLASH_API_KEY', 'key_test')
+    vi.stubEnv('FLASH_CHECKOUT_URL', 'https://flash.example/subscriptions/signup/a/b')
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        subscriptions: [
+          { id: 'S1', ref: PUBKEY, status: 'expired', currentPeriodEnd: '2026-11-10T00:00:00.000Z' },
+          { id: 'S2', ref: PUBKEY, status: 'active', currentPeriodEnd: '2099-01-01T00:00:00.000Z' },
+        ],
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    findUnique.mockResolvedValue(null)
+
+    // A late `expired` for the old S1 must not end the paid S2.
+    const res = await POST(delivery('subscription.expired', 'S1', '2026-11-10T00:00:00.000Z'))
+    expect(res.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const { update } = upsert.mock.calls[0]![0]
+    expect(update).toMatchObject({ status: 'ACTIVE', flashSubscriptionId: 'S2' })
+    expect(upsert).toHaveBeenCalledOnce()
+  })
+
+  it('falls back to applying the event when Flash cannot be reached', async () => {
+    vi.stubEnv('FLASH_API_KEY', 'key_test')
+    vi.stubEnv('FLASH_CHECKOUT_URL', 'https://flash.example/subscriptions/signup/a/b')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('down', { status: 503 })))
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    findUnique.mockResolvedValue(null)
+
+    const res = await POST(delivery('subscription.activated', 'S1', '2026-11-12T00:00:00.000Z'))
+    expect(res.status).toBe(200)
+    expect(upsert.mock.calls[0]![0].update).toMatchObject({ status: 'ACTIVE', flashSubscriptionId: 'S1' })
   })
 })

@@ -32,16 +32,25 @@ Under **Settings → API & Webhooks → Webhooks**, add an endpoint:
 
 Copy the endpoint's **signing secret** (`whsec_...`).
 
-### 3. Environment (`.env.production`, read at runtime)
+### 3. API key (optional, recommended)
+
+Under **Settings → API & Webhooks → API Keys**, create a key with only the
+**View Subscriptions** scope. With it, the server checks Flash's own records instead of
+trusting each webhook on its own (see *Reconciliation* below).
+
+### 4. Environment (`.env.production`, read at runtime)
 
 ```bash
 FLASH_CHECKOUT_URL="https://.../subscriptions/signup/<serviceId>/<planId>"
 FLASH_WEBHOOK_SECRET="<signing secret from the Flash dashboard>"
+FLASH_API_KEY="<API key with View Subscriptions>"   # optional
 ```
 
-`FLASH_CHECKOUT_URL` is public. `FLASH_WEBHOOK_SECRET` is a secret: anyone holding it
-can forge webhooks. Keep it only in the server's environment, never in docs, compose
-files or git, and roll it in Flash if it is ever exposed.
+`FLASH_CHECKOUT_URL` is public. `FLASH_WEBHOOK_SECRET` and `FLASH_API_KEY` are secrets:
+the first lets anyone forge webhooks, the second lets anyone read your subscribers.
+Keep them only in the server's environment, never in docs, compose files or git, and
+roll them in Flash if they are ever exposed. The API is called on the checkout URL's
+host, so `FLASH_API_KEY` does nothing without `FLASH_CHECKOUT_URL`.
 
 > **Security notice**: the legacy `FLASH_SUBSCRIPTION_KEY` (the old JWT scheme) was
 > published in this repo and remains in git history, so treat it as compromised.
@@ -76,7 +85,16 @@ files or git, and roll it in Flash if it is ever exposed.
 Other signed events are acknowledged and ignored. Events without a usable `externalRef`
 are acknowledged and logged with their `subscriptionId` for manual linking.
 
-4. **Access** (`accessFor` in `src/lib/subscription.ts`). The first time `getStatus`
+4. **Reconciliation** (`src/server/flash-reconcile.ts`, only with `FLASH_API_KEY`). Each
+   webhook instead triggers a call to `GET /api/v1/external/subscriptions?ref=<pubkey>`, and
+   the row is rebuilt from every subscription Flash lists for that pubkey: the one granting
+   the latest access wins, using Flash's real `currentPeriodEnd` (or `cancelEffectiveDate`).
+   So an old or foreign subscription can't end a paid one, and event order doesn't matter.
+   `getStatus` makes the same check when a row denies access or ends within a day, at
+   most every 10 minutes per user and 30 times a minute overall, which repairs rows whose
+   webhook was lost. If Flash can't be reached or lists nothing usable, the webhook is
+   applied as in the table above.
+5. **Access** (`accessFor` in `src/lib/subscription.ts`). The first time `getStatus`
    sees a user, it saves a `TRIAL` row ending 7 days later. Access is then decided only
    from the stored row.
 
@@ -84,8 +102,10 @@ are acknowledged and logged with their `subscriptionId` for manual linking.
 
 Flash retries a failed delivery 3 times (1 s, 2 s, 4 s apart) and then drops it. There
 is no replay. The grace window keeps a paying user's access if a `renewed` delivery is
-lost. `flashSubscriptionId` is stored so rows can be reconciled against Flash's API
-(`GET /api/v1/external/subscriptions/{id}/verify`). That reconciliation is not built yet.
+lost, and with `FLASH_API_KEY` set, reconciliation repairs any lost event the next time
+the user's row lapses.
+
+The rest of this section describes the webhook-only fallback, used without an API key.
 
 A row follows one Flash subscription at a time. While the row still grants access, only
 `activated` can link it to a new one (or `renewed`, when the linked subscription is
@@ -99,8 +119,9 @@ date; end it by hand if a refund should end access sooner.
 
 ## Testing
 
-`npx vitest run src/server/auth/flash-webhook.test.ts src/lib/subscription.test.ts` covers
-signatures, the replay window, secret rotation, event mapping and access rules.
+`npx vitest run src/server/auth/flash-webhook.test.ts src/server/flash-reconcile.test.ts src/lib/subscription.test.ts`
+covers signatures, the replay window, secret rotation, event mapping, reconciliation and
+access rules.
 
 To send a signed delivery by hand (substitute your own secret and pubkey):
 
