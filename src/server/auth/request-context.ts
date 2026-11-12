@@ -56,7 +56,12 @@ export async function buildRequestContext(
   const method = req.method.toUpperCase()
   const authHeader = req.getHeader('authorization')
 
-  const nostrPubkey = await verifyNip98Header(authHeader, { url, method, body })
+  const nostrPubkey = await verifyNip98Header(authHeader, {
+    url,
+    method,
+    body,
+    userAgent: req.getHeader('user-agent'),
+  })
   const clientIp = clientIpFromHeaders(name => req.getHeader(name))
 
   return { db, nostrPubkey: nostrPubkey ?? null, clientIp }

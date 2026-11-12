@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { finalizeEvent, generateSecretKey } from 'nostr-tools'
 import { verifyNip98Header } from './nip98'
 
@@ -36,5 +36,25 @@ describe('verifyNip98Header replay check', () => {
     expect(await verifyNip98Header(first, { url, method: 'GET' })).not.toBeNull()
     expect(await verifyNip98Header(second, { url, method: 'GET' })).not.toBeNull()
     expect(await verifyNip98Header(first, { url, method: 'GET' })).toBeNull()
+  })
+
+  it('logs which call was replayed, without its query input', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const sk = generateSecretKey()
+    const now = Math.floor(Date.now() / 1000)
+    const token = header(sk, now - 3)
+
+    await verifyNip98Header(token, { url, method: 'GET', userAgent: 'Mozilla/5.0 test' })
+    await verifyNip98Header(token, { url, method: 'GET', userAgent: 'Mozilla/5.0 test' })
+
+    const call = warn.mock.calls.find(c => String(c[0]).includes('replayed event id'))
+    expect(call?.[1]).toMatchObject({
+      method: 'GET',
+      path: '/api/trpc/feed.getFeeds',
+      userAgent: 'Mozilla/5.0 test',
+    })
+    expect((call?.[1] as { ageSeconds: number }).ageSeconds).toBeGreaterThanOrEqual(3)
+    expect(JSON.stringify(call?.[1])).not.toContain('batch=1')
+    warn.mockRestore()
   })
 })

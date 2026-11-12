@@ -166,6 +166,14 @@ function decodeAuthEvent(authHeader: string): NostrToolsEvent | null {
   }
 }
 
+function requestPath(url: string): string {
+  try {
+    return new URL(url, 'http://localhost').pathname
+  } catch {
+    return '(unparseable)'
+  }
+}
+
 function getTag(event: NostrToolsEvent, name: string): string | undefined {
   const tag = event.tags.find(t => t[0] === name)
   return tag?.[1]
@@ -268,7 +276,7 @@ function reject(reason: string, detail?: Record<string, string | number>): null 
 
 export async function verifyNip98Header(
   authHeader: string | undefined,
-  opts: { url: string; method: string; body?: string | null }
+  opts: { url: string; method: string; body?: string | null; userAgent?: string }
 ): Promise<string | null> {
   try {
     if (!authHeader) return null
@@ -322,7 +330,17 @@ export async function verifyNip98Header(
 
     // 7. Single-use: reject an event id we have already accepted in-window.
     if (consumeEventId(event.id, event.created_at, now)) {
-      return reject('replayed event id', { id: event.id })
+      // The client signs every request with a fresh nonce, so a repeat id means
+      // the same HTTP request arrived twice. Log enough to tell a transport
+      // retry (age near 0) from a resend, and which call it was. The path is
+      // logged without its query, which carries user input.
+      return reject('replayed event id', {
+        id: event.id,
+        method,
+        path: requestPath(opts.url),
+        ageSeconds: now - event.created_at,
+        userAgent: opts.userAgent ?? '(none)',
+      })
     }
 
     // All checks passed; the pubkey is now trustworthy.
