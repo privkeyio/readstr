@@ -53,6 +53,8 @@ const FAVORITES_QUERY_INPUT = { limit: 50 } as const
 // Attempts per item before the auto-mark-read filter stops retrying a failed mark.
 const MAX_AUTO_MARK_ATTEMPTS = 3
 const AUTO_MARK_RETRY_FALLBACK_MS = 60_000
+// Quiet period after the last mark read/unread before refetching feed data.
+const FEED_DATA_REFRESH_DELAY_MS = 400
 
 // The tRPC route's 429 is plain JSON, so the TRPCClientError carries no code,
 // but its meta keeps the raw Response and with it the Retry-After header.
@@ -129,6 +131,8 @@ export function FeedReader() {
   const lastSyncedPrefsRef = useRef<string>('')
   const hasRefreshedOnLoginRef = useRef(false)
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const feedDataRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingMarksRef = useRef(0)
   
   // Mobile responsive state
   const [showSidebar, setShowSidebar] = useState(false)
@@ -523,6 +527,25 @@ export function FeedReader() {
     void utils.feed.getFavorites.invalidate()
   }
 
+  // Marking items read or unread comes in bursts (auto-mark can fire one
+  // mutation per item on a page), so refetch once after the burst settles
+  // rather than once per item, which would spend the per-IP tRPC budget.
+  // A refetch while a mark is still in flight would read the server before
+  // that mark commits and overwrite its optimistic update, so wait for none.
+  const scheduleFeedDataRefresh = () => {
+    if (feedDataRefreshTimerRef.current) clearTimeout(feedDataRefreshTimerRef.current)
+    feedDataRefreshTimerRef.current = null
+    if (pendingMarksRef.current > 0) return // the last one to settle reschedules
+    feedDataRefreshTimerRef.current = setTimeout(() => {
+      feedDataRefreshTimerRef.current = null
+      if (pendingMarksRef.current === 0) invalidateFeedData()
+    }, FEED_DATA_REFRESH_DELAY_MS)
+  }
+
+  useEffect(() => () => {
+    if (feedDataRefreshTimerRef.current) clearTimeout(feedDataRefreshTimerRef.current)
+  }, [])
+
   // Auto-refresh all feeds function
   const handleRefreshAllFeeds = useCallback(() => {
     if (isRefreshingAll || !user?.npub) return
@@ -581,8 +604,9 @@ export function FeedReader() {
 
   const markAsReadMutation = api.feed.markAsRead.useMutation({
     onMutate: async ({ itemId }) => {
+      pendingMarksRef.current++
       // Cancel outgoing refetches to avoid overwriting optimistic update
-      await utils.feed.getFeeds.cancel()
+      await Promise.all([utils.feed.getFeeds.cancel(), utils.feed.getFeedItems.cancel()])
       
       // Optimistically update the feed item cache
       updateFeedItemCache(itemId, () => ({ isRead: true }))
@@ -615,12 +639,14 @@ export function FeedReader() {
       }
     },
     onSettled: () => {
-      invalidateFeedData()
+      pendingMarksRef.current = Math.max(0, pendingMarksRef.current - 1)
+      scheduleFeedDataRefresh()
     },
   })
   const markAsUnreadMutation = api.feed.markAsUnread.useMutation({
     onMutate: async ({ itemId }) => {
-      await utils.feed.getFeeds.cancel()
+      pendingMarksRef.current++
+      await Promise.all([utils.feed.getFeeds.cancel(), utils.feed.getFeedItems.cancel()])
       updateFeedItemCache(itemId, () => ({ isRead: false }))
 
       const previousFeeds = utils.feed.getFeeds.getData()
@@ -647,7 +673,8 @@ export function FeedReader() {
       }
     },
     onSettled: () => {
-      invalidateFeedData()
+      pendingMarksRef.current = Math.max(0, pendingMarksRef.current - 1)
+      scheduleFeedDataRefresh()
     },
   })
   
