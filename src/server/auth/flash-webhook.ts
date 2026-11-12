@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'crypto'
-import { normalizePubkey, PERIOD_DAYS } from '@/lib/subscription'
+import { accessFor, normalizePubkey, PERIOD_DAYS } from '@/lib/subscription'
 
 /**
  * Verifier and event mapping for Flash subscription webhooks.
@@ -148,6 +148,37 @@ export function verifyFlashWebhook(
   }
 }
 
+/**
+ * True when an event belongs to a different Flash subscription than the one a
+ * live row is linked to, and must not touch the row.
+ *
+ * Rows are keyed by pubkey, but one pubkey can have several Flash subscriptions
+ * over time: after cancelling S1 a user may subscribe again as S2 while S1 is
+ * still running out. S1's later `expired` would then lock out the paying S2.
+ * So while the row still grants access, only `activated` may move it to a new
+ * subscription. "Live" is judged by access at the event's time, not by status
+ * alone: if S1's `expired` was dropped, its row would otherwise stay "live"
+ * forever and every later S2 event would be skipped.
+ *
+ * `renewed` may also relink a row whose linked subscription is CANCELLED: a
+ * cancelled subscription never renews, so a renewal from another one is a new
+ * payment (e.g. S2 whose `activated` was dropped), not a stale S1 event.
+ */
+export function isForeignSubscriptionEvent(
+  row: {
+    status: string
+    trialEndsAt: Date
+    subscriptionEndsAt: Date | null
+    flashSubscriptionId: string | null
+  } | null,
+  event: Pick<FlashEvent, 'event' | 'subscriptionId' | 'occurredAt'>
+): boolean {
+  if (!row?.flashSubscriptionId || row.flashSubscriptionId === event.subscriptionId) return false
+  if (event.event === 'subscription.activated') return false
+  if (event.event === 'subscription.renewed' && row.status === 'CANCELLED') return false
+  return accessFor(row, event.occurredAt).hasAccess
+}
+
 /** Fields to write to UserSubscription for an event. */
 export interface SubscriptionChange {
   status: 'ACTIVE' | 'PAST_DUE' | 'CANCELLED' | 'EXPIRED'
@@ -158,10 +189,12 @@ export interface SubscriptionChange {
 /**
  * Map a Flash lifecycle event onto our subscription row.
  *
- * Flash is the source of truth for the lifecycle: an end-of-period
- * cancellation keeps the subscription active and later arrives as `expired`,
- * while `canceled` means access ends now (immediate cancel, or dunning
- * exhausted). Webhooks carry no period end, so a paid period is assumed to run
+ * Flash is the source of truth for the lifecycle. It sends `canceled` as soon
+ * as a cancellation is requested, including one scheduled for the end of the
+ * period, and sends `expired` when access actually ends. So `canceled` keeps
+ * the paid-through date, and `expired` ends access. A cancel after dunning is
+ * exhausted still ends access, because that period's end is already past.
+ * Webhooks carry no period end, so a paid period is assumed to run
  * PERIOD_DAYS from payment; accessFor adds a grace window on top so a late or
  * dropped `renewed` delivery doesn't lock out a paying user.
  */
@@ -180,7 +213,7 @@ export function changeFor(event: FlashEvent): SubscriptionChange {
       return { status: 'PAST_DUE' }
     case 'subscription.canceled': {
       const at = asDate(data.canceledAt) ?? occurredAt
-      return { status: 'CANCELLED', subscriptionEndsAt: at, cancelledAt: at }
+      return { status: 'CANCELLED', cancelledAt: at }
     }
     case 'subscription.expired':
       return { status: 'EXPIRED', subscriptionEndsAt: asDate(data.expiredAt) ?? occurredAt }

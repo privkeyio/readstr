@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
-import { changeFor, verifyFlashWebhook } from '@/server/auth/flash-webhook'
+import { changeFor, isForeignSubscriptionEvent, verifyFlashWebhook } from '@/server/auth/flash-webhook'
 import { readBodyWithLimit } from '@/server/http/read-body'
 
 /** Flash's subscription events are well under 10 KB; anything bigger isn't one. */
@@ -51,6 +51,14 @@ export async function POST(request: NextRequest) {
     const existing = await db.userSubscription.findUnique({ where: { userPubkey } })
     if (existing?.flashEventAt && existing.flashEventAt > occurredAt) {
       console.log('[flash-webhook] skipped out-of-order delivery:', event.event, subscriptionId)
+      return NextResponse.json({ ok: true })
+    }
+    if (isForeignSubscriptionEvent(existing, event)) {
+      console.log('[flash-webhook] skipped event for a subscription this row is not linked to:', {
+        event: event.event,
+        subscriptionId,
+        linked: existing?.flashSubscriptionId,
+      })
       return NextResponse.json({ ok: true })
     }
 

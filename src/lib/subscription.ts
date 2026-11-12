@@ -28,8 +28,8 @@ interface SubscriptionRow {
  *
  * ACTIVE and PAST_DUE keep access for GRACE_DAYS past the paid period, covering
  * Flash's payment retries and a late or dropped `renewed` webhook. A CANCELLED
- * row keeps access until its subscriptionEndsAt (Flash's `canceled` sets that
- * to the cancel time, so access ends at once). EXPIRED never has access.
+ * row keeps access until its subscriptionEndsAt, the end of the period already
+ * paid for (Flash's `canceled` leaves it unchanged). EXPIRED never has access.
  * daysRemaining counts to the paid end, without grace.
  */
 export function accessFor(row: SubscriptionRow, now: Date) {

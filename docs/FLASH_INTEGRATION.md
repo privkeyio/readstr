@@ -70,8 +70,8 @@ files or git, and roll it in Flash if it is ever exposed.
 | `subscription.activated` | `ACTIVE`, paid until `activatedAt` + 30 days | Paid period + 7-day grace |
 | `subscription.renewed` | `ACTIVE`, paid until `paidAt` + 30 days | Paid period + 7-day grace |
 | `subscription.past_due` | `PAST_DUE`, period unchanged | Paid period + 7-day grace (Flash retries) |
-| `subscription.canceled` | `CANCELLED`, ends at `canceledAt` | Ends immediately (immediate cancel or dunning exhausted) |
-| `subscription.expired` | `EXPIRED` | None (end-of-period cancellation reached its date) |
+| `subscription.canceled` | `CANCELLED`, `cancelledAt` set, period unchanged | Until the paid period ends, no grace. Flash sends this as soon as any cancellation is requested, including one scheduled for the period end |
+| `subscription.expired` | `EXPIRED` | None (the scheduled end date was reached) |
 
 Other signed events are acknowledged and ignored. Events without a usable `externalRef`
 are acknowledged and logged with their `subscriptionId` for manual linking.
@@ -86,6 +86,16 @@ Flash retries a failed delivery 3 times (1 s, 2 s, 4 s apart) and then drops it.
 is no replay. The grace window keeps a paying user's access if a `renewed` delivery is
 lost. `flashSubscriptionId` is stored so rows can be reconciled against Flash's API
 (`GET /api/v1/external/subscriptions/{id}/verify`). That reconciliation is not built yet.
+
+A row follows one Flash subscription at a time. While the row still grants access, only
+`activated` can link it to a new one (or `renewed`, when the linked subscription is
+cancelled and so can't renew), and other events from a different subscription are
+logged and skipped, so an old subscription's `expired` cannot end a newer paid one. Once
+the row no longer grants access, any event can relink it.
+
+A `CANCELLED` row has no grace: access stops at the paid-through date. If Flash sends
+only `canceled` for an immediate cancel or refund, the user keeps access until that
+date; end it by hand if a refund should end access sooner.
 
 ## Testing
 
