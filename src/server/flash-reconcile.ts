@@ -34,6 +34,7 @@ const isoDate = z.iso
 const flashSubscription = z.object({
   id: z.string().min(1).max(100),
   ref: z.string().nullable(),
+  serviceId: z.string().nullable().optional(),
   status: z.string(),
   currentPeriodEnd: isoDate,
   canceledAt: isoDate,
@@ -57,11 +58,13 @@ export interface ReconciledState extends Required<Pick<SubscriptionChange, 'stat
 export interface FlashApiConfig {
   apiKey: string
   baseUrl: string
+  serviceId?: string
 }
 
 /**
  * The API lives on the same host as the checkout page, so its base comes from
  * FLASH_CHECKOUT_URL. Reconciliation is off unless both settings are present.
+ * FLASH_SERVICE_ID optionally limits it to one Flash service.
  */
 export function flashApiConfig(env: NodeJS.ProcessEnv = process.env): FlashApiConfig | null {
   const apiKey = env.FLASH_API_KEY?.trim()
@@ -70,13 +73,17 @@ export function flashApiConfig(env: NodeJS.ProcessEnv = process.env): FlashApiCo
   try {
     const url = new URL(checkout)
     if (url.protocol !== 'https:') return null
-    return { apiKey, baseUrl: url.origin }
+    const serviceId = env.FLASH_SERVICE_ID?.trim()
+    return serviceId ? { apiKey, baseUrl: url.origin, serviceId } : { apiKey, baseUrl: url.origin }
   } catch {
     return null
   }
 }
 
-/** Every Flash subscription whose `ref` is this pubkey, or null if Flash can't be asked. */
+/**
+ * Every Flash subscription whose `ref` is this pubkey (and, with a serviceId,
+ * that belongs to that service), or null if Flash can't be asked.
+ */
 export async function listFlashSubscriptions(
   config: FlashApiConfig,
   pubkey: string,
@@ -84,6 +91,7 @@ export async function listFlashSubscriptions(
 ): Promise<FlashSubscription[] | null> {
   const url = new URL('/api/v1/external/subscriptions', config.baseUrl)
   url.searchParams.set('ref', pubkey)
+  if (config.serviceId) url.searchParams.set('serviceId', config.serviceId)
   try {
     const res = await fetchImpl(url, {
       headers: { Authorization: `Bearer ${config.apiKey}`, Accept: 'application/json' },
@@ -111,7 +119,9 @@ export async function listFlashSubscriptions(
     for (const raw of parsed.data.subscriptions) {
       const record = flashSubscription.safeParse(raw)
       // The filter is Flash's; check it anyway so a bug there can't link another user's subscription.
-      if (record.success && record.data.ref === pubkey) subs.push(record.data)
+      if (!record.success || record.data.ref !== pubkey) continue
+      if (config.serviceId && record.data.serviceId !== config.serviceId) continue
+      subs.push(record.data)
     }
     return subs
   } catch (error) {
@@ -139,7 +149,8 @@ function candidateFor(sub: FlashSubscription): ReconciledState | null {
       status = canceledAt ? 'CANCELLED' : 'ACTIVE'
       break
     case 'past_due':
-      status = 'PAST_DUE'
+      // No PAST_DUE grace once the user has cancelled.
+      status = canceledAt ? 'CANCELLED' : 'PAST_DUE'
       break
     case 'canceled':
       status = 'CANCELLED'
@@ -190,11 +201,36 @@ export const KEPT = 'kept' as const
  * user, or `subscriptionId` (the triggering webhook's) isn't usable in Flash's
  * list yet. On null callers keep their existing behaviour.
  */
-export async function reconcileWithFlash(
+export function reconcileWithFlash(
   db: ReconcileDb,
   pubkey: string,
   now: Date = new Date(),
-  opts: { config?: FlashApiConfig | null; fetchImpl?: typeof fetch; subscriptionId?: string } = {}
+  opts: ReconcileOptions = {}
+): Promise<ReconciledState | typeof KEPT | null> {
+  // Calls for one pubkey run one after another, so an older Flash snapshot
+  // can't land after a newer one. Per-process: assumes the single-container
+  // deployment, like the NIP-98 replay map.
+  const run = (inFlight.get(pubkey) ?? Promise.resolve()).then(() => reconcileOnce(db, pubkey, now, opts))
+  const tail = run.then(
+    () => {},
+    () => {}
+  )
+  inFlight.set(pubkey, tail)
+  void tail.then(() => {
+    if (inFlight.get(pubkey) === tail) inFlight.delete(pubkey)
+  })
+  return run
+}
+
+type ReconcileOptions = { config?: FlashApiConfig | null; fetchImpl?: typeof fetch; subscriptionId?: string }
+
+const inFlight = new Map<string, Promise<void>>()
+
+async function reconcileOnce(
+  db: ReconcileDb,
+  pubkey: string,
+  now: Date,
+  opts: ReconcileOptions
 ): Promise<ReconciledState | typeof KEPT | null> {
   const config = opts.config === undefined ? flashApiConfig() : opts.config
   if (!config) return null

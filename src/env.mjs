@@ -27,6 +27,9 @@ const server = z.object({
   // server re-reads a user's subscriptions from Flash on each webhook and when
   // a row lapses (src/server/flash-reconcile.ts). Secret: server env only.
   FLASH_API_KEY: z.string().optional(),
+  // Flash service id (UUID) of Readstr's plan. Optional: when set,
+  // reconciliation only uses subscriptions to this service.
+  FLASH_SERVICE_ID: z.string().uuid().optional(),
 })
 
 const client = z.object({
@@ -42,6 +45,7 @@ const processEnv = {
   FLASH_WEBHOOK_SECRET: process.env.FLASH_WEBHOOK_SECRET,
   FLASH_CHECKOUT_URL: process.env.FLASH_CHECKOUT_URL,
   FLASH_API_KEY: process.env.FLASH_API_KEY,
+  FLASH_SERVICE_ID: process.env.FLASH_SERVICE_ID,
   NEXT_PUBLIC_ADMIN_NPUB: process.env.NEXT_PUBLIC_ADMIN_NPUB,
 }
 

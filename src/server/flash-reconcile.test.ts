@@ -83,6 +83,11 @@ describe('stateFromFlash', () => {
     })
   })
 
+  it('treats a cancelled past_due subscription as CANCELLED, not PAST_DUE', () => {
+    const s = sub('S1', 'past_due', -2, { canceledAt: day(-1) })
+    expect(stateFromFlash([s], NOW)).toMatchObject({ status: 'CANCELLED', cancelledAt: new Date(day(-1)) })
+  })
+
   it('treats active with canceledAt but no cancelEffectiveDate as CANCELLED at the period end', () => {
     const s = sub('S1', 'active', 12, { canceledAt: day(-1) })
     expect(stateFromFlash([s], NOW)).toMatchObject({
@@ -106,6 +111,25 @@ describe('listFlashSubscriptions', () => {
     const [url, init] = fetchImpl.mock.calls[0] as [URL, RequestInit]
     expect(url.toString()).toBe(`https://flash.example/api/v1/external/subscriptions?ref=${PUBKEY}`)
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer key_test')
+  })
+
+  it('scopes the list to the configured service', async () => {
+    const SERVICE = '11111111-1111-4111-8111-111111111111'
+    const ours = sub('OURS', 'active', 20, { serviceId: SERVICE })
+    const other = sub('OTHER', 'active', 30, { serviceId: '22222222-2222-4222-8222-222222222222' })
+    const unscoped = sub('NONE', 'active', 30)
+    const body = { subscriptions: [ours, other, unscoped] }
+
+    const scoped = jsonFetch(body)
+    const listed = await listFlashSubscriptions({ ...config, serviceId: SERVICE }, PUBKEY, scoped)
+    expect(listed?.map(s => s.id)).toEqual(['OURS'])
+    const url = (scoped.mock.calls[0] as [URL])[0]
+    expect(url.searchParams.get('serviceId')).toBe(SERVICE)
+    expect(url.searchParams.get('ref')).toBe(PUBKEY)
+
+    const all = jsonFetch(body)
+    expect((await listFlashSubscriptions(config, PUBKEY, all))?.map(s => s.id)).toEqual(['OURS', 'OTHER', 'NONE'])
+    expect((all.mock.calls[0] as [URL])[0].searchParams.has('serviceId')).toBe(false)
   })
 
   it("drops subscriptions for another ref even if Flash returns them", async () => {
@@ -170,6 +194,9 @@ describe('flashApiConfig', () => {
       apiKey: 'k',
       baseUrl: 'https://flash.example',
     })
+    expect(
+      flashApiConfig({ FLASH_API_KEY: 'k', FLASH_CHECKOUT_URL: checkout, FLASH_SERVICE_ID: ' svc ' } as never)
+    ).toEqual({ apiKey: 'k', baseUrl: 'https://flash.example', serviceId: 'svc' })
     expect(flashApiConfig({ FLASH_CHECKOUT_URL: checkout } as never)).toBeNull()
     expect(flashApiConfig({ FLASH_API_KEY: 'k' } as never)).toBeNull()
     expect(flashApiConfig({ FLASH_API_KEY: 'k', FLASH_CHECKOUT_URL: 'http://flash.example/x' } as never)).toBeNull()
@@ -236,6 +263,47 @@ describe('reconcileWithFlash', () => {
     const db = { userSubscription: { upsert, findUnique } } as never
     expect(await reconcileWithFlash(db, PUBKEY, NOW, { config, fetchImpl })).toMatchObject({ status: 'EXPIRED' })
     expect(upsert).toHaveBeenCalledOnce()
+  })
+
+  it('runs overlapping calls for one user in call order', async () => {
+    const upsert = vi.fn(async () => ({}))
+    const db = { userSubscription: { upsert } } as never
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>(resolve => (releaseFirst = resolve))
+    const events: string[] = []
+    const body = (id: string) => JSON.stringify({ subscriptions: [sub(id, 'active', 20)] })
+    const fetchImpl = vi.fn(async () => {
+      const n = fetchImpl.mock.calls.length
+      events.push(`fetch${n}`)
+      if (n === 1) await firstGate
+      return new Response(body(n === 1 ? 'FIRST' : 'SECOND'))
+    }) as unknown as typeof fetch & ReturnType<typeof vi.fn>
+
+    const first = reconcileWithFlash(db, PUBKEY, NOW, { config, fetchImpl })
+    const second = reconcileWithFlash(db, PUBKEY, NOW, { config, fetchImpl })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(events).toEqual(['fetch1'])
+    releaseFirst()
+    await Promise.all([first, second])
+
+    expect(events).toEqual(['fetch1', 'fetch2'])
+    const ids = (upsert.mock.calls as unknown as [{ update: { flashSubscriptionId: string } }][]).map(
+      c => c[0].update.flashSubscriptionId
+    )
+    expect(ids).toEqual(['FIRST', 'SECOND'])
+  })
+
+  it("doesn't let a failed call block the next one for the same user", async () => {
+    const upsert = vi.fn(async () => {
+      throw new Error('db down')
+    })
+    const fetchImpl = jsonFetch({ subscriptions: [sub('S1', 'active', 20)] })
+    const failing = { userSubscription: { upsert } } as never
+    await expect(reconcileWithFlash(failing, PUBKEY, NOW, { config, fetchImpl })).rejects.toThrow('db down')
+    const ok = vi.fn(async () => ({}))
+    const db = { userSubscription: { upsert: ok } } as never
+    expect(await reconcileWithFlash(db, PUBKEY, NOW, { config, fetchImpl })).toMatchObject({ flashSubscriptionId: 'S1' })
+    expect(ok).toHaveBeenCalledOnce()
   })
 
   it('does nothing without a config or when Flash has nothing usable', async () => {

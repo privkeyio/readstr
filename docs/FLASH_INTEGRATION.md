@@ -44,13 +44,16 @@ trusting each webhook on its own (see *Reconciliation* below).
 FLASH_CHECKOUT_URL="https://.../subscriptions/signup/<serviceId>/<planId>"
 FLASH_WEBHOOK_SECRET="<signing secret from the Flash dashboard>"
 FLASH_API_KEY="<API key with View Subscriptions>"   # optional
+FLASH_SERVICE_ID="<serviceId from the checkout URL>"  # optional
 ```
 
 `FLASH_CHECKOUT_URL` is public. `FLASH_WEBHOOK_SECRET` and `FLASH_API_KEY` are secrets:
 the first lets anyone forge webhooks, the second lets anyone read your subscribers.
 Keep them only in the server's environment, never in docs, compose files or git, and
 roll them in Flash if they are ever exposed. The API is called on the checkout URL's
-host, so `FLASH_API_KEY` does nothing without `FLASH_CHECKOUT_URL`.
+host, so `FLASH_API_KEY` does nothing without `FLASH_CHECKOUT_URL`. `FLASH_SERVICE_ID`
+(a UUID) limits reconciliation to Readstr's service; set it if your Flash account has
+more than one service.
 
 > **Security notice**: the legacy `FLASH_SUBSCRIPTION_KEY` (the old JWT scheme) was
 > published in this repo and remains in git history, so treat it as compromised.
@@ -99,7 +102,12 @@ are acknowledged and logged with their `subscriptionId` for manual linking.
    that fail validation (non-ISO dates, years outside 1970-9999) are skipped one by one, and responses over 1 MB
    are refused. `getStatus` makes the same check when a row denies access or ends within a
    day, at most every 2 minutes per user and 30 times a minute overall, which repairs rows
-   whose webhook was lost.
+   whose webhook was lost. With `FLASH_SERVICE_ID` set, the request also sends
+   `serviceId=<id>` and only subscriptions whose `serviceId` matches are used, so a
+   subscription to another service on the same Flash account with the user's pubkey as
+   `ref` can't grant Readstr access. Set it if your Flash account has more than one
+   service. Reconciliations for the same user run one at a time (in-process), so an older
+   Flash answer can't overwrite a newer one.
 5. **Access** (`accessFor` in `src/lib/subscription.ts`). The first time `getStatus`
    sees a user, it saves a `TRIAL` row ending 7 days later. Access is then decided only
    from the stored row.
