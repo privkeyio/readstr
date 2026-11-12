@@ -97,6 +97,9 @@ const handler = async (req: NextRequest) => {
     req: reqForHandler,
     router: appRouter,
     createContext: () => buildRequestContext(reqLike, rawBody),
+    // Responses are per-user (signed requests), so no browser, proxy or
+    // service worker may store them.
+    responseMeta: () => ({ headers: { 'cache-control': 'private, no-store' } }),
   })
 }
 
