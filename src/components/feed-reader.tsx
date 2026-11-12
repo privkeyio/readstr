@@ -53,6 +53,8 @@ const FAVORITES_QUERY_INPUT = { limit: 50 } as const
 // Attempts per item before the auto-mark-read filter stops retrying a failed mark.
 const MAX_AUTO_MARK_ATTEMPTS = 3
 const AUTO_MARK_RETRY_FALLBACK_MS = 60_000
+// Quiet period after the last mark read/unread before refetching feed data.
+const FEED_DATA_REFRESH_DELAY_MS = 400
 
 // The tRPC route's 429 is plain JSON, so the TRPCClientError carries no code,
 // but its meta keeps the raw Response and with it the Retry-After header.
@@ -129,6 +131,7 @@ export function FeedReader() {
   const lastSyncedPrefsRef = useRef<string>('')
   const hasRefreshedOnLoginRef = useRef(false)
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const feedDataRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   
   // Mobile responsive state
   const [showSidebar, setShowSidebar] = useState(false)
@@ -516,12 +519,30 @@ export function FeedReader() {
   })
   
   const invalidateFeedData = () => {
-    // Use refetch instead of invalidate for immediate UI updates
-    void utils.feed.getFeeds.refetch()
-    void utils.feed.getUserTags.refetch()
-    void utils.feed.getFeedItems.invalidate()
-    void utils.feed.getFavorites.invalidate()
+    // Use refetch instead of invalidate for immediate UI updates. Requests
+    // aren't aborted on cancel (abortOnUnmount is off), so cancelRefetch would
+    // put a second copy of every in-flight query on the wire; reuse it instead.
+    const keep = { cancelRefetch: false }
+    void utils.feed.getFeeds.refetch(undefined, undefined, keep)
+    void utils.feed.getUserTags.refetch(undefined, undefined, keep)
+    void utils.feed.getFeedItems.invalidate(undefined, undefined, keep)
+    void utils.feed.getFavorites.invalidate(undefined, undefined, keep)
   }
+
+  // Marking items read or unread comes in bursts (auto-mark can fire one
+  // mutation per item on a page), so refetch once after the burst settles
+  // rather than once per item, which would spend the per-IP tRPC budget.
+  const scheduleFeedDataRefresh = () => {
+    if (feedDataRefreshTimerRef.current) clearTimeout(feedDataRefreshTimerRef.current)
+    feedDataRefreshTimerRef.current = setTimeout(() => {
+      feedDataRefreshTimerRef.current = null
+      invalidateFeedData()
+    }, FEED_DATA_REFRESH_DELAY_MS)
+  }
+
+  useEffect(() => () => {
+    if (feedDataRefreshTimerRef.current) clearTimeout(feedDataRefreshTimerRef.current)
+  }, [])
 
   // Auto-refresh all feeds function
   const handleRefreshAllFeeds = useCallback(() => {
@@ -615,7 +636,7 @@ export function FeedReader() {
       }
     },
     onSettled: () => {
-      invalidateFeedData()
+      scheduleFeedDataRefresh()
     },
   })
   const markAsUnreadMutation = api.feed.markAsUnread.useMutation({
@@ -647,7 +668,7 @@ export function FeedReader() {
       }
     },
     onSettled: () => {
-      invalidateFeedData()
+      scheduleFeedDataRefresh()
     },
   })
   
