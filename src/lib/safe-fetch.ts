@@ -113,7 +113,7 @@ function ipv6ToBlocked(ip: string): boolean {
   return false
 }
 
-function isBlockedAddress(ip: string): boolean {
+export function isBlockedAddress(ip: string): boolean {
   const family = isIP(ip)
   if (family === 4) return ipv4ToBlocked(ip)
   if (family === 6) return ipv6ToBlocked(ip)
@@ -123,7 +123,7 @@ function isBlockedAddress(ip: string): boolean {
 // Validate at the resolution undici actually connects to, closing the
 // TOCTOU/DNS-rebinding gap where a separate pre-flight lookup could differ
 // from the address the request ultimately connects to.
-const safeDispatcher = new Agent({
+export const safeDispatcher = new Agent({
   connect: {
     lookup(hostname, options, callback) {
       lookupCb(hostname, { ...options, all: true }, (err, addresses) => {

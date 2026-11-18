@@ -9,7 +9,7 @@ export const FALLBACK_RELAYS: readonly string[] = [
   'wss://nostr-pub.wellorder.net',
 ]
 
-const CONTROL_OR_SPACE = /[\u0000-\u0020\u007f-\u009f\s]/
+export const CONTROL_OR_SPACE = /[\u0000-\u0020\u007f-\u009f\s]/
 
 export function parseRelayList(raw: string | undefined | null): string[] {
   if (!raw) return []

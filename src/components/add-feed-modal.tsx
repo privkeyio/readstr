@@ -51,8 +51,8 @@ export function AddFeedModal({ isOpen, onClose, onAddFeed, isLoading = false, er
   // Helper to get relays from localStorage
   const getRelays = (): string[] | undefined => {
     if (typeof window === 'undefined') return undefined
-    // The server accepts at most 50 relays, and a user's saved list is unbounded.
-    const relays = pickRelays(localStorage.getItem('nostr_relays'), []).slice(0, 50)
+    // The server accepts at most 20 relays, and a user's saved list is unbounded.
+    const relays = pickRelays(localStorage.getItem('nostr_relays'), []).slice(0, 20)
     return relays.length > 0 ? relays : undefined
   }
 

@@ -2,7 +2,8 @@ import { z } from 'zod'
 import { TRPCError } from '@trpc/server'
 import { createTRPCRouter, protectedProcedure } from '@/server/api/trpc'
 import { fetchAndParseFeed } from '@/lib/rss-parser'
-import { getNostrFetcher, NostrFeedFetcher } from '@/lib/nostr-fetcher'
+import { getNostrFetcher } from '@/lib/nostr-fetcher'
+import { withRequestFetcher } from '@/lib/safe-relays'
 import { discoverFeed } from '@/lib/feed-discovery'
 import { FeedType, type Prisma } from '@prisma/client'
 import { nip19 } from 'nostr-tools'
@@ -1637,11 +1638,11 @@ export const feedRouter = createTRPCRouter({
     .input(z.object({
       query: z.string().min(1),
       limit: z.number().min(1).max(20).default(10),
-      relays: z.array(z.string()).max(50).optional(),
+      relays: z.array(z.string().max(512)).max(20).optional(),
     }))
     .mutation(async ({ input }) => {
-      const nostrFetcher = input.relays ? new NostrFeedFetcher(input.relays) : getNostrFetcher()
-      const profiles = await nostrFetcher.searchProfiles(input.query, input.limit)
+      const profiles = await withRequestFetcher(input.relays, (fetcher) =>
+        fetcher.searchProfiles(input.query, input.limit))
       return { profiles }
     }),
 
@@ -1649,11 +1650,10 @@ export const feedRouter = createTRPCRouter({
   getPopularUsers: protectedProcedure
     .input(z.object({
       limit: z.number().min(1).max(50).default(20),
-      relays: z.array(z.string()).max(50).optional(),
+      relays: z.array(z.string().max(512)).max(20).optional(),
     }))
     .mutation(async ({ input }) => {
-      const nostrFetcher = input.relays ? new NostrFeedFetcher(input.relays) : getNostrFetcher()
-      const profiles = await nostrFetcher.getPopularUsers(input.limit)
+      const profiles = await withRequestFetcher(input.relays, (fetcher) => fetcher.getPopularUsers(input.limit))
       return { profiles }
     }),
 

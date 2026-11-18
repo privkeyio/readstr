@@ -1,4 +1,5 @@
-import { SimplePool, Event, Filter, nip19 } from 'nostr-tools'
+import { SimplePool, Event, Filter, nip19, verifyEvent } from 'nostr-tools'
+import { AbstractSimplePool, type AbstractPoolConstructorOptions } from 'nostr-tools/abstract-pool'
 import { safeFetch } from './safe-fetch'
 import { getUserOrDefaultRelays } from './relays'
 
@@ -32,11 +33,15 @@ function getRelaysFromStorage(): string[] {
 }
 
 export class NostrFeedFetcher {
-  private pool: SimplePool
+  private pool: AbstractSimplePool
   private relays: string[]
 
-  constructor(relays?: string[]) {
-    this.pool = new SimplePool()
+  // websocketImplementation scopes a custom socket to this instance without
+  // touching nostr-tools' global implementation used by the shared fetcher.
+  constructor(relays?: string[], options?: Pick<AbstractPoolConstructorOptions, 'websocketImplementation'>) {
+    this.pool = options?.websocketImplementation
+      ? new AbstractSimplePool({ verifyEvent, websocketImplementation: options.websocketImplementation })
+      : new SimplePool()
     this.relays = relays || getRelaysFromStorage()
     console.log('NostrFeedFetcher initialized with relays:', this.relays)
   }
