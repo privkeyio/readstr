@@ -71,3 +71,18 @@ export async function setCachedSummary(key: string, value: string): Promise<void
     // Value is already mirrored in memoryStore above.
   }
 }
+
+export async function clearSummaryCache(): Promise<void> {
+  memoryStore.clear()
+  if (!hasIndexedDb()) return
+  const db = await openDb()
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite')
+    tx.objectStore(STORE_NAME).clear()
+    tx.oncomplete = () => {
+      db.close()
+      resolve()
+    }
+    tx.onerror = () => reject(tx.error)
+  })
+}

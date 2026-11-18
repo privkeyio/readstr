@@ -24,7 +24,8 @@ import {
   type SavedView,
   type ViewSource,
 } from '@/lib/saved-views'
-import { recordRead, searchHistory, clearHistory, type HistoryRecord } from '@/lib/reading-history'
+import { recordRead, searchHistory, type HistoryRecord } from '@/lib/reading-history'
+import { clearUserClientState } from '@/lib/sign-out'
 import { SimplePool } from 'nostr-tools'
 import { 
   fetchSubscriptionList,
@@ -216,11 +217,12 @@ export function FeedReader() {
   // Sign out handler
   const handleSignOut = async () => {
     try {
-      await clearHistory()
-    } catch {
+      await clearUserClientState()
     } finally {
       disconnect()
-      router.push('/')
+      // A full load, not router.push: it also drops in-memory per-user state
+      // (React Query cache, AI settings, profile cache) along with the page.
+      window.location.replace('/')
     }
   }
 
