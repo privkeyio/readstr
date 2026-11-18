@@ -3,10 +3,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { loggerLink } from '@trpc/client'
 import { createTRPCReact } from '@trpc/react-query'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import superjson from 'superjson'
 import { nip98 } from 'nostr-tools'
 import { type AppRouter } from '@/server/api/root'
+import { shouldClearOnAccountChange } from '@/lib/sign-out'
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
 import { type UnsignedEvent, type Event as NostrEvent } from 'nostr-tools'
 import { createTrpcHttpLinks } from '@/trpc/links'
@@ -50,6 +51,16 @@ export function TRPCReactProvider(props: {
       },
     },
   }))
+
+  // Cached query results belong to whoever fetched them: drop them when the
+  // signed-in account changes, so the next user never sees the last one's.
+  const pubkey = user?.pubkey ?? null
+  const lastPubkey = useRef(pubkey)
+  useEffect(() => {
+    const prev = lastPubkey.current
+    lastPubkey.current = pubkey
+    if (shouldClearOnAccountChange(prev, pubkey)) queryClient.clear()
+  }, [pubkey, queryClient])
 
   // Keep the module-scoped signer in sync with the current user/auth method.
   useEffect(() => {

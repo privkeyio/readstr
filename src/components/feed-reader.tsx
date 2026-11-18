@@ -24,7 +24,8 @@ import {
   type SavedView,
   type ViewSource,
 } from '@/lib/saved-views'
-import { recordRead, searchHistory, clearHistory, type HistoryRecord } from '@/lib/reading-history'
+import { recordRead, searchHistory, type HistoryRecord } from '@/lib/reading-history'
+import { signOut } from '@/lib/sign-out'
 import { SimplePool } from 'nostr-tools'
 import { 
   fetchSubscriptionList,
@@ -213,25 +214,7 @@ export function FeedReader() {
     }
   }
 
-  // Sign out handler
-  const handleSignOut = async () => {
-    try {
-      await clearHistory()
-    } catch {
-    } finally {
-      disconnect()
-      router.push('/')
-    }
-  }
-
-  // Debug: Log session info
-  useEffect(() => {
-    console.log('FeedReader - User:', user)
-    if (typeof window !== 'undefined') {
-      const session = localStorage.getItem('nostr_session')
-      console.log('FeedReader - Session in localStorage:', session)
-    }
-  }, [user])
+  const handleSignOut = () => signOut(disconnect)
 
   // Close menu when clicking outside
   useEffect(() => {

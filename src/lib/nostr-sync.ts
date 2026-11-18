@@ -659,7 +659,7 @@ export function setPrefsSyncEnabled(v: boolean): void {
   }
 }
 
-const APPLIED_CREATEDAT_PREFIX = 'readstr_applied_createdat:'
+export const APPLIED_CREATEDAT_PREFIX = 'readstr_applied_createdat:'
 
 /**
  * Get the created_at of the last applied sync event for a given d-tag.

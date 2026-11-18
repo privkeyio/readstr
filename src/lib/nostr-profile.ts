@@ -25,6 +25,13 @@ interface CachedProfile {
 const memoryCache = new Map<string, CachedProfile>()
 const inFlight = new Map<string, Promise<NostrProfile | null>>()
 
+// Drop the in-memory copies on sign-out or account switch; localStorage is
+// cleared separately.
+export function clearProfileCache(): void {
+  memoryCache.clear()
+  inFlight.clear()
+}
+
 let sharedPool: SimplePool | null = null
 
 function getPool(): SimplePool {
@@ -134,7 +141,9 @@ export async function fetchNostrProfile(npub: string): Promise<NostrProfile | nu
 function dedupedFetch(key: string): Promise<NostrProfile | null> {
   const existing = inFlight.get(key)
   if (existing) return existing
-  const promise = fetchNostrProfile(key).finally(() => inFlight.delete(key))
+  const promise = fetchNostrProfile(key).finally(() => {
+    if (inFlight.get(key) === promise) inFlight.delete(key)
+  })
   inFlight.set(key, promise)
   return promise
 }

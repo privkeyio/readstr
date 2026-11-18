@@ -6,6 +6,7 @@ import { BunkerSigner, parseBunkerInput, type BunkerPointer } from 'nostr-tools/
 import { SimplePool } from 'nostr-tools/pool'
 import { generateSecretKey } from 'nostr-tools/pure'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
+import { OWNER_PUBKEY_KEY, claimDeviceForUser } from '@/lib/sign-out'
 
 const debugLog = (...args: unknown[]) => {
   if (process.env.NODE_ENV === 'development') console.log(...args)
@@ -202,6 +203,26 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
     void checkExistingConnection()
   }, [])
 
+  // Follow sign-out or an account switch in another tab: this tab's in-memory
+  // state belongs to the old session, so reload. The writing tab gets no
+  // storage event, so this can't loop.
+  const userPubkey = user?.pubkey ?? null
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.storageArea !== localStorage) return
+      if (
+        e.key === null ||
+        // Not on nostr_session removal: a failed restore in another tab also
+        // removes it. Sign-out always rewrites the owner key, caught here.
+        (e.key === OWNER_PUBKEY_KEY && userPubkey !== null && e.newValue !== userPubkey)
+      ) {
+        window.location.reload()
+      }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [userPubkey])
+
   const checkExistingConnection = async () => {
     // Check for stored session first
     const storedSession = localStorage.getItem('nostr_session')
@@ -215,6 +236,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
             try {
               const pubkey = await window.nostr.getPublicKey()
               const npub = nip19.npubEncode(pubkey)
+              void claimDeviceForUser(pubkey, { fresh: false })
               setUser({ pubkey, npub })
               setAuthMethod('nip07')
               setIsConnected(true)
@@ -236,6 +258,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
             if (pubkey !== stored.pubkey) {
               throw new Error('Remote signer pubkey mismatch')
             }
+            void claimDeviceForUser(pubkey, { fresh: false })
             setUser({ pubkey, npub: nip19.npubEncode(pubkey) })
             setAuthMethod('nip46')
             setIsConnected(true)
@@ -260,6 +283,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
           }
         } else if (sessionData.method === 'npub_readonly' && sessionData.pubkey) {
           // Restore read-only npub session
+          void claimDeviceForUser(sessionData.pubkey, { fresh: false })
           setUser({
             pubkey: sessionData.pubkey,
             npub: sessionData.npub
@@ -334,6 +358,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
       }
       localStorage.setItem('nostr_session', JSON.stringify(sessionData))
       
+      void claimDeviceForUser(pubkey, { fresh: true })
       setUser({ pubkey, npub })
       setAuthMethod('nip07')
       setIsConnected(true)
@@ -378,6 +403,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
         session.npub = npub
         localStorage.setItem('nostr_session', JSON.stringify(session))
 
+        void claimDeviceForUser(pubkey, { fresh: true })
         setUser({ pubkey, npub })
         setAuthMethod('nip46')
         setIsConnected(true)
@@ -418,6 +444,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
       }
       localStorage.setItem('nostr_session', JSON.stringify(sessionData))
 
+      void claimDeviceForUser(pubkey, { fresh: true })
       setUser({ pubkey, npub })
       setAuthMethod('npub_readonly')
       setIsConnected(true)
@@ -462,7 +489,10 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
     switch (authMethod) {
       case 'nip07':
         if (window.nostr?.signEvent) {
-          return await window.nostr.signEvent({ ...unsignedEvent, pubkey: user.pubkey })
+          const signed = await window.nostr.signEvent({ ...unsignedEvent, pubkey: user.pubkey })
+          // The extension may have switched accounts since connect.
+          if (signed.pubkey !== user.pubkey) throw new Error('NIP-07 signer pubkey mismatch')
+          return signed
         }
         throw new Error('NIP-07 signing not available')
 

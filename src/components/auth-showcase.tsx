@@ -1,6 +1,7 @@
 'use client'
 
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
+import { signOut } from '@/lib/sign-out'
 import { useState } from 'react'
 
 export function AuthShowcase() {
@@ -57,7 +58,7 @@ export function AuthShowcase() {
           </div>
         </div>
         <button
-          onClick={disconnect}
+          onClick={() => void signOut(disconnect)}
           className="rounded-full bg-red-600/20 px-6 py-2 text-sm font-semibold text-red-400 hover:bg-red-600/30 transition"
         >
           Disconnect
