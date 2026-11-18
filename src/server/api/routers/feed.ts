@@ -4,6 +4,7 @@ import { createTRPCRouter, protectedProcedure } from '@/server/api/trpc'
 import { fetchAndParseFeed } from '@/lib/rss-parser'
 import { getNostrFetcher } from '@/lib/nostr-fetcher'
 import { withRequestFetcher } from '@/lib/safe-relays'
+import { MAX_RELAY_URL_LENGTH, MAX_CLIENT_RELAYS } from '@/lib/relays'
 import { discoverFeed } from '@/lib/feed-discovery'
 import { FeedType, type Prisma } from '@prisma/client'
 import { nip19 } from 'nostr-tools'
@@ -1638,7 +1639,7 @@ export const feedRouter = createTRPCRouter({
     .input(z.object({
       query: z.string().min(1),
       limit: z.number().min(1).max(20).default(10),
-      relays: z.array(z.string().max(512)).max(20).optional(),
+      relays: z.array(z.string().max(MAX_RELAY_URL_LENGTH)).max(MAX_CLIENT_RELAYS).optional(),
     }))
     .mutation(async ({ input }) => {
       const profiles = await withRequestFetcher(input.relays, (fetcher) =>
@@ -1650,7 +1651,7 @@ export const feedRouter = createTRPCRouter({
   getPopularUsers: protectedProcedure
     .input(z.object({
       limit: z.number().min(1).max(50).default(20),
-      relays: z.array(z.string().max(512)).max(20).optional(),
+      relays: z.array(z.string().max(MAX_RELAY_URL_LENGTH)).max(MAX_CLIENT_RELAYS).optional(),
     }))
     .mutation(async ({ input }) => {
       const profiles = await withRequestFetcher(input.relays, (fetcher) => fetcher.getPopularUsers(input.limit))

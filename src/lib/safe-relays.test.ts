@@ -5,14 +5,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => {
   const shared = { close: vi.fn(), name: 'shared' }
   const created: { relays: string[]; options: unknown; close: ReturnType<typeof vi.fn> }[] = []
-  return { lookup: vi.fn(), shared, created }
+  return { lookup: vi.fn(), shared, created, closeThrows: false }
 })
 
 vi.mock('dns/promises', () => ({ lookup: mocks.lookup }))
 
+// trusted.test reaches the local test server through the relay dispatcher;
+// every other host goes through the real blocked-address lookup.
+vi.mock('./safe-fetch', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./safe-fetch')>()
+  const blockedAddressLookup: typeof actual.blockedAddressLookup = (hostname, options, callback) => {
+    if (hostname !== 'trusted.test') return actual.blockedAddressLookup(hostname, options, callback)
+    if ((options as { all?: boolean }).all) callback(null, [{ address: '127.0.0.1', family: 4 }])
+    else callback(null, '127.0.0.1', 4)
+  }
+  return { ...actual, blockedAddressLookup }
+})
+
 vi.mock('./nostr-fetcher', () => {
   class NostrFeedFetcher {
-    close = vi.fn()
+    close = vi.fn(() => {
+      if (mocks.closeThrows) throw new Error('close failed')
+    })
     constructor(public relays: string[], public options: unknown) {
       mocks.created.push(this)
     }
@@ -39,6 +53,7 @@ beforeEach(() => {
     return [{ address, family: 4 }]
   })
   mocks.created.length = 0
+  mocks.closeThrows = false
   mocks.shared.close.mockReset()
 })
 
@@ -81,6 +96,24 @@ describe('filterSafeRelays', () => {
     expect(new Set(result).size).toBe(result.length)
   })
 
+  it('collapses query, hash and trailing-dot variants of one relay', async () => {
+    const relays = ['wss://relay.example/', 'wss://relay.example./', 'wss://relay.example/#x']
+    for (let i = 0; i < 20; i++) relays.push(`wss://relay.example/?${i}`)
+    expect(await filterSafeRelays(relays)).toEqual(['wss://relay.example/'])
+    expect(mocks.lookup).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps relays on distinct ports or paths apart', async () => {
+    const result = await filterSafeRelays(['wss://relay.example', 'wss://relay.example:444', 'wss://relay.example/a'])
+    expect(result).toEqual(['wss://relay.example/', 'wss://relay.example:444/', 'wss://relay.example/a'])
+  })
+
+  it('caps candidates before resolving any of them', async () => {
+    const relays = Array.from({ length: 20 }, (_, i) => `wss://r${i}.example`)
+    expect(await filterSafeRelays(relays)).toHaveLength(MAX_REQUEST_RELAYS)
+    expect(mocks.lookup).toHaveBeenCalledTimes(MAX_REQUEST_RELAYS)
+  })
+
   it('treats a hung lookup as unsafe', async () => {
     vi.useFakeTimers()
     try {
@@ -115,7 +148,8 @@ describe('withRequestFetcher', () => {
     expect(result).toBe('ok')
     expect(mocks.created).toHaveLength(1)
     expect(mocks.created[0].relays).toEqual(['wss://relay.example/'])
-    expect(mocks.created[0].options).toEqual({ websocketImplementation: SafeRelayWebSocket })
+    const impl = (mocks.created[0].options as { websocketImplementation: typeof WebSocket }).websocketImplementation
+    expect(impl.prototype).toBeInstanceOf(SafeRelayWebSocket)
     expect(mocks.created[0].close).toHaveBeenCalledTimes(1)
     expect(mocks.shared.close).not.toHaveBeenCalled()
   })
@@ -129,6 +163,40 @@ describe('withRequestFetcher', () => {
     expect(mocks.created).toHaveLength(1)
     expect(mocks.created[0].close).toHaveBeenCalledTimes(1)
     expect(mocks.shared.close).not.toHaveBeenCalled()
+  })
+
+  it('does not let a failing close mask the original error', async () => {
+    mocks.closeThrows = true
+    await expect(
+      withRequestFetcher(['wss://relay.example'], async () => {
+        throw new Error('boom')
+      }),
+    ).rejects.toThrow('boom')
+    expect(await withRequestFetcher(['wss://relay.example'], async () => 'ok')).toBe('ok')
+  })
+
+  // A relay that never completes the handshake: nostr-tools would give up
+  // after its connect timeout without closing the socket.
+  it('closes sockets still mid-handshake when the call returns', async () => {
+    const serverSockets: Socket[] = []
+    const server = createServer((socket) => {
+      serverSockets.push(socket)
+      socket.resume()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address() as { port: number }
+    try {
+      await withRequestFetcher(['wss://relay.example'], async (fetcher) => {
+        const impl = (fetcher as unknown as { options: { websocketImplementation: typeof WebSocket } }).options
+          .websocketImplementation
+        new impl(`ws://trusted.test:${port}`)
+        await vi.waitFor(() => expect(serverSockets).toHaveLength(1))
+      })
+      await vi.waitFor(() => expect(serverSockets[0].readableEnded || serverSockets[0].destroyed).toBe(true))
+    } finally {
+      serverSockets.forEach((s) => s.destroy())
+      await new Promise((resolve) => server.close(resolve))
+    }
   })
 })
 
@@ -163,6 +231,11 @@ describe('SafeRelayWebSocket', () => {
   it('refuses to connect when the hostname resolves to a blocked address', async () => {
     const ws = new SafeRelayWebSocket(`ws://localhost:${port}`)
     await waitForClose(ws)
+    expect(connections).toBe(0)
+  })
+
+  it.each(['127.0.0.1', '[::1]'])('refuses the blocked IP literal %s without connecting', (host) => {
+    expect(() => new SafeRelayWebSocket(`ws://${host}:${port}`)).toThrow('disallowed address')
     expect(connections).toBe(0)
   })
 

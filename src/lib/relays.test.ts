@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { FALLBACK_RELAYS, parseRelayList, pickRelays, resolveDefaultRelays } from './relays'
+import {
+  clampRelaysForRequest,
+  FALLBACK_RELAYS,
+  MAX_RELAY_URL_LENGTH,
+  MAX_CLIENT_RELAYS,
+  parseRelayList,
+  pickRelays,
+  resolveDefaultRelays,
+} from './relays'
 
 describe('parseRelayList', () => {
   it('returns [] when unset or empty', () => {
@@ -128,5 +136,22 @@ describe('getDefaultRelays', () => {
     expect(getDefaultRelays()).toEqual(['wss://operator.example'])
     setRuntimeDefaultRelays([])
     expect(getDefaultRelays()).toEqual(FALLBACK_RELAYS)
+  })
+})
+
+describe('clampRelaysForRequest', () => {
+  it('drops over-long entries before applying the count cap', () => {
+    const long = 'wss://' + 'a'.repeat(MAX_RELAY_URL_LENGTH)
+    const exact = 'wss://' + 'b'.repeat(MAX_RELAY_URL_LENGTH - 6)
+    const valid = Array.from({ length: MAX_CLIENT_RELAYS + 5 }, (_, i) => `wss://r${i}.example`)
+    const result = clampRelaysForRequest([long, exact, ...valid])
+    expect(result).toHaveLength(MAX_CLIENT_RELAYS)
+    expect(result[0]).toBe(exact)
+    expect(result).not.toContain(long)
+    expect(result.slice(1)).toEqual(valid.slice(0, MAX_CLIENT_RELAYS - 1))
+  })
+
+  it('returns [] when every entry is too long', () => {
+    expect(clampRelaysForRequest(['wss://' + 'x'.repeat(MAX_RELAY_URL_LENGTH)])).toEqual([])
   })
 })

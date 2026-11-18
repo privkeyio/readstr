@@ -59,6 +59,14 @@ export function pickRelays(saved: string | null, defaults: string[]): string[] {
   return [...defaults]
 }
 
+// Limits the server's request schemas enforce on client-supplied relay lists.
+export const MAX_RELAY_URL_LENGTH = 512
+export const MAX_CLIENT_RELAYS = 20
+
+export function clampRelaysForRequest(relays: string[]): string[] {
+  return relays.filter((r) => r.length <= MAX_RELAY_URL_LENGTH).slice(0, MAX_CLIENT_RELAYS)
+}
+
 export function getUserOrDefaultRelays(): string[] {
   if (typeof window === 'undefined') return getDefaultRelays()
   let saved: string | null = null

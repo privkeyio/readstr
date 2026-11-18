@@ -1,6 +1,6 @@
 import { lookup } from 'dns/promises'
 import { lookup as lookupCb } from 'dns'
-import { isIP } from 'net'
+import { isIP, type LookupFunction } from 'net'
 import { Agent } from 'undici'
 
 const MAX_BODY_BYTES = 5 * 1024 * 1024 // 5 MB
@@ -83,6 +83,9 @@ function ipv6ToBlocked(ip: string): boolean {
   if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) {
     return true // fe80::/10 link-local
   }
+  if (lower.startsWith('fec') || lower.startsWith('fed') || lower.startsWith('fee') || lower.startsWith('fef')) {
+    return true // fec0::/10 deprecated site-local
+  }
   if (lower.startsWith('ff')) return true // multicast
 
   const groups = expandIpv6(lower)
@@ -106,6 +109,8 @@ function ipv6ToBlocked(ip: string): boolean {
   if (groups[0] === 0x2002) {
     return ipv4ToBlocked(groupsToIpv4(groups[1], groups[2]))
   }
+  // Teredo 2001::/32 tunnels to an obfuscated IPv4 server/client pair
+  if (groups[0] === 0x2001 && groups[1] === 0) return true
   // IPv4-compatible ::/96 (high 96 bits zero; :: and ::1 handled above)
   if (groupsAreZero(groups, 0, 6)) {
     return ipv4ToBlocked(groupsToIpv4(groups[6], groups[7]))
@@ -123,28 +128,26 @@ export function isBlockedAddress(ip: string): boolean {
 // Validate at the resolution undici actually connects to, closing the
 // TOCTOU/DNS-rebinding gap where a separate pre-flight lookup could differ
 // from the address the request ultimately connects to.
-export const safeDispatcher = new Agent({
-  connect: {
-    lookup(hostname, options, callback) {
-      lookupCb(hostname, { ...options, all: true }, (err, addresses) => {
-        if (err) {
-          callback(err, '', 0)
-          return
-        }
-        const list = addresses as unknown as { address: string; family: number }[]
-        if (list.length === 0 || list.some((a) => isBlockedAddress(a.address))) {
-          callback(new Error('URL resolves to a disallowed address'), '', 0)
-          return
-        }
-        if (options && (options as { all?: boolean }).all) {
-          callback(null, list as never)
-        } else {
-          callback(null, list[0].address, list[0].family)
-        }
-      })
-    },
-  },
-})
+export const blockedAddressLookup: LookupFunction = (hostname, options, callback) => {
+  lookupCb(hostname, { ...options, all: true }, (err, addresses) => {
+    if (err) {
+      callback(err, '', 0)
+      return
+    }
+    const list = addresses as unknown as { address: string; family: number }[]
+    if (list.length === 0 || list.some((a) => isBlockedAddress(a.address))) {
+      callback(new Error('URL resolves to a disallowed address'), '', 0)
+      return
+    }
+    if (options && (options as { all?: boolean }).all) {
+      callback(null, list as never)
+    } else {
+      callback(null, list[0].address, list[0].family)
+    }
+  })
+}
+
+export const safeDispatcher = new Agent({ connect: { lookup: blockedAddressLookup } })
 
 export async function assertSafeUrl(rawUrl: string): Promise<URL> {
   let parsed: URL
