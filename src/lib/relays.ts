@@ -9,7 +9,7 @@ export const FALLBACK_RELAYS: readonly string[] = [
   'wss://nostr-pub.wellorder.net',
 ]
 
-const CONTROL_OR_SPACE = /[\u0000-\u0020\u007f-\u009f\s]/
+export const CONTROL_OR_SPACE = /[\u0000-\u0020\u007f-\u009f\s]/
 
 export function parseRelayList(raw: string | undefined | null): string[] {
   if (!raw) return []
@@ -57,6 +57,14 @@ export function pickRelays(saved: string | null, defaults: string[]): string[] {
     // fall through to defaults
   }
   return [...defaults]
+}
+
+// Limits the server's request schemas enforce on client-supplied relay lists.
+export const MAX_RELAY_URL_LENGTH = 512
+export const MAX_CLIENT_RELAYS = 20
+
+export function clampRelaysForRequest(relays: string[]): string[] {
+  return relays.filter((r) => r.length <= MAX_RELAY_URL_LENGTH).slice(0, MAX_CLIENT_RELAYS)
 }
 
 export function getUserOrDefaultRelays(): string[] {

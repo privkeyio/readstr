@@ -1,4 +1,5 @@
-import { SimplePool, Event, Filter, nip19 } from 'nostr-tools'
+import { SimplePool, Event, Filter, nip19, verifyEvent } from 'nostr-tools'
+import { AbstractSimplePool, type AbstractPoolConstructorOptions } from 'nostr-tools/abstract-pool'
 import { safeFetch } from './safe-fetch'
 import { getUserOrDefaultRelays } from './relays'
 
@@ -26,19 +27,52 @@ export interface NostrVideoEvent {
   kind: 21 | 22 // 21 = normal video, 22 = short-form portrait
 }
 
+// Hard ceiling on events kept per profile query, whatever the relays send.
+const MAX_PROFILE_EVENTS = 500
+
 // Helper to get relays from localStorage or use defaults
 function getRelaysFromStorage(): string[] {
   return getUserOrDefaultRelays()
 }
 
 export class NostrFeedFetcher {
-  private pool: SimplePool
+  private pool: AbstractSimplePool
   private relays: string[]
 
-  constructor(relays?: string[]) {
-    this.pool = new SimplePool()
+  // websocketImplementation scopes a custom socket to this instance without
+  // touching nostr-tools' global implementation used by the shared fetcher.
+  constructor(relays?: string[], options?: Pick<AbstractPoolConstructorOptions, 'websocketImplementation'>) {
+    this.pool = options?.websocketImplementation
+      ? new AbstractSimplePool({ verifyEvent, websocketImplementation: options.websocketImplementation })
+      : new SimplePool()
     this.relays = relays || getRelaysFromStorage()
     console.log('NostrFeedFetcher initialized with relays:', this.relays)
+  }
+
+  // Like querySync, but stops collecting once maxEvents have arrived, so a
+  // relay that ignores the filter limit cannot flood the request until EOSE.
+  private queryBounded(filter: Filter, maxEvents: number): Promise<Event[]> {
+    return new Promise((resolve) => {
+      const events: Event[] = []
+      let done = false
+      const finish = () => {
+        if (done) return
+        done = true
+        resolve(events)
+      }
+      const sub = this.pool.subscribeEose(this.relays, filter, {
+        onevent(event) {
+          if (done) return
+          events.push(event)
+          if (events.length >= maxEvents) {
+            finish()
+            // close() is async at runtime despite its void typing.
+            Promise.resolve().then(() => sub.close('enough events')).catch(() => {})
+          }
+        },
+        onclose: finish,
+      })
+    })
   }
 
   // Convert npub to hex pubkey
@@ -332,7 +366,10 @@ export class NostrFeedFetcher {
         limit: limit * 3, // Get more to filter through
       }
 
-      const events = await this.pool.querySync(this.relays, filter)
+      // Bounds memory against relays that ignore `limit`. Honest relays return
+      // at most limit * 3 each, so they're only cut off when many relays
+      // answer a large limit (past MAX_PROFILE_EVENTS), keeping the fastest.
+      const events = await this.queryBounded(filter, Math.min(limit * 3 * this.relays.length, MAX_PROFILE_EVENTS))
       const profiles = []
 
       for (const event of events) {
@@ -426,10 +463,10 @@ export class NostrFeedFetcher {
         limit: limit * 5, // Get more to filter through
       }
 
-      const events = await this.pool.querySync(this.relays, filter)
+      const events = await this.queryBounded(filter, 100)
       const profiles = []
 
-      for (const event of events.slice(0, 100)) { // Process first 100
+      for (const event of events) { // Only the first 100 are collected
         try {
           const profileData = JSON.parse(event.content)
           

@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { api } from '@/trpc/react'
-import { pickRelays } from '@/lib/relays'
+import { clampRelaysForRequest, pickRelays } from '@/lib/relays'
 import type { OrganizationMode } from './settings-dialog'
 
 interface NostrProfile {
@@ -51,8 +51,7 @@ export function AddFeedModal({ isOpen, onClose, onAddFeed, isLoading = false, er
   // Helper to get relays from localStorage
   const getRelays = (): string[] | undefined => {
     if (typeof window === 'undefined') return undefined
-    // The server accepts at most 50 relays, and a user's saved list is unbounded.
-    const relays = pickRelays(localStorage.getItem('nostr_relays'), []).slice(0, 50)
+    const relays = clampRelaysForRequest(pickRelays(localStorage.getItem('nostr_relays'), []))
     return relays.length > 0 ? relays : undefined
   }
 

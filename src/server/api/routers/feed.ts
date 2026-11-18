@@ -2,7 +2,10 @@ import { z } from 'zod'
 import { TRPCError } from '@trpc/server'
 import { createTRPCRouter, protectedProcedure } from '@/server/api/trpc'
 import { fetchAndParseFeed } from '@/lib/rss-parser'
-import { getNostrFetcher, NostrFeedFetcher } from '@/lib/nostr-fetcher'
+import { getNostrFetcher } from '@/lib/nostr-fetcher'
+import { withRequestFetcher } from '@/lib/safe-relays'
+import { rateLimit } from '@/server/rate-limit'
+import { MAX_RELAY_URL_LENGTH, MAX_CLIENT_RELAYS } from '@/lib/relays'
 import { discoverFeed } from '@/lib/feed-discovery'
 import { FeedType, type Prisma } from '@prisma/client'
 import { nip19 } from 'nostr-tools'
@@ -12,6 +15,18 @@ import {
   normalizeUrlForComparison,
   normalizeNpub
 } from '@/lib/nostr-sync'
+
+// Profile discovery opens up to MAX_REQUEST_RELAYS sockets and lookups per
+// call, so it gets its own per-user budget.
+function limitProfileDiscovery(name: string, pubkey: string) {
+  const limit = rateLimit(name, pubkey, 30, 60 * 1000)
+  if (!limit.allowed) {
+    throw new TRPCError({
+      code: 'TOO_MANY_REQUESTS',
+      message: `Too many requests. Try again in ${limit.retryAfterSeconds}s.`,
+    })
+  }
+}
 
 // Type for subscription with feed include
 type SubscriptionWithFeed = Prisma.SubscriptionGetPayload<{ include: { feed: true } }>
@@ -1635,13 +1650,14 @@ export const feedRouter = createTRPCRouter({
   // Search for Nostr profiles
   searchProfiles: protectedProcedure
     .input(z.object({
-      query: z.string().min(1),
+      query: z.string().min(1).max(200),
       limit: z.number().min(1).max(20).default(10),
-      relays: z.array(z.string()).max(50).optional(),
+      relays: z.array(z.string().max(MAX_RELAY_URL_LENGTH)).max(MAX_CLIENT_RELAYS).optional(),
     }))
-    .mutation(async ({ input }) => {
-      const nostrFetcher = input.relays ? new NostrFeedFetcher(input.relays) : getNostrFetcher()
-      const profiles = await nostrFetcher.searchProfiles(input.query, input.limit)
+    .mutation(async ({ ctx, input }) => {
+      limitProfileDiscovery('feed.searchProfiles', ctx.nostrPubkey)
+      const profiles = await withRequestFetcher(input.relays, (fetcher) =>
+        fetcher.searchProfiles(input.query, input.limit))
       return { profiles }
     }),
 
@@ -1649,11 +1665,11 @@ export const feedRouter = createTRPCRouter({
   getPopularUsers: protectedProcedure
     .input(z.object({
       limit: z.number().min(1).max(50).default(20),
-      relays: z.array(z.string()).max(50).optional(),
+      relays: z.array(z.string().max(MAX_RELAY_URL_LENGTH)).max(MAX_CLIENT_RELAYS).optional(),
     }))
-    .mutation(async ({ input }) => {
-      const nostrFetcher = input.relays ? new NostrFeedFetcher(input.relays) : getNostrFetcher()
-      const profiles = await nostrFetcher.getPopularUsers(input.limit)
+    .mutation(async ({ ctx, input }) => {
+      limitProfileDiscovery('feed.getPopularUsers', ctx.nostrPubkey)
+      const profiles = await withRequestFetcher(input.relays, (fetcher) => fetcher.getPopularUsers(input.limit))
       return { profiles }
     }),
 
