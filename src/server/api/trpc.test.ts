@@ -93,6 +93,86 @@ describe('sanitizeValue', () => {
     const ids = Array.from({ length: 1000 }, (_, i) => `id${i}`)
     expect(sanitizeValue({ itemIds: ids })).toEqual({ itemIds: ids })
   })
+
+  it('passes superjson leaf objects through unchanged', () => {
+    const input = {
+      at: new Date(0),
+      re: /a+/gi,
+      url: new URL('https://example.com/x'),
+      err: new Error('boom'),
+      bytes: new Uint8Array([1, 2, 3]),
+      big: BigInt(10),
+      none: undefined,
+    }
+    const out = sanitizeValue(input) as typeof input
+    for (const key of ['at', 're', 'url', 'err', 'bytes'] as const) expect(out[key]).toBe(input[key])
+    expect(out.big).toBe(BigInt(10))
+    expect('none' in out).toBe(true)
+  })
+
+  it('keeps Maps and Sets, sanitizing their contents', () => {
+    const out = sanitizeValue({
+      m: new Map<unknown, unknown>([
+        ['k', { tags: ['a', '', 'b'] }],
+        [{ id: ['x', null] }, new Date(1)],
+      ]),
+      s: new Set([{ tags: ['undefined', 'c'] }, 1]),
+    }) as { m: Map<unknown, unknown>; s: Set<unknown> }
+    expect(out.m).toBeInstanceOf(Map)
+    expect([...out.m]).toEqual([
+      ['k', { tags: ['a', 'b'] }],
+      [{ id: ['x'] }, new Date(1)],
+    ])
+    expect(out.s).toBeInstanceOf(Set)
+    expect([...out.s]).toEqual([{ tags: ['c'] }, 1])
+  })
+
+  it('applies the depth and node limits inside Maps and Sets', () => {
+    let deep: unknown = 0
+    for (let i = 0; i < 40; i++) deep = new Map([['a', deep]])
+    expect(thrownBy(() => sanitizeValue(deep))).toMatchObject({ code: 'BAD_REQUEST' })
+    const wide = new Set(Array.from({ length: 20_000 }, (_, i) => i))
+    expect(thrownBy(() => sanitizeValue({ wide }))).toMatchObject({ code: 'BAD_REQUEST' })
+    const wideKeys = new Map(Array.from({ length: 6_000 }, (_, i) => [`k${i}`, i]))
+    expect(thrownBy(() => sanitizeValue(wideKeys))).toMatchObject({ code: 'BAD_REQUEST' })
+  })
+})
+
+describe('superjson types through tRPC', () => {
+  const router = createTRPCRouter({
+    echo: publicProcedure
+      .input(z.object({ at: z.date(), m: z.map(z.string(), z.number()), s: z.set(z.string()), n: z.bigint() }))
+      .mutation(({ input }) => ({
+        at: input.at.toISOString(),
+        m: Object.fromEntries(input.m),
+        s: [...input.s],
+        n: input.n.toString(),
+      })),
+  })
+
+  it('reach procedures as Date, Map, Set and BigInt', async () => {
+    const body = JSON.stringify(
+      superjson.serialize({ at: new Date(0), m: new Map([['a', 1]]), s: new Set(['x', 'y']), n: BigInt(5) })
+    )
+    const res = await fetchRequestHandler({
+      endpoint: '/api/trpc',
+      router,
+      req: new Request('http://localhost/api/trpc/echo', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      }),
+      createContext: () => ({}) as never,
+    })
+    expect(res.status).toBe(200)
+    const { result } = (await res.json()) as { result: { data: unknown } }
+    expect(superjson.deserialize(result.data as never)).toEqual({
+      at: '1970-01-01T00:00:00.000Z',
+      m: { a: 1 },
+      s: ['x', 'y'],
+      n: '5',
+    })
+  })
 })
 
 function nestedArrays(depth: number): unknown {

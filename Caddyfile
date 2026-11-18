@@ -1,5 +1,14 @@
 {
     email kyle@privkey.io
+
+    # Cut off clients that trickle headers or bodies instead of letting them
+    # hold a connection open; the app's own limits are 15 s and 30 s.
+    servers {
+        timeouts {
+            read_header 10s
+            read_body 30s
+        }
+    }
 }
 
 readstr.privkey.io {

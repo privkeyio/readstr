@@ -13,4 +13,6 @@ until npx prisma migrate deploy; do
   sleep 2
 done
 
-exec node server.js
+# The preload caps how long a client may take to send a request; Next's
+# standalone server.js has no option for it. See server-timeouts.cjs.
+exec node --require ./server-timeouts.cjs server.js

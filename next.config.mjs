@@ -55,6 +55,12 @@ const securityHeaders = [
 const nextConfig = {
   serverExternalPackages: ['@prisma/client'],
   output: 'standalone',
+  // Ship the request-timeout preload inside .next/standalone, so any image
+  // built from it (this Dockerfile, the StartOS package's) has the file that
+  // docker-entrypoint.sh preloads.
+  outputFileTracingIncludes: {
+    '/api/trpc/**': ['./server-timeouts.cjs'],
+  },
   images: {
     remotePatterns: [
       {

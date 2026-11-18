@@ -149,6 +149,11 @@ const t = initTRPC.context<TRPCContext>().create({
   errorFormatter: formatError,
 })
 
+function isPlainObject(value: object): boolean {
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
 /**
  * Remove 'undefined' strings, null values, and empty strings from arrays to
  * prevent deserialization quirks. The walk is bounded in depth and node count
@@ -167,6 +172,19 @@ export function sanitizeValue(input: unknown): unknown {
       return value
         .filter(item => item !== null && item !== undefined && item !== '' && item !== 'undefined')
         .map(item => walk(item, depth + 1))
+    }
+
+    // superjson also yields Maps and Sets, rebuilt here with sanitized
+    // contents, and leaf objects (Date, RegExp, URL, Error, typed arrays) that
+    // have no own entries to walk and must reach zod unchanged.
+    if (value instanceof Map) {
+      return new Map(Array.from(value, ([key, val]) => [walk(key, depth + 1), walk(val, depth + 1)]))
+    }
+    if (value instanceof Set) {
+      return new Set(Array.from(value, item => walk(item, depth + 1)))
+    }
+    if (value && typeof value === 'object' && !isPlainObject(value)) {
+      return value
     }
 
     // Handle objects - recursively sanitize
