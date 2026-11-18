@@ -56,7 +56,7 @@ jobs:
           NODE_ENV: production
           PORT: 3000
           HOSTNAME: 127.0.0.1
-          REQUEST_TIMEOUT_MS: 3000
+          REQUEST_TIMEOUT_MS: 5000
           HEADERS_TIMEOUT_MS: 2000
         run: |
           nohup node --require ./server-timeouts.cjs server.js > "$RUNNER_TEMP/server.log" 2>&1 &
@@ -71,7 +71,8 @@ jobs:
       - name: Check request limits
         env:
           BASE_URL: http://127.0.0.1:3000
-          EXPECT_REQUEST_TIMEOUT_MS: 3000
+          EXPECT_HEADERS_TIMEOUT_MS: 2000
+          EXPECT_REQUEST_TIMEOUT_MS: 5000
         run: node scripts/ci/body-cap-check.mjs
 
       - name: Server log

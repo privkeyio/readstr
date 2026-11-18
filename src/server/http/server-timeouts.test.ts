@@ -20,14 +20,28 @@ describe('server-timeouts preload', () => {
     })
   })
 
-  it('falls back to the default for anything but a positive integer', () => {
+  it('falls back to the default for anything but an integer from 1 s to 1 h', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    for (const raw of ['0', '-5', '1.5', '1e4', 'abc', '0x10', '99999999999999999999']) {
-      expect(parseTimeoutMs(raw, 123, 'X')).toBe(123)
-    }
+    const rejected = [
+      '0',
+      '1',
+      '999',
+      '-5',
+      '1.5',
+      '1e4',
+      'abc',
+      '0x10',
+      '3600001',
+      '4294967296',
+      '4294970296',
+      '99999999999999999999',
+    ]
+    for (const raw of rejected) expect(parseTimeoutMs(raw, 123, 'X')).toBe(123)
     expect(parseTimeoutMs('', 123, 'X')).toBe(123)
     expect(parseTimeoutMs(undefined, 123, 'X')).toBe(123)
-    expect(warn).toHaveBeenCalledTimes(7)
+    expect(warn).toHaveBeenCalledTimes(rejected.length)
+    expect(parseTimeoutMs('1000', 123, 'X')).toBe(1000)
+    expect(parseTimeoutMs('3600000', 123, 'X')).toBe(3_600_000)
     warn.mockRestore()
   })
 

@@ -99,13 +99,12 @@ describe('sanitizeValue', () => {
       at: new Date(0),
       re: /a+/gi,
       url: new URL('https://example.com/x'),
-      err: new Error('boom'),
       bytes: new Uint8Array([1, 2, 3]),
       big: BigInt(10),
       none: undefined,
     }
     const out = sanitizeValue(input) as typeof input
-    for (const key of ['at', 're', 'url', 'err', 'bytes'] as const) expect(out[key]).toBe(input[key])
+    for (const key of ['at', 're', 'url', 'bytes'] as const) expect(out[key]).toBe(input[key])
     expect(out.big).toBe(BigInt(10))
     expect('none' in out).toBe(true)
   })
@@ -125,6 +124,23 @@ describe('sanitizeValue', () => {
     ])
     expect(out.s).toBeInstanceOf(Set)
     expect([...out.s]).toEqual([{ tags: ['c'] }, 1])
+  })
+
+  it('rejects Errors, whose name/stack/cause would skip the walk', () => {
+    const err = Object.assign(new Error('boom'), {
+      cause: new Map([['k', new Set(Array.from({ length: 20_000 }, (_, i) => i))]]),
+    })
+    expect(thrownBy(() => sanitizeValue({ err }))).toMatchObject({ code: 'BAD_REQUEST' })
+    expect(thrownBy(() => sanitizeValue(new RangeError('x')))).toMatchObject({ code: 'BAD_REQUEST' })
+    const deserialized = transformer.input.deserialize(superjson.serialize({ err: new Error('boom') }))
+    expect(thrownBy(() => sanitizeValue(deserialized))).toMatchObject({ code: 'BAD_REQUEST' })
+  })
+
+  it('refuses Map/Set look-alikes and other unknown non-plain objects', () => {
+    expect(thrownBy(() => sanitizeValue({ m: Object.create(new Map()) }))).toMatchObject({ code: 'BAD_REQUEST' })
+    expect(thrownBy(() => sanitizeValue({ s: Object.create(Set.prototype) }))).toMatchObject({ code: 'BAD_REQUEST' })
+    class Thing { secret = 'x' }
+    expect(thrownBy(() => sanitizeValue({ t: new Thing() }))).toMatchObject({ code: 'BAD_REQUEST' })
   })
 
   it('applies the depth and node limits inside Maps and Sets', () => {

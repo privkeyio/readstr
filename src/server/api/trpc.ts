@@ -1,3 +1,4 @@
+import { types } from 'node:util'
 import { initTRPC, TRPCError, type DefaultErrorShape } from '@trpc/server'
 import superjson from 'superjson'
 import { ZodError } from 'zod'
@@ -175,16 +176,23 @@ export function sanitizeValue(input: unknown): unknown {
     }
 
     // superjson also yields Maps and Sets, rebuilt here with sanitized
-    // contents, and leaf objects (Date, RegExp, URL, Error, typed arrays) that
-    // have no own entries to walk and must reach zod unchanged.
-    if (value instanceof Map) {
+    // contents, and leaf objects (Date, RegExp, URL, typed arrays) that have no
+    // own entries to walk and must reach zod unchanged. Brand checks, not
+    // instanceof, so look-alikes can't pose as either. Any other non-plain
+    // object is refused: that covers Errors, whose name/stack/cause can carry
+    // arbitrary data, and anything a future superjson registration would let
+    // through without being walked.
+    if (types.isMap(value)) {
       return new Map(Array.from(value, ([key, val]) => [walk(key, depth + 1), walk(val, depth + 1)]))
     }
-    if (value instanceof Set) {
+    if (types.isSet(value)) {
       return new Set(Array.from(value, item => walk(item, depth + 1)))
     }
     if (value && typeof value === 'object' && !isPlainObject(value)) {
-      return value
+      if (types.isDate(value) || types.isRegExp(value) || value instanceof URL || ArrayBuffer.isView(value)) {
+        return value
+      }
+      throw badInput()
     }
 
     // Handle objects - recursively sanitize

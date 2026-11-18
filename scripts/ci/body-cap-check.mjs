@@ -2,8 +2,10 @@
 // Checks a running production build (standalone server.js with the
 // server-timeouts.cjs preload) enforces the tRPC request limits:
 //   a) an oversize chunked POST is answered 413 while the client is still uploading;
-//   b) a superjson referentialEqualities bomb is refused quickly;
-//   c) with EXPECT_REQUEST_TIMEOUT_MS set, stalled headers and bodies are cut off.
+//   b) a superjson referentialEqualities bomb is deserialized with its references
+//      stripped, so it reaches the auth check (401) quickly;
+//   c) with EXPECT_HEADERS_TIMEOUT_MS / EXPECT_REQUEST_TIMEOUT_MS set, stalled
+//      headers / bodies are answered 408 and closed within the timeout.
 // Usage: BASE_URL=http://127.0.0.1:3000 node scripts/ci/body-cap-check.mjs
 // None of these paths reach the database.
 
@@ -17,6 +19,7 @@ const BODY_CAP_BYTES = 64_000
 const PROCEDURE_PATH = '/api/trpc/feed.markAsRead'
 
 const failures = []
+const skipped = []
 function check(name, ok, detail) {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${name}: ${detail}`)
   if (!ok) failures.push(name)
@@ -54,6 +57,7 @@ async function controlRequest() {
 function oversizeChunkedPost() {
   const CHUNK = Buffer.alloc(8 * 1024, 'a')
   const TOTAL_CHUNKS = 128 // 1 MiB, ~16x the cap
+  const TOTAL_BYTES = TOTAL_CHUNKS * CHUNK.length
   const INTERVAL_MS = 25 // ~3.2 s to send everything
   return new Promise(resolve => {
     let written = 0
@@ -78,7 +82,7 @@ function oversizeChunkedPost() {
     req.on('error', err => settle({ error: err.message, written, finished }))
     req.flushHeaders()
     timer = setInterval(() => {
-      if (written >= TOTAL_CHUNKS * CHUNK.length) {
+      if (written >= TOTAL_BYTES) {
         clearInterval(timer)
         finished = true
         req.end()
@@ -89,13 +93,13 @@ function oversizeChunkedPost() {
     }, INTERVAL_MS)
     setTimeout(() => settle({ error: 'no response within 15 s', written, finished }), 15_000).unref()
   }).then(result => {
-    const ok = result.status === 413 && !result.finished && result.written < TOTAL_CHUNKS * CHUNK.length
+    const ok = result.status === 413 && !result.finished && result.written < TOTAL_BYTES
     check(
       'oversize chunked POST gets 413 before the upload completes',
       ok,
       result.error
         ? `${result.error} after ${result.written} bytes`
-        : `status ${result.status} after ${result.written} of ${TOTAL_CHUNKS * CHUNK.length} bytes (cap ${BODY_CAP_BYTES}), upload ${result.finished ? 'finished' : 'still running'}`
+        : `status ${result.status} after ${result.written} of ${TOTAL_BYTES} bytes (cap ${BODY_CAP_BYTES}), upload ${result.finished ? 'finished' : 'still running'}`
     )
   })
 }
@@ -116,15 +120,18 @@ function referentialBomb(depth) {
 async function referentialBombPost() {
   const body = referentialBomb(30)
   const res = await post(body)
+  // 401 proves the payload deserialized and passed the sanitizer intact, i.e.
+  // the references were stripped. A 400 means they were honoured and the
+  // expanded tree hit the sanitizer's node cap.
   check(
-    'superjson referentialEqualities bomb is refused fast',
-    res.status >= 400 && res.status < 500 && res.ms < 2_000,
-    `status ${res.status} in ${res.ms.toFixed(0)} ms for a ${body.length}-byte body`
+    'superjson referentialEqualities bomb reaches auth with references stripped',
+    res.status === 401 && res.ms < 2_000,
+    `status ${res.status} (want 401; 400 means the references were honoured) in ${res.ms.toFixed(0)} ms for a ${body.length}-byte body`
   )
 }
 
 // c) Open a raw connection, send part of a request, then stall; the server
-// must close it (Node answers 408) within the configured timeout plus slack.
+// must answer 408 and close it within the configured timeout plus slack.
 function stalledRequest(name, partial, limitMs) {
   return new Promise(resolve => {
     const started = performance.now()
@@ -138,7 +145,11 @@ function stalledRequest(name, partial, limitMs) {
       socket.destroy()
       const ms = performance.now() - started
       const status = received.match(/^HTTP\/1\.1 (\d{3})/)?.[1] ?? 'none'
-      check(name, outcome === 'closed' && ms <= limitMs, `${outcome} after ${ms.toFixed(0)} ms (limit ${limitMs} ms), status ${status}`)
+      check(
+        name,
+        outcome === 'closed' && status === '408' && ms <= limitMs,
+        `${outcome} after ${ms.toFixed(0)} ms (limit ${limitMs} ms), status ${status} (want 408)`
+      )
       resolve()
     }
     const deadline = setTimeout(() => done('still open'), limitMs + 5_000)
@@ -150,38 +161,64 @@ function stalledRequest(name, partial, limitMs) {
   })
 }
 
-async function stalledRequests(requestTimeoutMs) {
-  const host = `Host: ${BASE_URL.host}\r\n`
-  const slackMs = 3_000
-  await stalledRequest(
-    'stalled headers are cut off',
-    `POST ${PROCEDURE_PATH} HTTP/1.1\r\n${host}content-type: application/json\r\n`,
-    requestTimeoutMs + slackMs
-  )
-  await stalledRequest(
-    'stalled body is cut off',
-    `POST ${PROCEDURE_PATH} HTTP/1.1\r\n${host}content-type: application/json\r\ncontent-length: 1000\r\n\r\n{"json":`,
-    requestTimeoutMs + slackMs
+const HOST_HEADER = `Host: ${BASE_URL.host}\r\n`
+
+// Node checks for expired requests every second, so a timeout fires up to ~1 s
+// late. Run with REQUEST_TIMEOUT_MS above HEADERS_TIMEOUT_MS + 2.5 s, so a
+// headers timeout silently falling back to the request timeout fails this check.
+function stalledHeaders(headersTimeoutMs) {
+  return stalledRequest(
+    'stalled headers are cut off at HEADERS_TIMEOUT_MS',
+    `POST ${PROCEDURE_PATH} HTTP/1.1\r\n${HOST_HEADER}content-type: application/json\r\n`,
+    headersTimeoutMs + 2_500
   )
 }
 
+function stalledBody(requestTimeoutMs) {
+  return stalledRequest(
+    'stalled body is cut off at REQUEST_TIMEOUT_MS',
+    `POST ${PROCEDURE_PATH} HTTP/1.1\r\n${HOST_HEADER}content-type: application/json\r\ncontent-length: 1000\r\n\r\n{"json":`,
+    requestTimeoutMs + 3_000
+  )
+}
+
+function expectedMs(name) {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return undefined
+  if (!/^\d+$/.test(raw) || Number(raw) <= 0) throw new Error(`${name} must be a positive integer, got ${raw}`)
+  return Number(raw)
+}
+
+async function runOrSkip(envName, ms, run) {
+  if (ms === undefined) {
+    console.log(`SKIP ${envName} is not set`)
+    skipped.push(envName)
+    return
+  }
+  await run(ms)
+}
+
 async function main() {
+  const expectHeadersMs = expectedMs('EXPECT_HEADERS_TIMEOUT_MS')
+  const expectRequestMs = expectedMs('EXPECT_REQUEST_TIMEOUT_MS')
+  if (expectHeadersMs !== undefined && expectRequestMs !== undefined && expectHeadersMs + 2_500 >= expectRequestMs) {
+    throw new Error('EXPECT_REQUEST_TIMEOUT_MS must exceed EXPECT_HEADERS_TIMEOUT_MS + 2500, or the headers check cannot tell the two apart')
+  }
   console.log(`Checking ${BASE_URL.origin}`)
   await controlRequest()
   await oversizeChunkedPost()
   await referentialBombPost()
-  const expected = process.env.EXPECT_REQUEST_TIMEOUT_MS
-  if (expected) {
-    if (!/^\d+$/.test(expected)) throw new Error(`EXPECT_REQUEST_TIMEOUT_MS must be a positive integer, got ${expected}`)
-    await stalledRequests(Number(expected))
-  } else {
-    console.log('SKIP stalled-request checks: EXPECT_REQUEST_TIMEOUT_MS is not set')
-  }
+  await runOrSkip('EXPECT_HEADERS_TIMEOUT_MS', expectHeadersMs, stalledHeaders)
+  await runOrSkip('EXPECT_REQUEST_TIMEOUT_MS', expectRequestMs, stalledBody)
   if (failures.length) {
     console.error(`\n${failures.length} check(s) failed: ${failures.join('; ')}`)
     process.exit(1)
   }
-  console.log('\nAll request-limit checks passed')
+  if (skipped.length) {
+    console.log(`\nChecks that ran passed; stalled-request checks SKIPPED (unset: ${skipped.join(', ')})`)
+  } else {
+    console.log('\nAll request-limit checks passed')
+  }
 }
 
 main().catch(err => {
