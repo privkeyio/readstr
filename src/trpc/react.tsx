@@ -7,6 +7,7 @@ import { useState, useEffect, useRef } from 'react'
 import superjson from 'superjson'
 import { nip98 } from 'nostr-tools'
 import { type AppRouter } from '@/server/api/root'
+import { shouldClearOnAccountChange } from '@/lib/sign-out'
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
 import { type UnsignedEvent, type Event as NostrEvent } from 'nostr-tools'
 import { createTrpcHttpLinks } from '@/trpc/links'
@@ -56,10 +57,9 @@ export function TRPCReactProvider(props: {
   const pubkey = user?.pubkey ?? null
   const lastPubkey = useRef(pubkey)
   useEffect(() => {
-    if (lastPubkey.current !== pubkey) {
-      lastPubkey.current = pubkey
-      queryClient.clear()
-    }
+    const prev = lastPubkey.current
+    lastPubkey.current = pubkey
+    if (shouldClearOnAccountChange(prev, pubkey)) queryClient.clear()
   }, [pubkey, queryClient])
 
   // Keep the module-scoped signer in sync with the current user/auth method.

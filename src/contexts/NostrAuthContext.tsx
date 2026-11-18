@@ -6,6 +6,7 @@ import { BunkerSigner, parseBunkerInput, type BunkerPointer } from 'nostr-tools/
 import { SimplePool } from 'nostr-tools/pool'
 import { generateSecretKey } from 'nostr-tools/pure'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
+import { claimDeviceForUser } from '@/lib/sign-out'
 
 const debugLog = (...args: unknown[]) => {
   if (process.env.NODE_ENV === 'development') console.log(...args)
@@ -215,6 +216,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
             try {
               const pubkey = await window.nostr.getPublicKey()
               const npub = nip19.npubEncode(pubkey)
+              void claimDeviceForUser(pubkey)
               setUser({ pubkey, npub })
               setAuthMethod('nip07')
               setIsConnected(true)
@@ -236,6 +238,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
             if (pubkey !== stored.pubkey) {
               throw new Error('Remote signer pubkey mismatch')
             }
+            void claimDeviceForUser(pubkey)
             setUser({ pubkey, npub: nip19.npubEncode(pubkey) })
             setAuthMethod('nip46')
             setIsConnected(true)
@@ -260,6 +263,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
           }
         } else if (sessionData.method === 'npub_readonly' && sessionData.pubkey) {
           // Restore read-only npub session
+          void claimDeviceForUser(sessionData.pubkey)
           setUser({
             pubkey: sessionData.pubkey,
             npub: sessionData.npub
@@ -334,6 +338,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
       }
       localStorage.setItem('nostr_session', JSON.stringify(sessionData))
       
+      void claimDeviceForUser(pubkey)
       setUser({ pubkey, npub })
       setAuthMethod('nip07')
       setIsConnected(true)
@@ -378,6 +383,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
         session.npub = npub
         localStorage.setItem('nostr_session', JSON.stringify(session))
 
+        void claimDeviceForUser(pubkey)
         setUser({ pubkey, npub })
         setAuthMethod('nip46')
         setIsConnected(true)
@@ -418,6 +424,7 @@ export function NostrAuthProvider({ children }: NostrAuthProviderProps) {
       }
       localStorage.setItem('nostr_session', JSON.stringify(sessionData))
 
+      void claimDeviceForUser(pubkey)
       setUser({ pubkey, npub })
       setAuthMethod('npub_readonly')
       setIsConnected(true)

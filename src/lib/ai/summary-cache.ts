@@ -84,5 +84,6 @@ export async function clearSummaryCache(): Promise<void> {
       resolve()
     }
     tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error)
   })
 }

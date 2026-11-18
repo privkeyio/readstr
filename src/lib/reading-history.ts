@@ -135,6 +135,7 @@ export async function clearHistory(): Promise<void> {
       resolve()
     }
     tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error)
   })
 }
 

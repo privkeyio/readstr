@@ -25,7 +25,7 @@ import {
   type ViewSource,
 } from '@/lib/saved-views'
 import { recordRead, searchHistory, type HistoryRecord } from '@/lib/reading-history'
-import { clearUserClientState } from '@/lib/sign-out'
+import { signOut } from '@/lib/sign-out'
 import { SimplePool } from 'nostr-tools'
 import { 
   fetchSubscriptionList,
@@ -214,26 +214,7 @@ export function FeedReader() {
     }
   }
 
-  // Sign out handler
-  const handleSignOut = async () => {
-    try {
-      await clearUserClientState()
-    } finally {
-      disconnect()
-      // A full load, not router.push: it also drops in-memory per-user state
-      // (React Query cache, AI settings, profile cache) along with the page.
-      window.location.replace('/')
-    }
-  }
-
-  // Debug: Log session info
-  useEffect(() => {
-    console.log('FeedReader - User:', user)
-    if (typeof window !== 'undefined') {
-      const session = localStorage.getItem('nostr_session')
-      console.log('FeedReader - Session in localStorage:', session)
-    }
-  }, [user])
+  const handleSignOut = () => signOut(disconnect)
 
   // Close menu when clicking outside
   useEffect(() => {

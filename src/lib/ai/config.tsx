@@ -1,6 +1,7 @@
 'use client'
 
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
+import { USER_STATE_CLEARED_EVENT } from '../user-state-events'
 
 export interface AiFeatureToggles {
   summarize: boolean
@@ -123,6 +124,11 @@ export function AiConfigProvider({ children }: { children: React.ReactNode }) {
     // localStorage is unavailable during SSR, so read it in an effect.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setConfigState(loadAiConfig())
+    // Another account's data was wiped on sign-in: drop the copy held here too,
+    // or its API key would keep being used and be saved back by setConfig.
+    const reload = () => setConfigState(loadAiConfig())
+    window.addEventListener(USER_STATE_CLEARED_EVENT, reload)
+    return () => window.removeEventListener(USER_STATE_CLEARED_EVENT, reload)
   }, [])
 
   const setConfig = useCallback((partial: Partial<AiConfig>) => {

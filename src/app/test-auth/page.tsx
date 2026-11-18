@@ -1,6 +1,7 @@
 'use client'
 
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
+import { signOut } from '@/lib/sign-out'
 import { useEffect } from 'react'
 import { notFound } from 'next/navigation'
 import { BrandHeader } from '@/components/brand-header'
@@ -85,7 +86,7 @@ export default function TestAuthPage() {
                 </>
               ) : (
                 <button
-                  onClick={disconnect}
+                  onClick={() => void signOut(disconnect)}
                   className="block w-full rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-2 font-semibold text-red-300 transition-all duration-300 hover:bg-red-500/20"
                 >
                   Disconnect
