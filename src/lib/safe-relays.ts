@@ -159,11 +159,12 @@ async function resolvesToSafeAddress(hostname: string): Promise<boolean> {
   }
 }
 
-// Relays differing only in query, hash or a trailing-dot hostname reach the
-// same endpoint, so they count once.
+// Relays differing only in hash or a trailing-dot hostname reach the same
+// endpoint, so they count once. The query stays: a relay may use it to select
+// different data.
 function relayKey(url: URL): string {
   const host = url.hostname.replace(/\.+$/, '')
-  return `${url.protocol}//${host}${url.port ? `:${url.port}` : ''}${url.pathname}`
+  return `${url.protocol}//${host}${url.port ? `:${url.port}` : ''}${url.pathname}${url.search}`
 }
 
 // Client-supplied relays make the server open sockets, so drop anything that
@@ -183,7 +184,16 @@ export async function filterSafeRelays(relays: readonly string[]): Promise<strin
     candidates.push(url)
   }
 
-  const verdicts = await Promise.all(candidates.map((url) => resolvesToSafeAddress(bareHostname(url))))
+  // One lookup per host, however many candidates share it.
+  const byHost = new Map<string, Promise<boolean>>()
+  const verdicts = await Promise.all(
+    candidates.map((url) => {
+      const host = bareHostname(url).replace(/\.+$/, '')
+      let verdict = byHost.get(host)
+      if (!verdict) byHost.set(host, (verdict = resolvesToSafeAddress(host)))
+      return verdict
+    }),
+  )
   return candidates.filter((_, i) => verdicts[i]).map((url) => url.href)
 }
 

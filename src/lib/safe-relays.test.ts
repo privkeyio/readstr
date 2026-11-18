@@ -145,10 +145,18 @@ describe('filterSafeRelays', () => {
     expect(new Set(result).size).toBe(result.length)
   })
 
-  it('collapses query, hash and trailing-dot variants of one relay', async () => {
+  it('collapses hash and trailing-dot variants of one relay', async () => {
     const relays = ['wss://relay.example/', 'wss://relay.example./', 'wss://relay.example../', 'wss://relay.example/#x']
-    for (let i = 0; i < 20; i++) relays.push(`wss://relay.example/?${i}`)
     expect(await filterSafeRelays(relays)).toEqual(['wss://relay.example/'])
+    expect(lookupsOf(4)).toBe(1)
+  })
+
+  it('keeps query variants apart, capped, with one lookup for the shared host', async () => {
+    const relays = ['wss://relay.example/?tenant=a', 'wss://relay.example/?tenant=b']
+    for (let i = 0; i < 20; i++) relays.push(`wss://relay.example/?${i}`)
+    const result = await filterSafeRelays(relays)
+    expect(result.slice(0, 2)).toEqual(['wss://relay.example/?tenant=a', 'wss://relay.example/?tenant=b'])
+    expect(result).toHaveLength(MAX_REQUEST_RELAYS)
     expect(lookupsOf(4)).toBe(1)
   })
 
