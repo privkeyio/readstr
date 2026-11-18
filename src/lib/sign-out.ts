@@ -1,15 +1,28 @@
 import { AI_CONFIG_KEY } from './ai/config'
 import { clearSummaryCache } from './ai/summary-cache'
+import { clearProfileCache } from './nostr-profile'
 import { APPLIED_CREATEDAT_PREFIX } from './nostr-sync'
 import { clearHistory } from './reading-history'
 import { USER_STATE_CLEARED_EVENT } from './user-state-events'
 
-// Pubkey whose per-user data is currently on this device.
+// Pubkey whose per-user data is currently on this device. This guards against
+// accidental carry-over between accounts, not against a hostile prior user,
+// who can write any value here.
 export const OWNER_PUBKEY_KEY = 'readstr_owner_pubkey'
+
+// Owner value after sign-out is this prefix plus the pubkey that signed out.
+// Anyone else who signs in next counts as a switch and clears everything,
+// including anything written after the sign-out (another tab, a cut-off
+// clear); the same person signing back in keeps their relay list.
+export const SIGNED_OUT_PREFIX = 'signed-out:'
 
 // Per-user data a shared browser must not hand to the next person who signs
 // in. Device preferences (theme, reading and layout settings, mark-read
-// behaviour, relay list) are kept.
+// behaviour) are kept. The relay list is per-user too (a planted relay would
+// receive the next user's sync events), but it isn't synced anywhere, so
+// sign-out keeps it for the same user and only an account switch clears it.
+const RELAYS_KEY = 'nostr_relays'
+
 export const USER_STORAGE_KEYS = [
   AI_CONFIG_KEY, // holds the AI endpoint's API key
   'readstr_views',
@@ -19,7 +32,7 @@ export const USER_STORAGE_KEYS = [
   'readstr_last_sync',
   'readstr_prefs_sync',
   'last_feed_refresh',
-  OWNER_PUBKEY_KEY,
+  RELAYS_KEY,
 ] as const
 
 // Prefixes of per-user keys with a dynamic suffix (sync watermarks per d-tag,
@@ -39,7 +52,17 @@ export const USER_CACHE_NAMES = [
 
 const SIGN_OUT_CLEANUP_TIMEOUT_MS = 2000
 
-function clearUserStorage(): void {
+function hasUserStorage(): boolean {
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (!key) continue
+    if ((USER_STORAGE_KEYS as readonly string[]).includes(key)) return true
+    if (USER_STORAGE_PREFIXES.some((p) => key.startsWith(p))) return true
+  }
+  return false
+}
+
+function clearUserStorage({ keepRelays = false }: { keepRelays?: boolean } = {}): void {
   try {
     const prefixed: string[] = []
     for (let i = 0; i < localStorage.length; i++) {
@@ -47,7 +70,10 @@ function clearUserStorage(): void {
       if (key && USER_STORAGE_PREFIXES.some((p) => key.startsWith(p))) prefixed.push(key)
     }
     // Collect first: removing while indexing shifts the keys.
-    for (const key of [...USER_STORAGE_KEYS, ...prefixed]) localStorage.removeItem(key)
+    for (const key of [...USER_STORAGE_KEYS, ...prefixed]) {
+      if (keepRelays && key === RELAYS_KEY) continue
+      localStorage.removeItem(key)
+    }
   } catch {
     // localStorage can throw when storage is disabled.
   }
@@ -71,8 +97,17 @@ function clearCacheExpirationEntries(): Promise<void> {
         resolve()
         return
       }
-      const tx = db.transaction('cache-entries', 'readwrite')
-      const index = tx.objectStore('cache-entries').index('cacheName')
+      let tx: IDBTransaction
+      let index: IDBIndex
+      try {
+        tx = db.transaction('cache-entries', 'readwrite')
+        index = tx.objectStore('cache-entries').index('cacheName')
+      } catch (error) {
+        // e.g. a workbox schema without the index: don't hang or leak the db.
+        db.close()
+        reject(error)
+        return
+      }
       for (const name of USER_CACHE_NAMES) {
         const cursorReq = index.openKeyCursor(IDBKeyRange.only(name))
         cursorReq.onsuccess = () => {
@@ -86,14 +121,12 @@ function clearCacheExpirationEntries(): Promise<void> {
         db.close()
         resolve()
       }
-      tx.onerror = () => {
+      const fail = () => {
         db.close()
         reject(tx.error)
       }
-      tx.onabort = () => {
-        db.close()
-        reject(tx.error)
-      }
+      tx.onerror = fail
+      tx.onabort = fail
     }
   })
 }
@@ -103,9 +136,10 @@ function clearCacheExpirationEntries(): Promise<void> {
  * step is best effort, so one failure (private mode, a blocked database)
  * doesn't leave the rest behind; resolves once every step has finished.
  */
-export async function clearUserClientState(): Promise<void> {
+export async function clearUserClientState({ keepRelays = false }: { keepRelays?: boolean } = {}): Promise<void> {
   const steps: Promise<unknown>[] = [clearHistory(), clearSummaryCache(), clearCacheExpirationEntries()]
-  clearUserStorage()
+  clearUserStorage({ keepRelays })
+  clearProfileCache()
   if (typeof caches !== 'undefined') {
     for (const name of USER_CACHE_NAMES) steps.push(caches.delete(name))
   }
@@ -119,15 +153,35 @@ export async function clearUserClientState(): Promise<void> {
  * a key meanwhile. Reloads so in-memory per-user state goes too.
  */
 export async function signOut(disconnect: () => void): Promise<void> {
+  const owner = currentOwner()
   try {
     disconnect()
+    markSignedOut(owner)
     await Promise.race([
-      clearUserClientState(),
+      clearUserClientState({ keepRelays: true }),
       new Promise((resolve) => setTimeout(resolve, SIGN_OUT_CLEANUP_TIMEOUT_MS)),
     ])
   } finally {
-    clearUserStorage()
+    clearUserStorage({ keepRelays: true })
+    markSignedOut(owner)
     window.location.replace('/')
+  }
+}
+
+function currentOwner(): string {
+  try {
+    const owner = localStorage.getItem(OWNER_PUBKEY_KEY) ?? ''
+    return owner.startsWith(SIGNED_OUT_PREFIX) ? owner.slice(SIGNED_OUT_PREFIX.length) : owner
+  } catch {
+    return ''
+  }
+}
+
+function markSignedOut(owner: string): void {
+  try {
+    localStorage.setItem(OWNER_PUBKEY_KEY, SIGNED_OUT_PREFIX + owner)
+  } catch {
+    // Storage disabled: nothing persisted to guard.
   }
 }
 
@@ -135,15 +189,21 @@ export async function signOut(disconnect: () => void): Promise<void> {
  * Record `pubkey` as this device's owner. If data from a different account is
  * still here (e.g. it never signed out), clear it first: the localStorage part
  * synchronously, so it's gone before the new user's UI reads it.
+ *
+ * With no owner recorded (devices from before the owner key), a `fresh`
+ * connect treats any per-user data as someone else's; a session restore just
+ * records the owner, since that data is the returning user's own.
  */
-export function claimDeviceForUser(pubkey: string): Promise<void> {
-  let previous: string | null = null
+export function claimDeviceForUser(pubkey: string, { fresh }: { fresh: boolean }): Promise<void> {
+  let switching = false
   try {
-    previous = localStorage.getItem(OWNER_PUBKEY_KEY)
+    const previous = localStorage.getItem(OWNER_PUBKEY_KEY)
+    if (previous === null) switching = fresh && hasUserStorage()
+    else if (previous.startsWith(SIGNED_OUT_PREFIX)) switching = previous.slice(SIGNED_OUT_PREFIX.length) !== pubkey
+    else switching = previous !== pubkey
   } catch {
     return Promise.resolve()
   }
-  const switching = Boolean(previous && previous !== pubkey)
   const cleared = switching ? clearUserClientState() : Promise.resolve()
   if (switching && typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
     window.dispatchEvent(new Event(USER_STATE_CLEARED_EVENT))
