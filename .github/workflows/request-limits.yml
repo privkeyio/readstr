@@ -1,0 +1,80 @@
+name: Request limits
+
+# Builds the production standalone server and checks, over real HTTP, that it
+# enforces the tRPC body cap, refuses superjson reference bombs, and cuts off
+# stalled requests via the server-timeouts.cjs preload.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: request-limits-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  request-limits:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate a throwaway admin npub
+        id: npub
+        run: |
+          echo "npub=$(node -e "const { generateSecretKey, getPublicKey, nip19 } = require('nostr-tools'); console.log(nip19.npubEncode(getPublicKey(generateSecretKey())))")" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          ADMIN_NPUB: ${{ steps.npub.outputs.npub }}
+          NEXT_TELEMETRY_DISABLED: 1
+        run: |
+          set -a
+          . ./.env.example
+          set +a
+          unset FLASH_CHECKOUT_URL
+          export NEXT_PUBLIC_ADMIN_NPUB="$ADMIN_NPUB"
+          npm run build
+          test -f .next/standalone/server-timeouts.cjs
+
+      - name: Start the standalone server as docker-entrypoint.sh does
+        working-directory: .next/standalone
+        env:
+          NODE_ENV: production
+          PORT: 3000
+          HOSTNAME: 127.0.0.1
+          REQUEST_TIMEOUT_MS: 5000
+          HEADERS_TIMEOUT_MS: 2000
+        run: |
+          nohup node --require ./server-timeouts.cjs server.js > "$RUNNER_TEMP/server.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf -o /dev/null http://127.0.0.1:3000/api/health; then exit 0; fi
+            sleep 1
+          done
+          echo "server did not become ready within 60 s" >&2
+          cat "$RUNNER_TEMP/server.log" >&2
+          exit 1
+
+      - name: Check request limits
+        env:
+          BASE_URL: http://127.0.0.1:3000
+          EXPECT_HEADERS_TIMEOUT_MS: 2000
+          EXPECT_REQUEST_TIMEOUT_MS: 5000
+        run: node scripts/ci/body-cap-check.mjs
+
+      - name: Server log
+        if: always()
+        run: cat "$RUNNER_TEMP/server.log" || true

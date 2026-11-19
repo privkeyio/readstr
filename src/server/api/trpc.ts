@@ -1,3 +1,4 @@
+import { types } from 'node:util'
 import { initTRPC, TRPCError, type DefaultErrorShape } from '@trpc/server'
 import superjson from 'superjson'
 import { ZodError } from 'zod'
@@ -149,6 +150,11 @@ const t = initTRPC.context<TRPCContext>().create({
   errorFormatter: formatError,
 })
 
+function isPlainObject(value: object): boolean {
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
 /**
  * Remove 'undefined' strings, null values, and empty strings from arrays to
  * prevent deserialization quirks. The walk is bounded in depth and node count
@@ -167,6 +173,26 @@ export function sanitizeValue(input: unknown): unknown {
       return value
         .filter(item => item !== null && item !== undefined && item !== '' && item !== 'undefined')
         .map(item => walk(item, depth + 1))
+    }
+
+    // superjson also yields Maps and Sets, rebuilt here with sanitized
+    // contents, and leaf objects (Date, RegExp, URL, typed arrays) that have no
+    // own entries to walk and must reach zod unchanged. Brand checks, not
+    // instanceof, so look-alikes can't pose as either. Any other non-plain
+    // object is refused: that covers Errors, whose name/stack/cause can carry
+    // arbitrary data, and anything a future superjson registration would let
+    // through without being walked.
+    if (types.isMap(value)) {
+      return new Map(Array.from(value, ([key, val]) => [walk(key, depth + 1), walk(val, depth + 1)]))
+    }
+    if (types.isSet(value)) {
+      return new Set(Array.from(value, item => walk(item, depth + 1)))
+    }
+    if (value && typeof value === 'object' && !isPlainObject(value)) {
+      if (types.isDate(value) || types.isRegExp(value) || value instanceof URL || ArrayBuffer.isView(value)) {
+        return value
+      }
+      throw badInput()
     }
 
     // Handle objects - recursively sanitize
