@@ -3,6 +3,7 @@ import { initTRPC, TRPCError, type DefaultErrorShape } from '@trpc/server'
 import superjson from 'superjson'
 import { ZodError } from 'zod'
 import { type TRPCContext } from '@/server/auth/request-context'
+import { assertSubscribed, paywallActive } from '@/server/paywall'
 
 /**
  * Drop superjson's referential-equality annotations from client input.
@@ -238,3 +239,12 @@ const enforceNostrAuth = t.middleware(({ ctx, next }) => {
 })
 
 export const protectedProcedure = t.procedure.use(inputSanitizer).use(enforceNostrAuth)
+
+/**
+ * protectedProcedure plus a paid subscription (or live trial) while the
+ * paywall is active. With it off this adds no database query.
+ */
+export const subscribedProcedure = protectedProcedure.use(async ({ ctx, next }) => {
+  if (paywallActive()) await assertSubscribed(ctx.db, ctx.nostrPubkey)
+  return next()
+})

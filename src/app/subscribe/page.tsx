@@ -6,6 +6,7 @@ import { useNostrAuth } from '@/contexts/NostrAuthContext'
 import { api } from '@/trpc/react'
 import Link from 'next/link'
 import { BrandHeader } from '@/components/brand-header'
+import { isSubscriptionRequiredError } from '@/lib/paywall'
 
 function safeReturnPath(value: string | null): string {
   if (!value || value[0] !== '/' || value[1] === '/' || value[1] === '\\') {
@@ -92,7 +93,11 @@ function SubscribeContent() {
 
     } catch (error: any) {
       setStatus('error')
-      setErrorMessage(error.message || 'Failed to subscribe')
+      setErrorMessage(
+        isSubscriptionRequiredError(error)
+          ? 'Your Readstr trial or subscription has ended. Open the reader to subscribe, then try again.'
+          : error.message || 'Failed to subscribe'
+      )
     }
   }
 

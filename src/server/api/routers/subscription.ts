@@ -1,57 +1,65 @@
 import { createTRPCRouter, publicProcedure, protectedProcedure } from '../trpc'
-import {
-  MONTHLY_PRICE_SATS,
-  accessFor,
-  buildCheckoutUrl,
-  trialEndFrom,
-} from '@/lib/subscription'
+import { MONTHLY_PRICE_SATS, accessFor, buildCheckoutUrl } from '@/lib/subscription'
+import { SIGNER_REQUIRED } from '@/lib/paywall'
+import { paywallActive, startTrialIfMissing } from '@/server/paywall'
 import { flashApiConfig, KEPT, reconcileWithFlash, shouldCheckFlashOnStatus } from '@/server/flash-reconcile'
 import { rateLimit } from '@/server/rate-limit'
 
 export const subscriptionRouter = createTRPCRouter({
-  // Get current user's subscription status
-  // Make this public so anonymous visitors don't get blocked by auth errors
+  // Public so anonymous and read-only visitors get an answer, not an auth error.
   getStatus: publicProcedure
     .query(async ({ ctx }) => {
       const now = new Date()
 
-      if (ctx.nostrPubkey) {
-        // Start the trial on first sight and persist it, so it really ends.
-        // The empty update keeps an existing row (and its dates) untouched.
-        let subscription = await ctx.db.userSubscription.upsert({
-          where: { userPubkey: ctx.nostrPubkey },
-          create: { userPubkey: ctx.nostrPubkey, status: 'TRIAL', trialEndsAt: trialEndFrom(now) },
-          update: {},
-        })
-
-        // A lost webhook shows up as a row that denies access or is about to
-        // run out, so re-check Flash then (throttled, and best effort).
-        if (flashApiConfig() && shouldCheckFlashOnStatus(subscription, now, rateLimit)) {
-          const reconciled = await reconcileWithFlash(ctx.db, ctx.nostrPubkey, now).catch(() => null)
-          if (reconciled && reconciled !== KEPT) subscription = { ...subscription, ...reconciled }
-        }
-
+      // Off: no DB work, and no trial rows started early, so turning the
+      // paywall on later still gives every existing user a full trial.
+      if (!paywallActive()) {
         return {
+          paywallActive: false,
+          reason: null,
           userPubkey: ctx.nostrPubkey,
-          status: subscription.status,
-          trialEndsAt: subscription.trialEndsAt,
-          subscriptionEndsAt: subscription.subscriptionEndsAt,
-          ...accessFor(subscription, now),
+          status: null,
+          trialEndsAt: null,
+          subscriptionEndsAt: null,
+          daysRemaining: 0,
+          hasAccess: true,
           price: MONTHLY_PRICE_SATS,
         }
       }
 
-      // Without a NIP-98 identity there is no row to persist a trial against,
-      // so this keeps the previous behaviour of granting access. Read-only npub
-      // sessions therefore are not gated.
-      const trialEndsAt = trialEndFrom(now)
+      // Without a NIP-98 identity (read-only npub view) there is no verified
+      // account to start a trial for or to attach a Flash checkout to.
+      if (!ctx.nostrPubkey) {
+        return {
+          paywallActive: true,
+          reason: SIGNER_REQUIRED,
+          userPubkey: null,
+          status: null,
+          trialEndsAt: null,
+          subscriptionEndsAt: null,
+          daysRemaining: 0,
+          hasAccess: false,
+          price: MONTHLY_PRICE_SATS,
+        }
+      }
+
+      let subscription = await startTrialIfMissing(ctx.db, ctx.nostrPubkey, now)
+
+      // A lost webhook shows up as a row that denies access or is about to
+      // run out, so re-check Flash then (throttled, and best effort).
+      if (flashApiConfig() && shouldCheckFlashOnStatus(subscription, now, rateLimit)) {
+        const reconciled = await reconcileWithFlash(ctx.db, ctx.nostrPubkey, now).catch(() => null)
+        if (reconciled && reconciled !== KEPT) subscription = { ...subscription, ...reconciled }
+      }
+
       return {
-        userPubkey: null,
-        status: 'TRIAL' as const,
-        trialEndsAt,
-        subscriptionEndsAt: null,
-        daysRemaining: 7,
-        hasAccess: true,
+        paywallActive: true,
+        reason: null,
+        userPubkey: ctx.nostrPubkey,
+        status: subscription.status,
+        trialEndsAt: subscription.trialEndsAt,
+        subscriptionEndsAt: subscription.subscriptionEndsAt,
+        ...accessFor(subscription, now),
         price: MONTHLY_PRICE_SATS,
       }
     }),

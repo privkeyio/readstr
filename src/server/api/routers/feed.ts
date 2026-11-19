@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { TRPCError } from '@trpc/server'
-import { createTRPCRouter, protectedProcedure } from '@/server/api/trpc'
+import { createTRPCRouter, subscribedProcedure } from '@/server/api/trpc'
 import { fetchAndParseFeed } from '@/lib/rss-parser'
 import { getNostrFetcher } from '@/lib/nostr-fetcher'
 import { withRequestFetcher } from '@/lib/safe-relays'
@@ -249,7 +249,7 @@ const refreshAllUserFeedsInternal = async (db: any, userPubkey: string, force = 
 
 export const feedRouter = createTRPCRouter({
   // Update user's Nostr relays (deprecated - relays are managed client-side now)
-  updateNostrRelays: protectedProcedure
+  updateNostrRelays: subscribedProcedure
     .input(z.object({
       relays: z.array(z.string()).max(50),
     }))
@@ -260,7 +260,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Get all user feeds with unread counts
-  getFeeds: protectedProcedure
+  getFeeds: subscribedProcedure
     .input(z.object({
       tags: z.array(z.string()).max(100).optional(),
       categoryId: z.string().optional(),
@@ -523,7 +523,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Get all subscriptions for sync (including deleted)
-  getAllSubscriptionsForSync: protectedProcedure
+  getAllSubscriptionsForSync: subscribedProcedure
     .query(async ({ ctx }) => {
       const subscriptions = await ctx.db.subscription.findMany({
         where: { 
@@ -549,7 +549,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Get feed items for a specific feed or all feeds
-  getFeedItems: protectedProcedure
+  getFeedItems: subscribedProcedure
     .input(z.object({
       feedId: z.string().optional(),
       feedIds: z.array(z.string()).max(500).optional(), // Array of feed IDs for tag filtering
@@ -684,7 +684,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Subscribe to a new feed
-  subscribeFeed: protectedProcedure
+  subscribeFeed: subscribedProcedure
     .input(z.object({
       type: z.enum(['RSS', 'NOSTR']),
       url: z.string().optional(),
@@ -1098,7 +1098,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Unsubscribe from a feed (soft delete for sync tracking)
-  unsubscribeFeed: protectedProcedure
+  unsubscribeFeed: subscribedProcedure
     .input(z.object({
       feedId: z.string(),
     }))
@@ -1120,7 +1120,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Update subscription tags
-  updateSubscriptionTags: protectedProcedure
+  updateSubscriptionTags: subscribedProcedure
     .input(z.object({
       feedId: z.string(),
       tags: z.array(z.string()).max(100),
@@ -1142,7 +1142,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Get all user tags with unread counts
-  getUserTags: protectedProcedure
+  getUserTags: subscribedProcedure
     .query(async ({ ctx }) => {
       const subscriptions = await ctx.db.subscription.findMany({
         where: {
@@ -1190,7 +1190,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Mark an item as read
-  markAsRead: protectedProcedure
+  markAsRead: subscribedProcedure
     .input(z.object({
       itemId: z.string(),
     }))
@@ -1213,7 +1213,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Mark an item as unread
-  markAsUnread: protectedProcedure
+  markAsUnread: subscribedProcedure
     .input(z.object({
       itemId: z.string(),
     }))
@@ -1231,7 +1231,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Add item to favorites
-  addFavorite: protectedProcedure
+  addFavorite: subscribedProcedure
     .input(z.object({
       itemId: z.string(),
     }))
@@ -1247,7 +1247,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Remove item from favorites
-  removeFavorite: protectedProcedure
+  removeFavorite: subscribedProcedure
     .input(z.object({
       itemId: z.string(),
     }))
@@ -1265,7 +1265,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Get all favorited items
-  getFavorites: protectedProcedure
+  getFavorites: subscribedProcedure
     .input(z.object({
       limit: z.number().min(1).max(100).default(50),
       cursor: z.string().optional(),
@@ -1318,7 +1318,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Mark all items in a feed as read
-  markFeedAsRead: protectedProcedure
+  markFeedAsRead: subscribedProcedure
     .input(z.object({
       feedId: z.string(),
     }))
@@ -1344,7 +1344,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Mark all unread items across the user's subscriptions as read
-  markAllAsRead: protectedProcedure
+  markAllAsRead: subscribedProcedure
     .input(z.object({}).optional())
     .mutation(async ({ ctx }) => {
       const subscriptions = await ctx.db.subscription.findMany({
@@ -1393,7 +1393,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Discover feed URLs from a website
-  discoverFeeds: protectedProcedure
+  discoverFeeds: subscribedProcedure
     .input(z.object({
       url: z.string().url(),
     }))
@@ -1403,7 +1403,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Preview a feed before subscribing
-  previewFeed: protectedProcedure
+  previewFeed: subscribedProcedure
     .input(z.object({
       url: z.string().url(),
     }))
@@ -1422,7 +1422,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Refresh a feed (fetch new items)
-  refreshFeed: protectedProcedure
+  refreshFeed: subscribedProcedure
     .input(z.object({
       feedId: z.string(),
     }))
@@ -1499,7 +1499,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Validate a Nostr npub for feed subscription
-  validateNostrFeed: protectedProcedure
+  validateNostrFeed: subscribedProcedure
     .input(z.object({
       npub: z.string().startsWith('npub1'),
     }))
@@ -1510,7 +1510,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Preview Nostr feed content
-  previewNostrFeed: protectedProcedure
+  previewNostrFeed: subscribedProcedure
     .input(z.object({
       npub: z.string().startsWith('npub1'),
     }))
@@ -1536,7 +1536,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Refresh Nostr feed (fetch new long-form posts and videos)
-  refreshNostrFeed: protectedProcedure
+  refreshNostrFeed: subscribedProcedure
     .input(z.object({
       feedId: z.string(),
     }))
@@ -1648,7 +1648,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Search for Nostr profiles
-  searchProfiles: protectedProcedure
+  searchProfiles: subscribedProcedure
     .input(z.object({
       query: z.string().min(1).max(200),
       limit: z.number().min(1).max(20).default(10),
@@ -1662,7 +1662,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Get popular Nostr users for discovery
-  getPopularUsers: protectedProcedure
+  getPopularUsers: subscribedProcedure
     .input(z.object({
       limit: z.number().min(1).max(50).default(20),
       relays: z.array(z.string().max(MAX_RELAY_URL_LENGTH)).max(MAX_CLIENT_RELAYS).optional(),
@@ -1674,7 +1674,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Refresh all user's feeds at once
-  refreshAllFeeds: protectedProcedure
+  refreshAllFeeds: subscribedProcedure
     .input(z.object({ force: z.boolean().optional() }).optional())
     .mutation(async ({ ctx, input }) => {
       return await refreshAllUserFeedsInternal(ctx.db, ctx.nostrPubkey, input?.force ?? true)
@@ -1683,7 +1683,7 @@ export const feedRouter = createTRPCRouter({
   // ==================== CATEGORIES ====================
 
   // Get all user categories
-  getCategories: protectedProcedure
+  getCategories: subscribedProcedure
     .query(async ({ ctx }) => {
       const categories = await ctx.db.category.findMany({
         where: { userPubkey: ctx.nostrPubkey },
@@ -1706,7 +1706,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Create a new category
-  createCategory: protectedProcedure
+  createCategory: subscribedProcedure
     .input(z.object({
       name: z.string().min(1).max(50),
       color: z.string().optional(),
@@ -1733,7 +1733,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Update a category
-  updateCategory: protectedProcedure
+  updateCategory: subscribedProcedure
     .input(z.object({
       id: z.string(),
       name: z.string().min(1).max(50).optional(),
@@ -1757,7 +1757,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Delete a category
-  deleteCategory: protectedProcedure
+  deleteCategory: subscribedProcedure
     .input(z.object({
       id: z.string(),
     }))
@@ -1774,7 +1774,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Reorder categories
-  reorderCategories: protectedProcedure
+  reorderCategories: subscribedProcedure
     .input(z.object({
       categoryIds: z.array(z.string()).max(500),
     }))
@@ -1796,7 +1796,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Update subscription category
-  updateSubscriptionCategory: protectedProcedure
+  updateSubscriptionCategory: subscribedProcedure
     .input(z.object({
       feedId: z.string(),
       categoryId: z.string().nullable().transform(v => v || null),
@@ -1823,7 +1823,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Get categories with unread counts
-  getCategoriesWithUnread: protectedProcedure
+  getCategoriesWithUnread: subscribedProcedure
     .query(async ({ ctx }) => {
       const categories = await ctx.db.category.findMany({
         where: { userPubkey: ctx.nostrPubkey },
@@ -1900,7 +1900,7 @@ export const feedRouter = createTRPCRouter({
   // ==================== USER PREFERENCES ====================
 
   // Get user preference (organization mode)
-  getUserPreference: protectedProcedure
+  getUserPreference: subscribedProcedure
     .query(async ({ ctx }) => {
       const preference = await ctx.db.userPreference.findUnique({
         where: { userPubkey: ctx.nostrPubkey },
@@ -1912,7 +1912,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Update user preference
-  updateUserPreference: protectedProcedure
+  updateUserPreference: subscribedProcedure
     .input(z.object({
       organizationMode: z.enum(['tags', 'categories']),
     }))
@@ -1934,7 +1934,7 @@ export const feedRouter = createTRPCRouter({
   // ==================== SYNC OPERATIONS ====================
 
   // Get all subscriptions including soft-deleted for sync
-  getSubscriptionsForSync: protectedProcedure
+  getSubscriptionsForSync: subscribedProcedure
     .query(async ({ ctx }) => {
       const subscriptions = await ctx.db.subscription.findMany({
         where: {
@@ -1954,7 +1954,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Hard delete old soft-deleted subscriptions (cleanup)
-  cleanupDeletedSubscriptions: protectedProcedure
+  cleanupDeletedSubscriptions: subscribedProcedure
     .input(z.object({
       olderThanDays: z.number().default(90),
     }))
@@ -1976,7 +1976,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Mark read items as synced
-  markReadItemsSynced: protectedProcedure
+  markReadItemsSynced: subscribedProcedure
     .input(z.object({
       itemIds: z.array(z.string()).max(1000),
     }))
@@ -1997,7 +1997,7 @@ export const feedRouter = createTRPCRouter({
     }),
 
   // Get unsynced read items
-  getUnsyncedReadItems: protectedProcedure
+  getUnsyncedReadItems: subscribedProcedure
     .query(async ({ ctx }) => {
       const readItems = await ctx.db.readItem.findMany({
         where: {
