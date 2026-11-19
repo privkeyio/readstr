@@ -195,8 +195,9 @@ export const KEPT = 'kept' as const
 /**
  * Rebuild the user's row from Flash. Returns the applied state; KEPT when
  * Flash answered but the row must stay as it is, because the result would end
- * access the row grants through something Flash didn't list (callers must not
- * apply the event either); or null when Flash couldn't decide: reconciliation
+ * access the row grants through something Flash didn't list, or would create
+ * a row without access for a user who has none yet (callers must not apply
+ * the event either); or null when Flash couldn't decide: reconciliation
  * is off, Flash is unreachable, Flash knows no usable subscription for the
  * user, or `subscriptionId` (the triggering webhook's) isn't usable in Flash's
  * list yet. On null callers keep their existing behaviour.
@@ -243,9 +244,11 @@ async function reconcileOnce(
   if (!state) return null
   if (!grants(state, now)) {
     // A local trial, or a row linked by hand to a sub ?ref= doesn't return,
-    // must not be ended by a lapsed subscription anyone could create.
+    // must not be ended by a lapsed subscription anyone could create. Nor may
+    // one create the row: that would deny the first-visit trial.
     const current = await db.userSubscription.findUnique({ where: { userPubkey: pubkey } })
-    if (current && accessFor(current, now).hasAccess && !subs.some(s => s.id === current.flashSubscriptionId)) {
+    if (!current) return KEPT
+    if (accessFor(current, now).hasAccess && !subs.some(s => s.id === current.flashSubscriptionId)) {
       return KEPT
     }
   }

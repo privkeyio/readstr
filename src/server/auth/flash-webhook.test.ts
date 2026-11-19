@@ -146,8 +146,18 @@ describe('isForeignSubscriptionEvent', () => {
     expect(isForeignSubscriptionEvent(row('EXPIRED', 'S1', 5), ev('subscription.renewed', 'S2'))).toBe(false)
   })
 
-  it('applies any event to rows that are not linked', () => {
+  it('applies any event to unlinked rows without access', () => {
     expect(isForeignSubscriptionEvent(null, ev('subscription.expired', 'S1'))).toBe(false)
     expect(isForeignSubscriptionEvent(row('TRIAL', null, null), ev('subscription.canceled', 'S1'))).toBe(false)
+  })
+
+  it('lets only granting events touch a live unlinked trial', () => {
+    // Anyone can start a subscription naming the user's pubkey.
+    const liveTrial = { ...row('TRIAL', null, null), trialEndsAt: days(3) }
+    for (const e of ['subscription.expired', 'subscription.canceled', 'subscription.past_due']) {
+      expect(isForeignSubscriptionEvent(liveTrial, ev(e, 'S1'))).toBe(true)
+    }
+    expect(isForeignSubscriptionEvent(liveTrial, ev('subscription.activated', 'S1'))).toBe(false)
+    expect(isForeignSubscriptionEvent(liveTrial, ev('subscription.renewed', 'S1'))).toBe(false)
   })
 })

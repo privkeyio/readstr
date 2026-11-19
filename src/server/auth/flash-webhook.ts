@@ -163,6 +163,11 @@ export function verifyFlashWebhook(
  * `renewed` may also relink a row whose linked subscription is CANCELLED: a
  * cancelled subscription never renews, so a renewal from another one is a new
  * payment (e.g. S2 whose `activated` was dropped), not a stale S1 event.
+ *
+ * A live row linked to nothing (a local trial) counts as linked to no
+ * subscription, so only granting events touch it: anyone can start a Flash
+ * subscription naming someone else's public key, and its `expired` or
+ * `canceled` must not end that user's trial.
  */
 export function isForeignSubscriptionEvent(
   row: {
@@ -173,10 +178,15 @@ export function isForeignSubscriptionEvent(
   } | null,
   event: Pick<FlashEvent, 'event' | 'subscriptionId' | 'occurredAt'>
 ): boolean {
-  if (!row?.flashSubscriptionId || row.flashSubscriptionId === event.subscriptionId) return false
+  if (!row || row.flashSubscriptionId === event.subscriptionId) return false
   if (event.event === 'subscription.activated') return false
-  if (event.event === 'subscription.renewed' && row.status === 'CANCELLED') return false
+  if (event.event === 'subscription.renewed' && (row.status === 'CANCELLED' || !row.flashSubscriptionId)) return false
   return accessFor(row, event.occurredAt).hasAccess
+}
+
+/** Events that grant access; the only ones that may create a row. */
+export function isGrantingEvent(event: Pick<FlashEvent, 'event'>): boolean {
+  return event.event === 'subscription.activated' || event.event === 'subscription.renewed'
 }
 
 /** Fields to write to UserSubscription for an event. */

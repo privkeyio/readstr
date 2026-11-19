@@ -355,6 +355,12 @@ export async function verifyNip98Header(
     // 2. Valid signature + event id.
     if (!verifyEvent(event)) return reject('bad signature', { id: event.id })
 
+    // The pubkey is the account key: insist on its one canonical form here
+    // rather than rely only on nostr-tools rejecting the others.
+    if (typeof event.pubkey !== 'string' || !/^[0-9a-f]{64}$/.test(event.pubkey)) {
+      return reject('malformed pubkey', { id: event.id })
+    }
+
     // 3. Timestamp within tolerance (reject stale/future).
     const now = Math.floor(Date.now() / 1000)
     if (Math.abs(now - event.created_at) > TIMESTAMP_TOLERANCE_SECONDS) {

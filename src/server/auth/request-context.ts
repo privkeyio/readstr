@@ -1,6 +1,7 @@
 import { db } from '@/server/db'
 import { verifyNip98Header } from '@/server/auth/nip98'
 import { clientIpFromHeaders } from '@/server/rate-limit'
+import type { SubscriptionLookups } from '@/server/paywall'
 
 /**
  * Minimal view of the inbound request we need to build auth context. Works for
@@ -41,6 +42,8 @@ export interface TRPCContext {
   db: typeof db
   nostrPubkey: string | null
   clientIp: string
+  /** One subscription lookup per request, shared by every gated call in a batch. */
+  subscriptionLookups: SubscriptionLookups
 }
 
 /**
@@ -64,5 +67,5 @@ export async function buildRequestContext(
   })
   const clientIp = clientIpFromHeaders(name => req.getHeader(name))
 
-  return { db, nostrPubkey: nostrPubkey ?? null, clientIp }
+  return { db, nostrPubkey: nostrPubkey ?? null, clientIp, subscriptionLookups: new Map() }
 }

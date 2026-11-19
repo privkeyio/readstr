@@ -1,8 +1,8 @@
 'use client'
 
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { loggerLink } from '@trpc/client'
-import { createTRPCReact } from '@trpc/react-query'
+import { createTRPCReact, getQueryKey } from '@trpc/react-query'
 import { useState, useEffect, useRef } from 'react'
 import superjson from 'superjson'
 import { nip98 } from 'nostr-tools'
@@ -11,6 +11,7 @@ import { shouldClearOnAccountChange } from '@/lib/sign-out'
 import { useNostrAuth } from '@/contexts/NostrAuthContext'
 import { type UnsignedEvent, type Event as NostrEvent } from 'nostr-tools'
 import { createTrpcHttpLinks } from '@/trpc/links'
+import { isSubscriptionRequiredError } from '@/lib/paywall'
 
 export const api = createTRPCReact<AppRouter>()
 
@@ -43,14 +44,28 @@ export function TRPCReactProvider(props: {
 }) {
   const { user, signEvent } = useNostrAuth()
 
-  const [queryClient] = useState(() => new QueryClient({
-    defaultOptions: {
-      queries: {
-        refetchOnWindowFocus: false,
-        retry: 1,
+  const [queryClient] = useState(() => {
+    // A gated procedure refused for lack of a subscription (the trial ran out
+    // mid-session, or a stale status): re-check the status so the gate shows.
+    // cancelRefetch: false joins a check already in flight, so a batch of
+    // refusals costs one signed getStatus, not one each.
+    const onError = (error: unknown) => {
+      if (isSubscriptionRequiredError(error)) {
+        void client.invalidateQueries({ queryKey: getQueryKey(api.subscription.getStatus) }, { cancelRefetch: false })
+      }
+    }
+    const client: QueryClient = new QueryClient({
+      queryCache: new QueryCache({ onError }),
+      mutationCache: new MutationCache({ onError }),
+      defaultOptions: {
+        queries: {
+          refetchOnWindowFocus: false,
+          retry: (failureCount, error) => failureCount < 1 && !isSubscriptionRequiredError(error),
+        },
       },
-    },
-  }))
+    })
+    return client
+  })
 
   // Cached query results belong to whoever fetched them: drop them when the
   // signed-in account changes, so the next user never sees the last one's.

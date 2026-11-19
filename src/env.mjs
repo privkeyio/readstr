@@ -30,6 +30,11 @@ const server = z.object({
   // Flash service id (UUID) of Readstr's plan. Optional: when set,
   // reconciliation only uses subscriptions to this service.
   FLASH_SERVICE_ID: z.string().uuid().optional(),
+  // "true" or "1" turns the paywall on; anything else (or unset) leaves it off.
+  // Only takes effect when FLASH_CHECKOUT_URL is an https URL, so self-hosted
+  // installs stay free. Read at runtime by the server: no rebuild to flip it.
+  // See paywallActive() in src/server/paywall.ts.
+  PAYWALL_ENABLED: z.string().optional(),
 })
 
 const client = z.object({
@@ -46,6 +51,7 @@ const processEnv = {
   FLASH_CHECKOUT_URL: process.env.FLASH_CHECKOUT_URL,
   FLASH_API_KEY: process.env.FLASH_API_KEY,
   FLASH_SERVICE_ID: process.env.FLASH_SERVICE_ID,
+  PAYWALL_ENABLED: process.env.PAYWALL_ENABLED,
   NEXT_PUBLIC_ADMIN_NPUB: process.env.NEXT_PUBLIC_ADMIN_NPUB,
 }
 

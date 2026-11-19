@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { useNostrAuth } from "@/contexts/NostrAuthContext";
 import { nip19 } from "nostr-tools";
 import { BrandHeader } from "@/components/brand-header";
+import { isSubscriptionRequiredError } from "@/lib/paywall";
 
 export default function GuidePage() {
   const { isConnected, getPublicKey } = useNostrAuth();
@@ -73,6 +74,8 @@ export default function GuidePage() {
       router.push('/reader');
     } catch (error: any) {
       console.error('Failed to subscribe:', error);
+      // The reader's gate explains the lapsed subscription and offers checkout.
+      if (isSubscriptionRequiredError(error)) router.push('/reader');
     }
   };
 
