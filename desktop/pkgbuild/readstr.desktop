@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Name=Readstr
+Name[da]=Readstr
+Name[pt]=Readstr
+Name[pt_BR]=Readstr
+Name[ru]=Readstr
+GenericName=Feed Reader
+GenericName[da]=Feedlæser
+GenericName[pt]=Leitor de feeds
+GenericName[pt_BR]=Leitor de feeds
+GenericName[ru]=Программа для чтения лент
+Comment=Read your RSS, Nostr, and video subscriptions
+Comment[da]=Læs dine RSS-, Nostr- og videoabonnementer
+Comment[pt]=Leia as suas subscrições de RSS, Nostr e vídeo
+Comment[pt_BR]=Leia suas assinaturas de RSS, Nostr e vídeo
+Comment[ru]=Читайте подписки на RSS, Nostr и видео
+Exec=readstr
+Icon=readstr
+Terminal=false
+Categories=Network;News;Feed;
+StartupWMClass=readstr

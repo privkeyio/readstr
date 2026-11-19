@@ -1,0 +1,28 @@
+pkgname=readstr
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Read RSS, Nostr, and video subscriptions in an Omarchy window'
+arch=('x86_64' 'aarch64')
+url='https://github.com/privkeyio/readstr'
+license=('MIT')
+# Phase 2 adds qt6-websockets (relays) and libsecp256k1 (event signatures).
+depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-wayland')
+makedepends=('gcc' 'make')
+options=('!debug')
+source=()
+sha256sums=()
+
+# Builds from the local checkout for now; the omarchy-pkgs PKGBUILD will build
+# from the desktop-v<version> release tarball with `cd desktop`.
+build() {
+  cd "$startdir/.."
+  ./bin/build
+}
+
+package() {
+  cd "$startdir/.."
+  install -Dm755 build/readstr "$pkgdir/usr/bin/readstr"
+  install -Dm644 ../LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$startdir/readstr.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/readstr.svg"
+  install -Dm644 "$startdir/readstr.desktop" "$pkgdir/usr/share/applications/readstr.desktop"
+}
