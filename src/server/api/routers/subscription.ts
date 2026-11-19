@@ -11,8 +11,9 @@ export const subscriptionRouter = createTRPCRouter({
     .query(async ({ ctx }) => {
       const now = new Date()
 
-      // Off: no DB work, and no trial rows started early, so turning the
-      // paywall on later still gives every existing user a full trial.
+      // Off: no DB work and no new trial rows. Rows the pre-flag getStatus
+      // already started keep their (likely past) trialEndsAt; run
+      // scripts/reset-pre-paywall-trials.mjs once before turning the paywall on.
       if (!paywallActive()) {
         return {
           paywallActive: false,

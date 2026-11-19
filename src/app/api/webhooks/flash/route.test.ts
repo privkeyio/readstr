@@ -156,4 +156,68 @@ describe('POST /api/webhooks/flash', () => {
     expect(res.status).toBe(200)
     expect(upsert.mock.calls[0]![0].update).toMatchObject({ status: 'ACTIVE', flashSubscriptionId: 'S1' })
   })
+
+  describe('a subscription someone else started with the user\'s pubkey as ref', () => {
+    const DAY = 86_400_000
+    const liveTrial = () => ({
+      status: 'TRIAL',
+      flashSubscriptionId: null,
+      trialEndsAt: new Date(Date.now() + 3 * DAY),
+      subscriptionEndsAt: null,
+      flashEventAt: null,
+    })
+
+    it("doesn't end a live trial with its expired or canceled", async () => {
+      findUnique.mockResolvedValue(liveTrial())
+      for (const e of ['subscription.expired', 'subscription.canceled', 'subscription.past_due']) {
+        const res = await POST(delivery(e, 'ATTACKER', new Date().toISOString()))
+        expect(res.status).toBe(200)
+      }
+      expect(upsert).not.toHaveBeenCalled()
+    })
+
+    it("doesn't create a row from its expired, so the first-visit trial survives", async () => {
+      findUnique.mockResolvedValue(null)
+      for (const e of ['subscription.expired', 'subscription.canceled', 'subscription.past_due']) {
+        const res = await POST(delivery(e, 'ATTACKER', new Date().toISOString()))
+        expect(res.status).toBe(200)
+      }
+      expect(upsert).not.toHaveBeenCalled()
+    })
+
+    it("doesn't create a row from Flash's list when that shows only its lapsed sub", async () => {
+      vi.stubEnv('FLASH_API_KEY', 'key_test')
+      vi.stubEnv('FLASH_CHECKOUT_URL', 'https://flash.example/subscriptions/signup/a/b')
+      const past = new Date(Date.now() - DAY).toISOString()
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          Response.json({ subscriptions: [{ id: 'ATTACKER', ref: PUBKEY, status: 'expired', currentPeriodEnd: past }] })
+        )
+      )
+      findUnique.mockResolvedValue(null)
+      const res = await POST(delivery('subscription.expired', 'ATTACKER', new Date().toISOString()))
+      expect(res.status).toBe(200)
+      expect(upsert).not.toHaveBeenCalled()
+    })
+
+    it('still lets its activated grant access', async () => {
+      findUnique.mockResolvedValue(liveTrial())
+      await POST(delivery('subscription.activated', 'S1', new Date().toISOString()))
+      expect(upsert.mock.calls[0]![0].update).toMatchObject({ status: 'ACTIVE', flashSubscriptionId: 'S1' })
+    })
+  })
+
+  it("expires the row on its own linked subscription's expired", async () => {
+    findUnique.mockResolvedValue({
+      status: 'CANCELLED',
+      flashSubscriptionId: 'S1',
+      trialEndsAt: new Date('2026-10-01T00:00:00.000Z'),
+      subscriptionEndsAt: new Date(Date.now() + 5 * 86_400_000),
+      flashEventAt: new Date(Date.now() - 86_400_000),
+    })
+    const res = await POST(delivery('subscription.expired', 'S1', new Date().toISOString()))
+    expect(res.status).toBe(200)
+    expect(upsert.mock.calls[0]![0].update).toMatchObject({ status: 'EXPIRED', flashSubscriptionId: 'S1' })
+  })
 })

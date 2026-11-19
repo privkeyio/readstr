@@ -31,7 +31,7 @@ const server = z.object({
   // reconciliation only uses subscriptions to this service.
   FLASH_SERVICE_ID: z.string().uuid().optional(),
   // "true" or "1" turns the paywall on; anything else (or unset) leaves it off.
-  // Only takes effect when FLASH_CHECKOUT_URL is also set, so self-hosted
+  // Only takes effect when FLASH_CHECKOUT_URL is an https URL, so self-hosted
   // installs stay free. Read at runtime by the server: no rebuild to flip it.
   // See paywallActive() in src/server/paywall.ts.
   PAYWALL_ENABLED: z.string().optional(),

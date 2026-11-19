@@ -242,9 +242,10 @@ export const protectedProcedure = t.procedure.use(inputSanitizer).use(enforceNos
 
 /**
  * protectedProcedure plus a paid subscription (or live trial) while the
- * paywall is active. With it off this adds no database query.
+ * paywall is active. With it off this adds no database query; with it on,
+ * one lookup per request however many gated calls the batch holds.
  */
 export const subscribedProcedure = protectedProcedure.use(async ({ ctx, next }) => {
-  if (paywallActive()) await assertSubscribed(ctx.db, ctx.nostrPubkey)
+  if (paywallActive()) await assertSubscribed(ctx.db, ctx.nostrPubkey, new Date(), ctx.subscriptionLookups)
   return next()
 })

@@ -20,11 +20,12 @@ export interface GateStatus {
   paywallActive: boolean
   reason: typeof SIGNER_REQUIRED | null
   status: string | null
+  /** Set once the user has paid; EXPIRED alone doesn't say whether a trial or a subscription lapsed. */
+  subscriptionEndsAt: Date | null
   hasAccess: boolean
 }
 
 export type GateScreen =
-  | 'loading'
   | 'open'
   | 'trial'
   | 'signer-required'
@@ -33,23 +34,22 @@ export type GateScreen =
   | 'subscription-expired'
 
 /**
- * Which screen the subscription gate shows. A failed status check opens the
- * reader: the server enforces access on every gated procedure, so the client
- * gate is only the UI for it, and a transient error must not lock out
- * self-hosted installs where the paywall is off.
+ * Which screen the subscription gate shows. Until the status check has
+ * answered (loading, refetching with no data yet, or failed) the reader stays
+ * open: the server enforces access on every gated procedure, so the client
+ * gate is only the UI for it, and with the paywall off the reader must load
+ * exactly as it does without a gate. Only an answer saying the paywall is on
+ * and denies access replaces the reader.
  */
-export function gateScreen(
-  status: GateStatus | undefined,
-  opts: { isLoading: boolean; canSign: boolean }
-): GateScreen {
-  if (opts.isLoading) return 'loading'
+export function gateScreen(status: GateStatus | undefined, opts: { canSign: boolean }): GateScreen {
   if (!status || !status.paywallActive) return 'open'
   if (status.reason === SIGNER_REQUIRED) {
     // A signer that failed to sign sends the request unauthenticated too.
     return opts.canSign ? 'signer-failed' : 'signer-required'
   }
   if (!status.hasAccess) {
-    return status.status === 'TRIAL' || status.status === 'EXPIRED' ? 'trial-expired' : 'subscription-expired'
+    const neverPaid = status.status === 'TRIAL' || (status.status === 'EXPIRED' && !status.subscriptionEndsAt)
+    return neverPaid ? 'trial-expired' : 'subscription-expired'
   }
   return status.status === 'TRIAL' ? 'trial' : 'open'
 }

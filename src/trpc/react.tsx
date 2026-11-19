@@ -47,9 +47,11 @@ export function TRPCReactProvider(props: {
   const [queryClient] = useState(() => {
     // A gated procedure refused for lack of a subscription (the trial ran out
     // mid-session, or a stale status): re-check the status so the gate shows.
+    // cancelRefetch: false joins a check already in flight, so a batch of
+    // refusals costs one signed getStatus, not one each.
     const onError = (error: unknown) => {
       if (isSubscriptionRequiredError(error)) {
-        void client.invalidateQueries({ queryKey: getQueryKey(api.subscription.getStatus) })
+        void client.invalidateQueries({ queryKey: getQueryKey(api.subscription.getStatus) }, { cancelRefetch: false })
       }
     }
     const client: QueryClient = new QueryClient({

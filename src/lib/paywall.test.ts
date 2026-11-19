@@ -10,24 +10,31 @@ import {
   type GateStatus,
 } from './paywall'
 
-const on = (status: string | null, hasAccess: boolean): GateStatus => ({ paywallActive: true, reason: null, status, hasAccess })
-const signer = { isLoading: false, canSign: true }
+const on = (status: string | null, hasAccess: boolean, subscriptionEndsAt: Date | null = null): GateStatus => ({
+  paywallActive: true,
+  reason: null,
+  status,
+  subscriptionEndsAt,
+  hasAccess,
+})
+const signer = { canSign: true }
 
 describe('gateScreen', () => {
-  it('waits while loading', () => {
-    expect(gateScreen(undefined, { isLoading: true, canSign: true })).toBe('loading')
+  it('keeps the reader open until the status check answers, and when it fails', () => {
+    // No data yet covers loading, a refetch of a never-answered check, and an error.
+    expect(gateScreen(undefined, signer)).toBe('open')
+    expect(gateScreen(undefined, { canSign: false })).toBe('open')
   })
 
-  it('opens the reader when the paywall is off or the status check failed', () => {
-    const off: GateStatus = { paywallActive: false, reason: null, status: null, hasAccess: true }
+  it('opens the reader when the paywall is off', () => {
+    const off: GateStatus = { paywallActive: false, reason: null, status: null, subscriptionEndsAt: null, hasAccess: true }
     expect(gateScreen(off, signer)).toBe('open')
-    expect(gateScreen(off, { isLoading: false, canSign: false })).toBe('open')
-    expect(gateScreen(undefined, signer)).toBe('open')
+    expect(gateScreen(off, { canSign: false })).toBe('open')
   })
 
   it('asks read-only sessions to sign in with a signer, and signer sessions to retry', () => {
-    const readOnly: GateStatus = { paywallActive: true, reason: SIGNER_REQUIRED, status: null, hasAccess: false }
-    expect(gateScreen(readOnly, { isLoading: false, canSign: false })).toBe('signer-required')
+    const readOnly: GateStatus = { paywallActive: true, reason: SIGNER_REQUIRED, status: null, subscriptionEndsAt: null, hasAccess: false }
+    expect(gateScreen(readOnly, { canSign: false })).toBe('signer-required')
     expect(gateScreen(readOnly, signer)).toBe('signer-failed')
   })
 
@@ -35,6 +42,8 @@ describe('gateScreen', () => {
     expect(gateScreen(on('TRIAL', true), signer)).toBe('trial')
     expect(gateScreen(on('TRIAL', false), signer)).toBe('trial-expired')
     expect(gateScreen(on('EXPIRED', false), signer)).toBe('trial-expired')
+    // Flash's expiry of a paid subscription also writes EXPIRED, with the paid end.
+    expect(gateScreen(on('EXPIRED', false, new Date('2026-10-01T00:00:00.000Z')), signer)).toBe('subscription-expired')
     for (const status of ['ACTIVE', 'PAST_DUE', 'CANCELLED']) {
       expect(gateScreen(on(status, true), signer)).toBe('open')
       expect(gateScreen(on(status, false), signer)).toBe('subscription-expired')

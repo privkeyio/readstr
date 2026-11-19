@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/server/db'
-import { changeFor, isForeignSubscriptionEvent, verifyFlashWebhook } from '@/server/auth/flash-webhook'
+import { changeFor, isForeignSubscriptionEvent, isGrantingEvent, verifyFlashWebhook } from '@/server/auth/flash-webhook'
 import { readBodyWithLimit } from '@/server/http/read-body'
 import { KEPT, reconcileWithFlash } from '@/server/flash-reconcile'
 
@@ -85,6 +85,13 @@ export async function POST(request: NextRequest) {
         subscriptionId,
         linked: existing?.flashSubscriptionId,
       })
+      return NextResponse.json({ ok: true })
+    }
+
+    if (!existing && !isGrantingEvent(event)) {
+      // Nothing to end, and a row created now would deny the user the trial
+      // they get on first visit. Anyone can name any pubkey as `ref`.
+      console.log('[flash-webhook] skipped non-granting event for a user with no row:', event.event, subscriptionId)
       return NextResponse.json({ ok: true })
     }
 

@@ -1,10 +1,11 @@
+import { Prisma } from '@prisma/client'
 import { TRPCError } from '@trpc/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SIGNER_REQUIRED, SUBSCRIPTION_REQUIRED } from '@/lib/paywall'
 import { createTRPCRouter, subscribedProcedure } from '@/server/api/trpc'
 import { feedRouter } from '@/server/api/routers/feed'
 import { subscriptionRouter } from '@/server/api/routers/subscription'
-import { paywallActive } from './paywall'
+import { __resetPaywallWarningForTests, assertSubscribed, paywallActive, startTrialIfMissing, type SubscriptionLookups } from './paywall'
 
 const PUBKEY = '3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d'
 const DAY = 24 * 60 * 60 * 1000
@@ -23,7 +24,7 @@ function fakeDb(row: Row | null) {
 }
 
 function ctx(db: ReturnType<typeof fakeDb>, nostrPubkey: string | null = PUBKEY) {
-  return { db: db as never, nostrPubkey, clientIp: '127.0.0.1' }
+  return { db: db as never, nostrPubkey, clientIp: '127.0.0.1', subscriptionLookups: new Map() as SubscriptionLookups }
 }
 
 const at = (days: number) => new Date(Date.now() + days * DAY)
@@ -47,7 +48,8 @@ afterEach(() => {
 })
 
 describe('paywallActive', () => {
-  it('is on only with a "true"/"1" flag and a checkout URL', () => {
+  it('is on only with a "true"/"1" flag and an https checkout URL', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
     const flags: [string | undefined, boolean][] = [
       ['true', true],
       ['1', true],
@@ -63,11 +65,24 @@ describe('paywallActive', () => {
       ['2', false],
     ]
     for (const [flag, on] of flags) {
-      for (const url of [undefined, '', '   ', CHECKOUT]) {
+      for (const url of [undefined, '', '   ', 'not a url', 'javascript:alert(1)', 'http://flash.example/checkout', CHECKOUT, ` ${CHECKOUT} `]) {
         const env = { PAYWALL_ENABLED: flag, FLASH_CHECKOUT_URL: url }
-        expect(paywallActive(env), `flag=${flag} url=${url}`).toBe(on && url === CHECKOUT)
+        expect(paywallActive(env), `flag=${flag} url=${url}`).toBe(on && url?.trim() === CHECKOUT)
       }
     }
+  })
+
+  it('warns once when PAYWALL_ENABLED is set but the paywall stays off', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    warn.mockClear()
+    __resetPaywallWarningForTests()
+    paywallActive({ PAYWALL_ENABLED: 'false', FLASH_CHECKOUT_URL: CHECKOUT })
+    paywallActive({ PAYWALL_ENABLED: '', FLASH_CHECKOUT_URL: '' })
+    expect(warn).not.toHaveBeenCalled()
+    for (let i = 0; i < 3; i++) paywallActive({ PAYWALL_ENABLED: 'true', FLASH_CHECKOUT_URL: 'not a url' })
+    paywallActive({ PAYWALL_ENABLED: 'TRUE', FLASH_CHECKOUT_URL: CHECKOUT })
+    expect(warn).toHaveBeenCalledOnce()
+    warn.mockRestore()
   })
 
   it('reads process.env at call time, so no rebuild is needed', () => {
@@ -174,5 +189,71 @@ describe('subscribedProcedure', () => {
     for (const name of names) {
       await expect(caller[name](), name).rejects.toMatchObject({ code: 'FORBIDDEN', message: SUBSCRIPTION_REQUIRED })
     }
+  })
+})
+
+describe('startTrialIfMissing', () => {
+  it('reads the existing row when a parallel first-sight insert wins the race', async () => {
+    const winner: Row = { ...trial }
+    const db = {
+      userSubscription: {
+        upsert: vi.fn(async () => {
+          throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (`userPubkey`)', {
+            code: 'P2002',
+            clientVersion: '5.22.0',
+          })
+        }),
+        findUniqueOrThrow: vi.fn(async () => winner),
+      },
+    }
+    await expect(startTrialIfMissing(db as never, PUBKEY, new Date())).resolves.toBe(winner)
+    expect(db.userSubscription.findUniqueOrThrow).toHaveBeenCalledWith({ where: { userPubkey: PUBKEY } })
+  })
+
+  it('propagates the lookup error when the conflicting row cannot be read', async () => {
+    const db = {
+      userSubscription: {
+        upsert: vi.fn(async () => {
+          throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: '5.22.0' })
+        }),
+        findUniqueOrThrow: vi.fn(async () => {
+          throw new Prisma.PrismaClientKnownRequestError('No record found', { code: 'P2025', clientVersion: '5.22.0' })
+        }),
+      },
+    }
+    await expect(startTrialIfMissing(db as never, PUBKEY, new Date())).rejects.toMatchObject({ code: 'P2025' })
+  })
+
+  it('rethrows other database errors', async () => {
+    const db = {
+      userSubscription: {
+        upsert: vi.fn(async () => {
+          throw new Prisma.PrismaClientKnownRequestError('Timed out', { code: 'P1008', clientVersion: '5.22.0' })
+        }),
+        findUniqueOrThrow: vi.fn(),
+      },
+    }
+    await expect(startTrialIfMissing(db as never, PUBKEY, new Date())).rejects.toMatchObject({ code: 'P1008' })
+    expect(db.userSubscription.findUniqueOrThrow).not.toHaveBeenCalled()
+  })
+})
+
+describe('assertSubscribed lookup cache', () => {
+  it('does one lookup for every gated call in a request', async () => {
+    paywall(true)
+    const router = createTRPCRouter({ a: subscribedProcedure.query(() => 'a'), b: subscribedProcedure.query(() => 'b') })
+    const db = fakeDb(trial)
+    const caller = router.createCaller(ctx(db))
+    await expect(Promise.all([caller.a(), caller.b(), caller.a()])).resolves.toEqual(['a', 'b', 'a'])
+    expect(db.userSubscription.findUnique).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not keep a failed lookup, so a later call in the request retries', async () => {
+    const cache: SubscriptionLookups = new Map()
+    const db = fakeDb(trial)
+    db.userSubscription.findUnique.mockRejectedValueOnce(new Error('connection reset'))
+    await expect(assertSubscribed(db as never, PUBKEY, new Date(), cache)).rejects.toThrow('connection reset')
+    await expect(assertSubscribed(db as never, PUBKEY, new Date(), cache)).resolves.toBeUndefined()
+    expect(db.userSubscription.findUnique).toHaveBeenCalledTimes(2)
   })
 })

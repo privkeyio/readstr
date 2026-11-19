@@ -27,7 +27,7 @@ function useCheckout() {
   const [isRedirecting, setIsRedirecting] = useState(false)
   const [checkoutError, setCheckoutError] = useState<string | null>(null)
 
-  const subscribe = async () => {
+  async function subscribe() {
     setIsRedirecting(true)
     setCheckoutError(null)
     try {
@@ -45,7 +45,13 @@ function useCheckout() {
   return { subscribe, isRedirecting, checkoutError }
 }
 
-function GateCard({ title, body, children }: { title: string; body: string; children: React.ReactNode }) {
+interface GateCardProps {
+  title: string
+  body: string
+  children: React.ReactNode
+}
+
+function GateCard({ title, body, children }: GateCardProps) {
   const router = useRouter()
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-[#1a1a1a] via-[#0d1117] to-[#161b22] p-4">
@@ -68,7 +74,12 @@ function GateCard({ title, body, children }: { title: string; body: string; chil
   )
 }
 
-function PlanCard({ price, children }: { price: number; children: React.ReactNode }) {
+interface PlanCardProps {
+  price: number
+  children: React.ReactNode
+}
+
+function PlanCard({ price, children }: PlanCardProps) {
   return (
     <div className="bg-gradient-to-r from-[#27ae60]/10 to-[#2ecc71]/10 rounded-lg p-6 mb-6 border border-[#27ae60]/40 dark:border-[#2ecc71]/40">
       <div className="text-center mb-4">
@@ -98,27 +109,17 @@ function PlanCard({ price, children }: { price: number; children: React.ReactNod
 
 export function SubscriptionGate({ children }: SubscriptionGateProps) {
   const { canSign, disconnect } = useNostrAuth()
-  const { data: subscription, isLoading, isFetching, refetch } = api.subscription.getStatus.useQuery()
+  const { data: subscription, isFetching, refetch } = api.subscription.getStatus.useQuery()
   const { subscribe, isRedirecting, checkoutError } = useCheckout()
   // Read once on mount. The server render can't reach the banner (the status
-  // query is still loading there), so this can't cause a hydration mismatch.
+  // query has no data there), so this can't cause a hydration mismatch.
   const [bannerDismissed, setBannerDismissed] = useState(
     () => typeof window === 'undefined' || isTrialBannerDismissed(new Date())
   )
 
-  const screen = gateScreen(subscription, { isLoading, canSign })
+  // Loading, refetching and failed checks all keep the reader mounted.
+  const screen = gateScreen(subscription, { canSign })
   const price = subscription?.price ?? MONTHLY_PRICE_SATS
-
-  if (screen === 'loading') {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-100 dark:bg-slate-900">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#27ae60] mx-auto mb-4"></div>
-          <p className="text-slate-600 dark:text-slate-400">Checking subscription...</p>
-        </div>
-      </div>
-    )
-  }
 
   if (screen === 'signer-required') {
     return (
@@ -138,12 +139,11 @@ export function SubscriptionGate({ children }: SubscriptionGateProps) {
 
   if (screen === 'signer-failed') {
     const signingError = getLastSigningError()
+    const signingErrorDetail = signingError ? ` Signing error: ${signingError}.` : ''
     return (
       <GateCard
         title="Could not check your subscription"
-        body={`Your signer didn't sign the request, so Readstr can't tell which account this is.${
-          signingError ? ` Signing error: ${signingError}.` : ''
-        } Check your signer app, then retry.`}
+        body={`Your signer didn't sign the request, so Readstr can't tell which account this is.${signingErrorDetail} Check your signer app, then retry.`}
       >
         <div className="mb-6">
           <button onClick={() => void refetch()} disabled={isFetching} className={primaryButton}>
@@ -176,6 +176,12 @@ export function SubscriptionGate({ children }: SubscriptionGateProps) {
   }
 
   const days = subscription?.daysRemaining ?? 0
+
+  function dismissBanner() {
+    dismissTrialBanner(new Date())
+    setBannerDismissed(true)
+  }
+
   return (
     <>
       {children}
@@ -192,10 +198,7 @@ export function SubscriptionGate({ children }: SubscriptionGateProps) {
           </button>
           {checkoutError && <span className="ml-2">{checkoutError}</span>}
           <button
-            onClick={() => {
-              dismissTrialBanner(new Date())
-              setBannerDismissed(true)
-            }}
+            onClick={dismissBanner}
             aria-label="Dismiss for today"
             title="Dismiss for today"
             className="absolute right-3 top-1/2 -translate-y-1/2 px-1 text-lg leading-none font-bold hover:text-white/80"
