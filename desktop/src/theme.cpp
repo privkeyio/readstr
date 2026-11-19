@@ -11,6 +11,8 @@
 #include <QStandardPaths>
 #include <cmath>
 
+#include "smallfile.h"
+
 Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
     : QObject(parent),
       m_directory(directory.isEmpty() ? QDir::homePath() + "/.local/state/omarchy/current" : directory) {
@@ -61,16 +63,11 @@ void Theme::refreshRounding() {
     m_roundingTimeout.start();
 }
 
-QString Theme::readAccent(const QString &path) {
-    QFile file(path);
-    if (file.open(QIODevice::ReadOnly)) {
-        const QRegularExpression expression(R"re(^\s*accent\s*=\s*["'](#[0-9a-fA-F]{6})["'])re",
-                                            QRegularExpression::MultilineOption);
-        const auto match = expression.match(QString::fromUtf8(file.readAll()));
-        if (match.hasMatch())
-            return match.captured(1);
-    }
-    return "#FFD60A";
+QString Theme::readColor(const QByteArray &colors, const char *key, const QString &fallback) {
+    const QRegularExpression expression(QString(R"re(^\s*%1\s*=\s*["'](#[0-9a-fA-F]{6})["'])re").arg(key),
+                                        QRegularExpression::MultilineOption);
+    const auto match = expression.match(QString::fromUtf8(colors));
+    return match.hasMatch() ? match.captured(1) : fallback;
 }
 
 // Black or white, whichever reads on the accent (WCAG relative luminance).
@@ -100,9 +97,14 @@ void Theme::reload() {
         if (QFileInfo::exists(path))
             m_watcher.addPath(path);
 
-    const auto accent = readAccent(m_directory + "/theme/colors.toml");
-    if (accent != m_accent) {
+    const QByteArray colors = readSmallFile(m_directory + "/theme/colors.toml");
+    const auto accent = readColor(colors, "accent", "#FFD60A");
+    const auto background = readColor(colors, "background", "#0e0e10");
+    const auto foreground = readColor(colors, "foreground", "#ffffff");
+    if (accent != m_accent || background != m_background || foreground != m_foreground) {
         m_accent = accent;
+        m_background = background;
+        m_foreground = foreground;
         emit changed();
     }
 }

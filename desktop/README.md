@@ -45,5 +45,5 @@ directory, which is how tests avoid touching your real files.
 
 ## License
 
-MIT, see [`LICENSE`](../LICENSE). The theme and language following code
+MIT, see [`LICENSE`](LICENSE). The theme and language following code
 comes from Omacut and Monologue (MIT, David Heinemeier Hansson).

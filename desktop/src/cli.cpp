@@ -26,12 +26,12 @@ int version(const QStringList &options, QTextStream &out, QTextStream &err) {
         }
         json = true;
     }
-    if (json)
-        out << QJsonDocument(QJsonObject{{"name", "readstr"}, {"version", Cli::version}, {"qt", qVersion()}})
-                   .toJson(QJsonDocument::Compact)
-            << "\n";
-    else
+    if (json) {
+        const QJsonObject object{{"name", "readstr"}, {"version", Cli::version}, {"qt", qVersion()}};
+        out << QJsonDocument(object).toJson(QJsonDocument::Compact) << "\n";
+    } else {
         out << "readstr " << Cli::version << "\n";
+    }
     return 0;
 }
 
@@ -61,11 +61,24 @@ int run(const QStringList &arguments, QTextStream &out, QTextStream &err) {
         return 1;
     }
     const QString name = arguments.first();
+    if (name == "open") {
+        err << "readstr open: takes no arguments yet\n";
+        return 1;
+    }
     for (const auto &command : commands)
         if (name == QLatin1String(command.name))
             return command.handler(arguments.mid(1), out, err);
     err << "readstr: unknown command '" << name << "'\n";
     usage(err);
+    return 1;
+}
+
+int finish(int code, QTextStream &out, QTextStream &err) {
+    out.flush();
+    if (out.status() == QTextStream::Ok)
+        return code;
+    err << "readstr: could not write the output\n";
+    err.flush();
     return 1;
 }
 }

@@ -1,10 +1,13 @@
+#include <QBuffer>
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <cstdio>
 #include <optional>
+#include <sys/stat.h>
 
 #include "cli.h"
 #include "paths.h"
@@ -21,17 +24,60 @@ private slots:
         Theme theme(dir.path());
         QCOMPARE(theme.accent(), QString("#FFD60A"));
         QCOMPARE(theme.accentForeground(), QString("black"));
+        QCOMPARE(theme.background(), QString("#0e0e10"));
+        QCOMPARE(theme.foreground(), QString("#ffffff"));
     }
 
     void themeReadsAccent()
     {
         QTemporaryDir dir;
         QDir(dir.path()).mkpath("theme");
-        write(dir.path() + "/theme/colors.toml", "background = \"#000000\"\naccent = \"#112233\"\n");
+        write(dir.path() + "/theme/colors.toml",
+              "selection_background = \"#abcdef\"\nbackground = \"#000000\"\nforeground = \"#c0c0c0\"\n"
+              "accent = \"#112233\"\n");
 
         Theme theme(dir.path());
         QCOMPARE(theme.accent(), QString("#112233"));
         QCOMPARE(theme.accentForeground(), QString("white"));
+        QCOMPARE(theme.background(), QString("#000000"));
+        QCOMPARE(theme.foreground(), QString("#c0c0c0"));
+    }
+
+    // Omarchy switches themes by pointing current/theme at another directory.
+    void themeFollowsAThemeSwitch()
+    {
+        QTemporaryDir dir;
+        QDir(dir.path()).mkpath("themes/one");
+        QDir(dir.path()).mkpath("themes/two");
+        QDir(dir.path()).mkpath("current");
+        write(dir.path() + "/themes/one/colors.toml", "accent = \"#112233\"\n");
+        write(dir.path() + "/themes/two/colors.toml", "accent = \"#445566\"\nbackground = \"#fafafa\"\n");
+        QVERIFY(QFile::link(dir.path() + "/themes/one", dir.path() + "/current/theme"));
+
+        Theme theme(dir.path() + "/current");
+        QCOMPARE(theme.accent(), QString("#112233"));
+
+        QVERIFY(QFile::link(dir.path() + "/themes/two", dir.path() + "/current/theme.new"));
+        QVERIFY(std::rename(QFile::encodeName(dir.path() + "/current/theme.new").constData(),
+                            QFile::encodeName(dir.path() + "/current/theme").constData()) == 0);
+        QTRY_COMPARE(theme.accent(), QString("#445566"));
+        QCOMPARE(theme.background(), QString("#fafafa"));
+    }
+
+    // A FIFO would block the open and an endless or huge file would fill
+    // memory, both on the GUI thread; either way the theme falls back.
+    void themeIgnoresFifosAndOversizedFiles()
+    {
+        QTemporaryDir dir;
+        QDir(dir.path()).mkpath("fifo/theme");
+        QVERIFY(mkfifo(QFile::encodeName(dir.path() + "/fifo/theme/colors.toml").constData(), 0600) == 0);
+        Theme fifo(dir.path() + "/fifo");
+        QCOMPARE(fifo.accent(), QString("#FFD60A"));
+
+        QDir(dir.path()).mkpath("large/theme");
+        write(dir.path() + "/large/theme/colors.toml", "accent = \"#112233\"\n" + QByteArray(64 * 1024, '#'));
+        Theme large(dir.path() + "/large");
+        QCOMPARE(large.accent(), QString("#FFD60A"));
     }
 
     void themeFollowsHyprlandRounding()
@@ -40,10 +86,10 @@ private slots:
         const QString response = dir.filePath("response.json"), command = dir.filePath("hyprctl");
         write(command, "#!/bin/sh\ncat '" + response.toUtf8() + "'\n");
         QVERIFY(QFile::setPermissions(command, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-        write(response, "{\"int\":0}");
+        write(response, "{\"int\":3}");
 
         Theme theme(dir.path(), nullptr, command);
-        QCOMPARE(theme.radius(), 0);
+        QTRY_COMPARE(theme.radius(), 3);
         write(response, "{\"int\":6}");
         QTRY_COMPARE(theme.radius(), 6);
     }
@@ -118,6 +164,17 @@ private slots:
         QCOMPARE(Paths::settingsFile(), dir.path() + "/config/settings.json");
     }
 
+    void pathsIgnoreARelativeReadstrHome()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME", "XDG_DATA_HOME"});
+        qputenv("READSTR_HOME", "relative/home");
+        qputenv("XDG_DATA_HOME", (dir.path() + "/share").toUtf8());
+
+        QTest::ignoreMessage(QtWarningMsg, "readstr: ignoring READSTR_HOME, which is not an absolute path");
+        QCOMPARE(Paths::dataDirectory(), dir.path() + "/share/readstr");
+    }
+
     void pathsFollowXdgWithoutReadstrHome()
     {
         QTemporaryDir dir;
@@ -144,12 +201,12 @@ private slots:
     {
         QString out, err;
         QCOMPARE(run({"--version"}, out, err), 0);
-        QCOMPARE(out, QString("readstr 0.1.0\n"));
+        QCOMPARE(out, QString("readstr %1\n").arg(Cli::version));
         QVERIFY(err.isEmpty());
 
         out.clear();
         QCOMPARE(run({"version"}, out, err), 0);
-        QCOMPARE(out, QString("readstr 0.1.0\n"));
+        QCOMPARE(out, QString("readstr %1\n").arg(Cli::version));
     }
 
     void versionPrintsJson()
@@ -177,6 +234,28 @@ private slots:
         QCOMPARE(run({"frobnicate"}, out, err), 1);
         QVERIFY(out.isEmpty());
         QVERIFY(err.contains("unknown command 'frobnicate'"));
+
+        err.clear();
+        QCOMPARE(run({"open", "x"}, out, err), 1);
+        QVERIFY(out.isEmpty());
+        QVERIFY(err.contains("open: takes no arguments yet"));
+    }
+
+    // `readstr --version > /dev/full` must fail rather than exit 0.
+    void failedOutputWritesFail()
+    {
+        QBuffer readOnly;
+        QVERIFY(readOnly.open(QIODevice::ReadOnly));
+        QString err;
+        QTextStream out(&readOnly), errStream(&err);
+        QTest::ignoreMessage(QtWarningMsg, "QIODevice::write (QBuffer): ReadOnly device");
+        QCOMPARE(Cli::finish(Cli::run({"--version"}, out, errStream), out, errStream), 1);
+        QVERIFY(err.contains("could not write"));
+
+        QString written;
+        QTextStream good(&written);
+        QCOMPARE(Cli::finish(Cli::run({"--version"}, good, errStream), good, errStream), 0);
+        QVERIFY(!written.isEmpty());
     }
 
 private:

@@ -34,7 +34,8 @@ int main(int argc, char *argv[]) {
 
     if (!window) {
         QTextStream out(stdout), err(stderr);
-        return Cli::run(arguments, out, err);
+        const int code = Cli::finish(Cli::run(arguments, out, err), out, err);
+        return std::fflush(stdout) != 0 || std::ferror(stdout) ? 1 : code;
     }
 
     // Matches the window to readstr.desktop, so the compositor (Wayland app_id)

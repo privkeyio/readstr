@@ -11,6 +11,8 @@
 #include <QLocale>
 #include <QRegularExpression>
 
+#include "smallfile.h"
+
 Translator::Translator(const QString &languageFile, const QString &catalogDirectory, QObject *parent)
     : QTranslator(parent),
       m_languageFile(languageFile.isEmpty() ? QDir::homePath() + "/.config/omarchy/language" : languageFile),
@@ -25,10 +27,7 @@ Translator::Translator(const QString &languageFile, const QString &catalogDirect
 
 // One registry code on the first line; anything else, or no file, is English.
 QString Translator::readLanguage(const QString &path) {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly))
-        return "en";
-    const QString code = QString::fromUtf8(file.readLine()).trimmed();
+    const QString code = QString::fromUtf8(readSmallFile(path)).section('\n', 0, 0).trimmed();
     static const QRegularExpression valid("^[a-z]{2,3}(-[A-Za-z]{2})?$");
     return valid.match(code).hasMatch() ? code : "en";
 }
@@ -71,10 +70,12 @@ QString Translator::pluralCategory(const QString &language, long long count) {
 // app's numbers and dates match the desktop's (Arabic there uses Western
 // digits); without Omarchy, Qt's own locale for the code.
 QLocale Translator::formatLocale(const QString &language) {
-    QFile registry(qEnvironmentVariable("OMARCHY_PATH") + "/default/i18n/locales.json");
-    if (registry.open(QIODevice::ReadOnly)) {
-        const QString name = QJsonDocument::fromJson(registry.readAll()).object()
-                                 .value(language).toObject().value("formatLocale").toString();
+    // Without OMARCHY_PATH there is no Omarchy to ask, and the bare path would
+    // be /default/i18n/locales.json at the filesystem root.
+    const QString omarchy = qEnvironmentVariable("OMARCHY_PATH");
+    if (!omarchy.isEmpty()) {
+        const QString name = QJsonDocument::fromJson(readSmallFile(omarchy + "/default/i18n/locales.json"))
+                                 .object().value(language).toObject().value("formatLocale").toString();
         if (!name.isEmpty())
             return QLocale(name);
     }

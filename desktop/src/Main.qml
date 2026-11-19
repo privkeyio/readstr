@@ -11,10 +11,13 @@ ApplicationWindow {
     minimumHeight: 460
     visible: true
     title: "Readstr"
-    color: "#0e0e10"
+    color: theme.background
 
-    Material.theme: Material.Dark
+    // Light Omarchy themes need Material's light palette for hint text, ripples and popups.
+    Material.theme: Qt.color(theme.background).hslLightness > 0.5 ? Material.Light : Material.Dark
     Material.accent: theme.accent
+    Material.background: theme.background
+    Material.foreground: theme.foreground
     Material.roundedScale: theme.radius
 
     property bool helpVisible: false
@@ -76,7 +79,7 @@ ApplicationWindow {
                 width: Math.min(parent.width - 64, helpColumn.implicitWidth + 48)
                 height: helpColumn.implicitHeight + 48
                 radius: theme.radius
-                color: "#1a1a1e"
+                color: Qt.tint(theme.background, Qt.alpha(theme.foreground, 0.06))
                 border.color: theme.accent
                 border.width: 1
 
