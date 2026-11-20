@@ -1,0 +1,49 @@
+name: Desktop
+
+# Builds the Qt desktop app in desktop/ and runs its Qt Test suite on Arch
+# Linux, the distribution it is packaged for. The tests need no display (they
+# run offscreen) and no network beyond a fake HTTP server on 127.0.0.1.
+
+on:
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      # Pinned by digest so the starting image cannot change under us. Arch is
+      # rolling and does not support partial upgrades, so the first step
+      # upgrades everything to current packages anyway; refresh the digest now
+      # and then with `docker buildx imagetools inspect archlinux:latest`.
+      image: archlinux:latest@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899
+    steps:
+      - name: Install the toolchain and Qt
+        run: |
+          pacman -Sy --noconfirm --needed archlinux-keyring
+          pacman -Su --noconfirm --needed base-devel qt6-base qt6-declarative qt6-svg qt6-wayland
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build
+        run: desktop/bin/build
+
+      - name: Test
+        run: desktop/bin/test

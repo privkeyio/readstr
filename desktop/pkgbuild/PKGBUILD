@@ -6,7 +6,8 @@ pkgdesc='Read RSS, Nostr, and video subscriptions in an Omarchy window'
 arch=('x86_64' 'aarch64')
 url='https://github.com/privkeyio/readstr'
 license=('MIT')
-# Phase 2 adds qt6-websockets (relays) and libsecp256k1 (event signatures).
+# qt6-base also provides QtNetwork and QtSql with its SQLite driver. Phase 2
+# adds qt6-websockets (relays) and libsecp256k1 (event signatures).
 depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-wayland')
 makedepends=('gcc' 'make')
 options=('!debug')
@@ -17,6 +18,8 @@ sha256sums=()
 # from the desktop-v<version> release tarball with `cd desktop`. The build runs
 # in a fresh directory under $srcdir, so objects from bin/build are never
 # reused, and qmake gets makepkg's hardening flags, which it ignores otherwise.
+# Qt's rpath feature would add a RUNPATH of /usr/lib, which the loader searches
+# anyway, so it is blanked.
 build() {
   rm -rf "$srcdir/build"
   mkdir -p "$srcdir/build"
@@ -24,7 +27,8 @@ build() {
   qmake6 "$startdir/../readstr.pro" \
     QMAKE_CFLAGS_RELEASE="$CFLAGS" \
     QMAKE_CXXFLAGS_RELEASE="$CXXFLAGS" \
-    QMAKE_LFLAGS_RELEASE="$LDFLAGS"
+    QMAKE_LFLAGS_RELEASE="$LDFLAGS" \
+    QMAKE_LFLAGS_RPATH=
   make
 }
 

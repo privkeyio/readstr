@@ -1,0 +1,29 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "JSON <Feed>",
+  "home_page_url": "https://json.example.com/",
+  "description": "A JSON Feed",
+  "authors": [{"name": "Feed Author"}],
+  "items": [
+    {
+      "id": 42,
+      "url": "/items/42",
+      "title": "Number id",
+      "content_html": "<p>Hello <b>JSON</b></p>",
+      "date_published": "2024-05-06T07:08:09-04:00",
+      "authors": [{"name": "Item Author"}]
+    },
+    {
+      "id": "b",
+      "external_url": "https://elsewhere.example.com/b",
+      "content_text": "Text with <angle> brackets",
+      "date_modified": "2024-05-07T00:00:00Z"
+    },
+    {
+      "id": "c",
+      "url": "file:///etc/passwd",
+      "title": "No date",
+      "summary": "Given summary"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:base="https://blog.example.org/">
+  <title type="text">Atom &amp; Eve</title>
+  <subtitle type="html">&lt;i&gt;Notes&lt;/i&gt;</subtitle>
+  <link rel="self" href="/atom.xml"/>
+  <link rel="alternate" type="text/html" href="/"/>
+  <id>urn:uuid:60a76c80-d399-11d9-b93C-0003939e0af6</id>
+  <updated>2024-01-02T03:04:05Z</updated>
+  <entry>
+    <title type="html">Hello &lt;b&gt;world&lt;/b&gt;</title>
+    <link rel="alternate" href="2024/hello"/>
+    <link rel="enclosure" href="/media/hello.mp3"/>
+    <id>tag:blog.example.org,2024:1</id>
+    <published>2024-01-02T03:04:05.123456+02:00</published>
+    <updated>2024-01-03T00:00:00Z</updated>
+    <author><name>Eve</name></author>
+    <summary>A short summary</summary>
+    <content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Rich <a href="/x">content</a></p></div></content>
+  </entry>
+  <entry xml:base="https://other.example.net/section/">
+    <title>Only updated</title>
+    <link href="page.html"/>
+    <id>tag:blog.example.org,2024:2</id>
+    <updated>2024-02-01T00:00:00</updated>
+    <content type="html">&lt;p&gt;Escaped &lt;em&gt;html&lt;/em&gt;&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <title>Text content</title>
+    <id>tag:blog.example.org,2024:3</id>
+    <content>1 &lt; 2 &amp; plain</content>
+  </entry>
+</feed>

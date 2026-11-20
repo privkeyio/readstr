@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Example &amp; Friends</title>
+    <link>https://example.com/</link>
+    <description>&lt;p&gt;News from the &lt;b&gt;example&lt;/b&gt; team&lt;/p&gt;</description>
+    <item>
+      <title>First &lt;em&gt;post&lt;/em&gt;</title>
+      <link>https://example.com/posts/1</link>
+      <description>&lt;p&gt;Short &amp;amp; sweet&lt;/p&gt;</description>
+      <content:encoded><![CDATA[<p>The <strong>full</strong> text.</p><script>alert(1)</script>]]></content:encoded>
+      <dc:creator>Ada</dc:creator>
+      <pubDate>Mon, 02 Jan 2006 15:04:05 GMT</pubDate>
+      <guid isPermaLink="false">post-1</guid>
+    </item>
+    <item>
+      <title>Relative link, no date</title>
+      <link>/posts/2</link>
+      <description>Plain description</description>
+    </item>
+    <item>
+      <title>Guid is the link</title>
+      <guid>https://example.com/posts/3</guid>
+      <pubDate>Tue, 3 Jan 2006 10:00:00 -0500</pubDate>
+    </item>
+    <item>
+      <title>Script link</title>
+      <link>javascript:alert(1)</link>
+      <guid isPermaLink="false">post-4</guid>
+      <pubDate>not a date</pubDate>
+    </item>
+  </channel>
+</rss>

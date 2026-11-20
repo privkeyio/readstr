@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<opml version="2.0"><body>
+  <outline type="rss" text="Loose" xmlUrl="https://loose.example.com/feed"/>
+  <outline text="News &amp; Views">
+    <outline type="rss" text="Daily" xmlUrl="https://daily.example.com/rss"/>
+    <outline type="rss" text="Daily again" xmlUrl="https://daily.example.com/rss/"/>
+    <outline type="nostr" text="Author" nostr="npub1abc"/>
+    <outline type="rss" text="Script" xmlUrl="javascript:alert(1)"/>
+  </outline>
+</body></opml>

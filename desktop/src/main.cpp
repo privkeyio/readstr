@@ -1,5 +1,6 @@
 // readstr: read RSS, Nostr long-form, and video subscriptions in an Omarchy window.
 
+#include <QCoreApplication>
 #include <QGuiApplication>
 #include <QIcon>
 #include <QQmlApplicationEngine>
@@ -19,24 +20,23 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; ++i)
         arguments << QString::fromLocal8Bit(argv[i]);
 
-    // Headless commands must run without a display, so the platform is chosen
-    // before the application exists. Omarchy also sets QT_QPA_PLATFORMTHEME to
-    // gtk3, whose plugin exits the process when no display is reachable.
-    const bool window = Cli::opensWindow(arguments);
-    if (!window) {
-        qputenv("QT_QPA_PLATFORM", "offscreen");
-        qunsetenv("QT_QPA_PLATFORMTHEME");
+    // Headless commands must run without a display. They get a
+    // QCoreApplication, which has the event loop the network needs but loads
+    // no platform plugin (Omarchy's gtk3 platform theme exits the process when
+    // no display is reachable), and the environment is left untouched, so
+    // any helper process they start sees the user's own QT_QPA_* settings.
+    if (!Cli::opensWindow(arguments)) {
+        QCoreApplication app(argc, argv);
+        app.setApplicationName("readstr");
+        app.setApplicationVersion(Cli::version);
+        QTextStream out(stdout), err(stderr);
+        const int code = Cli::finish(Cli::run(arguments, out, err), out, err);
+        return std::fflush(stdout) != 0 || std::ferror(stdout) ? 1 : code;
     }
 
     QGuiApplication app(argc, argv);
     app.setApplicationName("readstr");
     app.setApplicationVersion(Cli::version);
-
-    if (!window) {
-        QTextStream out(stdout), err(stderr);
-        const int code = Cli::finish(Cli::run(arguments, out, err), out, err);
-        return std::fflush(stdout) != 0 || std::ferror(stdout) ? 1 : code;
-    }
 
     // Matches the window to readstr.desktop, so the compositor (Wayland app_id)
     // and the launcher pick up the installed icon.
