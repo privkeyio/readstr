@@ -40,6 +40,7 @@ Rectangle {
                 text: pane.viewName()
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
+                maximumLineCount: 1
                 font.pixelSize: 16
                 font.weight: Font.DemiBold
             }
@@ -131,6 +132,7 @@ Rectangle {
                             text: row.feedTitle
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
+                            maximumLineCount: 1
                             font.pixelSize: 11
                             opacity: 0.55
                         }

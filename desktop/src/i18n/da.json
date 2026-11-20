@@ -101,5 +101,6 @@
   "Export": "Eksportér",
   "The desktop portal's file chooser is not available (is xdg-desktop-portal running?).": "Skrivebordsportalens filvælger er ikke tilgængelig (kører xdg-desktop-portal?).",
   "Could not listen for the file chooser's answer.": "Kunne ikke lytte efter filvælgerens svar.",
-  "The file chooser failed: %1": "Filvælgeren fejlede: %1"
+  "The file chooser failed: %1": "Filvælgeren fejlede: %1",
+  "The file chooser closed without a file.": "Filvælgeren lukkede uden en fil."
 }

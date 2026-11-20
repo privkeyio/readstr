@@ -57,6 +57,7 @@ Rectangle {
                     textFormat: Text.PlainText
                     color: theme.accent
                     elide: Text.ElideRight
+                    maximumLineCount: 1
                     width: Math.min(implicitWidth, column.width)
                 }
 
@@ -65,6 +66,7 @@ Rectangle {
                     text: qsTr("by %1").arg(backend.articleAuthor)
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
+                    maximumLineCount: 1
                     width: Math.min(implicitWidth, column.width)
                     opacity: 0.7
                 }
@@ -134,7 +136,32 @@ Rectangle {
                       + backend.articleHtml
                 onLinkActivated: (link) => backend.openLink(link)
 
-                HoverHandler { cursorShape: body.hoveredLink !== "" ? Qt.PointingHandCursor : Qt.IBeamCursor }
+                HoverHandler {
+                    id: bodyHover
+                    cursorShape: body.hoveredLink !== "" ? Qt.PointingHandCursor : Qt.IBeamCursor
+                }
+
+                // Where a link really goes, as plain text, before it is
+                // clicked: a link's words can claim anything.
+                ToolTip {
+                    id: linkTip
+                    visible: body.hoveredLink !== ""
+                    delay: 300
+                    // Follows the hover alone; closing on Esc or a click would
+                    // break the binding above for good.
+                    closePolicy: Popup.NoAutoClose
+                    x: Math.min(Math.max(0, bodyHover.point.position.x), Math.max(0, body.width - width))
+                    y: bodyHover.point.position.y + 24
+                    width: Math.min(implicitWidth, column.width)
+                    contentItem: Label {
+                        text: body.hoveredLink
+                        textFormat: Text.PlainText
+                        elide: Text.ElideMiddle
+                        maximumLineCount: 1
+                        font.pixelSize: 12
+                        color: linkTip.Material.foreground
+                    }
+                }
             }
         }
     }

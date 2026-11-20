@@ -26,7 +26,9 @@ ApplicationWindow {
     readonly property color errorColor: Material.color(Material.Red, Material.theme === Material.Light ? Material.Shade700 : Material.Shade300)
     // Single keys must not fire while a dialog or menu has the keyboard, or
     // typing an address would star articles.
-    readonly property bool keysFree: !addDialog.visible && !unsubscribeDialog.visible && !sourcePane.menuOpen
+    readonly property bool dialogsClosed: !addDialog.visible && !unsubscribeDialog.visible && !sourcePane.menuOpen
+    // Nor behind the shortcuts overlay, which only ? and Esc close.
+    readonly property bool keysFree: dialogsClosed && !helpVisible
 
     // Re-evaluated on a language switch, like every other qsTr() binding.
     readonly property var shortcuts: [
@@ -61,8 +63,8 @@ ApplicationWindow {
             backend.moveArticle(step)
     }
 
-    Shortcut { sequence: "?"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: win.helpVisible = !win.helpVisible }
-    Shortcut { sequence: "Esc"; context: Qt.ApplicationShortcut; enabled: win.helpVisible && win.keysFree; onActivated: win.helpVisible = false }
+    Shortcut { sequence: "?"; context: Qt.ApplicationShortcut; enabled: win.dialogsClosed; onActivated: win.helpVisible = !win.helpVisible }
+    Shortcut { sequence: "Esc"; context: Qt.ApplicationShortcut; enabled: win.helpVisible && win.dialogsClosed; onActivated: win.helpVisible = false }
     Shortcut { sequence: "Q"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: Qt.quit() }
     Shortcut { sequence: "Ctrl+Q"; context: Qt.ApplicationShortcut; onActivated: Qt.quit() }
     Shortcut { sequence: "J"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: { win.activePane = "articles"; backend.moveArticle(1) } }

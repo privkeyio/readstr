@@ -1,5 +1,5 @@
 # Shared by readstr.pro and tests/readstr_tests.pro.
-QT += network sql dbus
+QT += network sql dbus qml
 
 VERSION = 0.1.0
 DEFINES += READSTR_VERSION=\\\"$$VERSION\\\"
@@ -15,6 +15,7 @@ HEADERS += \
     $$PWD/fetcher.h \
     $$PWD/filepicker.h \
     $$PWD/library.h \
+    $$PWD/localnetwork.h \
     $$PWD/opml.h \
     $$PWD/paths.h \
     $$PWD/portalfilepicker.h \
@@ -33,6 +34,7 @@ SOURCES += \
     $$PWD/feedparser.cpp \
     $$PWD/fetcher.cpp \
     $$PWD/library.cpp \
+    $$PWD/localnetwork.cpp \
     $$PWD/opml.cpp \
     $$PWD/paths.cpp \
     $$PWD/portalfilepicker.cpp \

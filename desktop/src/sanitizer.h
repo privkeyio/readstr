@@ -15,6 +15,11 @@
 // network as it lays the text out, which would let any feed track who reads
 // it. An image becomes a text link, "[image: alt]", to its http(s) source.
 //
+// Qt's layout, not just this pass, must stay fast on hostile markup: tables
+// never nest (an inner one is shown flat) and keep at most 1000 rows of 32
+// cells, links longer than 8 KiB are dropped, and text gets a zero-width
+// space after 80 characters without a break opportunity.
+//
 // One pass over the input, with a bounded nesting stack, so hostile markup
 // stays linear. Input past maxInputLength is cut off first, and output stops
 // once past maxOutputLength, ending in an ellipsis either way.

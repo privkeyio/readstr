@@ -3,6 +3,7 @@
 #include <QEventLoop>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPointer>
 #include <QTimer>
 #include <memory>
 
@@ -169,7 +170,7 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
 
 struct Fetcher::Batch {
     QList<FetchRequest> requests;
-    std::function<void(qsizetype, const FetchResult &)> each;
+    std::function<void(qsizetype, const FetchResult &, const Release &)> each;
     std::function<void()> finished;
     qsizetype next = 0;
     qsizetype pending = 0;
@@ -178,6 +179,18 @@ struct Fetcher::Batch {
 void Fetcher::fetchEachLater(const QList<FetchRequest> &requests,
                              std::function<void(qsizetype, const FetchResult &)> each,
                              std::function<void()> finished) {
+    fetchEachHeld(
+        requests,
+        [each = std::move(each)](qsizetype index, const FetchResult &result, const Release &release) {
+            each(index, result);
+            release();
+        },
+        std::move(finished));
+}
+
+void Fetcher::fetchEachHeld(const QList<FetchRequest> &requests,
+                            std::function<void(qsizetype, const FetchResult &, const Release &)> each,
+                            std::function<void()> finished) {
     auto batch = std::make_shared<Batch>();
     batch->requests = requests;
     batch->each = std::move(each);
@@ -188,20 +201,36 @@ void Fetcher::fetchEachLater(const QList<FetchRequest> &requests,
             QTimer::singleShot(0, this, batch->finished);
         return;
     }
-    // Each request is issued only when a slot frees up, so its deadline
-    // starts when it is sent rather than while it waits.
-    while (batch->next < requests.size() && batch->next < qMax(1, m_limits.maxConcurrent))
-        issueNext(batch);
+    m_waiting << batch;
+    pump();
 }
 
-void Fetcher::issueNext(const std::shared_ptr<Batch> &batch) {
-    const qsizetype index = batch->next++;
-    fetch(batch->requests.at(index), [this, batch, index](const FetchResult &result) {
-        batch->each(index, result);
+void Fetcher::pump() {
+    // Each request is issued only when a slot frees up, so its deadline
+    // starts when it is sent rather than while it waits.
+    while (m_inFlight < qMax(1, m_limits.maxConcurrent) && !m_waiting.isEmpty()) {
+        const std::shared_ptr<Batch> batch = m_waiting.takeFirst();
+        issue(batch);
         if (batch->next < batch->requests.size())
-            issueNext(batch);
-        if (--batch->pending == 0 && batch->finished)
-            batch->finished();
+            m_waiting << batch;
+    }
+}
+
+void Fetcher::issue(const std::shared_ptr<Batch> &batch) {
+    const qsizetype index = batch->next++;
+    ++m_inFlight;
+    fetch(batch->requests.at(index), [this, batch, index](const FetchResult &result) {
+        auto released = std::make_shared<bool>(false);
+        const QPointer<Fetcher> self(this);
+        batch->each(index, result, [self, batch, released] {
+            if (*released || !self)
+                return;
+            *released = true;
+            --self->m_inFlight;
+            self->pump();
+            if (--batch->pending == 0 && batch->finished)
+                batch->finished();
+        });
     });
 }
 
@@ -211,10 +240,14 @@ void Fetcher::fetchEach(const QList<FetchRequest> &requests,
         return;
     QEventLoop loop;
     bool done = false;
-    fetchEachLater(requests, each, [&] {
-        done = true;
-        loop.quit();
-    });
+    // Forwarded rather than copied, so a callable with state of its own is
+    // the caller's object throughout; it outlives the loop below.
+    fetchEachLater(
+        requests, [&each](qsizetype index, const FetchResult &result) { each(index, result); },
+        [&] {
+            done = true;
+            loop.quit();
+        });
     // Every callback arrives through the event loop, never during
     // fetchEachLater(), so the loop is always running when the last one
     // quits it.

@@ -2,7 +2,6 @@
 
 #include <QSaveFile>
 
-#include "opml.h"
 #include "smallfile.h"
 
 namespace Library {
@@ -65,19 +64,31 @@ Refresh apply(Store &store, const Feed &feed, const FetchResult &fetched) {
     return row;
 }
 
-Import importFile(Store &store, const QString &path) {
-    Import result;
+std::optional<QList<Opml::Outline>> readOpml(const QString &path, QString *error) {
     const QByteArray data = readSmallFile(path, Opml::maxBytes);
     if (data.isNull()) {
-        result.error = QStringLiteral("cannot read %1 (missing, not a regular file, or larger than %2 MiB)")
-                           .arg(path)
-                           .arg(Opml::maxBytes / (1024 * 1024));
-        return result;
+        *error = QStringLiteral("cannot read %1 (missing, not a regular file, or larger than %2 MiB)")
+                     .arg(path)
+                     .arg(Opml::maxBytes / (1024 * 1024));
+        return std::nullopt;
     }
-    const QList<Opml::Outline> outlines = Opml::parse(data, &result.error);
-    if (!result.error.isEmpty())
-        return result;
+    QString parseError;
+    const QList<Opml::Outline> outlines = Opml::parse(data, &parseError);
+    if (!parseError.isEmpty()) {
+        *error = parseError;
+        return std::nullopt;
+    }
+    return outlines;
+}
 
+Import importFile(Store &store, const QString &path) {
+    Import result;
+    const auto outlines = readOpml(path, &result.error);
+    return outlines ? importOutlines(store, *outlines) : result;
+}
+
+Import importOutlines(Store &store, const QList<Opml::Outline> &outlines) {
+    Import result;
     // Nostr sources arrive in phase 2; until then they are counted, not
     // dropped silently. They are set aside before de-duplication, so an
     // unsupported outline cannot shadow a supported one with the same key.
@@ -89,23 +100,29 @@ Import importFile(Store &store, const QString &path) {
             supported << outline;
     }
 
-    const QList<Feed> feeds = store.feeds();
-    if (!store.lastError().isEmpty()) {
-        result.error = store.lastError();
-        return result;
-    }
-    QStringList existing;
-    for (const Feed &feed : feeds)
-        existing << feed.url;
-    const Opml::Plan plan = Opml::plan(supported, existing);
-    result.skipped = plan.skipped;
-    for (const Opml::Outline &outline : plan.toAdd) {
-        bool created = false;
-        if (!store.addFeed(outline.xmlUrl, outline.title, outline.folder, &created)) {
-            result.error = store.lastError();
-            return result;
+    // One transaction, so a failure part way leaves no feeds behind that
+    // nothing would fetch, and the subscriptions it reads cannot change
+    // before it writes.
+    const bool saved = store.transaction([&] {
+        const QList<Feed> feeds = store.feeds();
+        if (!store.lastError().isEmpty())
+            return false;
+        QStringList existing;
+        for (const Feed &feed : feeds)
+            existing << feed.url;
+        const Opml::Plan plan = Opml::plan(supported, existing);
+        result.skipped = plan.skipped;
+        for (const Opml::Outline &outline : plan.toAdd) {
+            bool created = false;
+            if (!store.addFeed(outline.xmlUrl, outline.title, outline.folder, &created))
+                return false;
+            result.added += created;
         }
-        result.added += created;
+        return true;
+    });
+    if (!saved) {
+        result = Import{};
+        result.error = store.lastError();
     }
     return result;
 }

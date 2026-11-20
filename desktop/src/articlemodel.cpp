@@ -1,5 +1,7 @@
 #include "articlemodel.h"
 
+#include "feedparser.h"
+
 ArticleModel::ArticleModel(QObject *parent) : QAbstractListModel(parent) {}
 
 int ArticleModel::rowCount(const QModelIndex &parent) const {
@@ -20,7 +22,8 @@ QVariant ArticleModel::data(const QModelIndex &index, int role) const {
     switch (role) {
     case ArticleIdRole: return article.id;
     case FeedIdRole: return article.feedId;
-    case FeedTitleRole: return article.feedTitle;
+    // A feed name from OPML is stored as the file had it.
+    case FeedTitleRole: return FeedParser::cleanText(article.feedTitle);
     case TitleRole: return article.title;
     case UrlRole: return article.url;
     case AuthorRole: return article.author;
@@ -61,7 +64,7 @@ void ArticleModel::setFlags(int row, bool read, bool starred) {
 }
 
 int ArticleModel::nextUnread(int from) const {
-    for (qsizetype i = qMax(0, from + 1); i < m_articles.size(); ++i)
+    for (qsizetype i = qMax<qsizetype>(0, qsizetype(from) + 1); i < m_articles.size(); ++i)
         if (!m_articles.at(i).read)
             return int(i);
     return -1;

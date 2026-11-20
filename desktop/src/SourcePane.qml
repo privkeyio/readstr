@@ -131,6 +131,7 @@ Rectangle {
                     text: row.category === "" ? qsTr("Feeds") : row.category
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
+                    maximumLineCount: 1
                     font.pixelSize: 11
                     font.weight: Font.DemiBold
                     font.capitalization: Font.AllUppercase
@@ -157,6 +158,8 @@ Rectangle {
                                 : row.title
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
+                            // A title with a line break must not grow the row.
+                            maximumLineCount: 1
                             font.weight: row.kind === "feed" ? Font.Normal : Font.DemiBold
                         }
 

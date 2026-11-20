@@ -38,6 +38,7 @@ private:
     void reload();
     void refreshRounding();
     void pollRounding();
+    void roundingFailed();
 
     QString m_directory;
     QString m_accent = "#FFD60A";
@@ -49,6 +50,12 @@ private:
     int m_radius = 0;
     QProcess m_roundingProcess;
     QTimer m_roundingPoll, m_roundingTimeout;
+    // Coalesces a burst of config reload events into one query.
+    QTimer m_reloadDebounce;
+    // One more try after a failed query, which nothing else would repeat
+    // until the next config reload while the event socket is up.
+    QTimer m_roundingRetry;
+    bool m_roundingRetried = false;
     // Asked again once the query running now finishes.
     bool m_roundingAgain = false;
     QLocalSocket m_events;

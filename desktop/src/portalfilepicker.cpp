@@ -7,7 +7,8 @@
 #include <QCoreApplication>
 #include <QDBusArgument>
 #include <QDBusConnection>
-#include <QDBusInterface>
+#include <QDBusError>
+#include <QDBusMessage>
 #include <QDBusMetaType>
 #include <QDBusObjectPath>
 #include <QDBusPendingCallWatcher>
@@ -114,19 +115,47 @@ void PortalFilePicker::saveOpml(const QString &suggestedName) {
     requestFile(QStringLiteral("SaveFile"), tr("Export OPML"), options, Action::Save);
 }
 
-bool PortalFilePicker::connectToRequestPath(const QString &path) {
-    m_pendingPath = path;
-    return QDBusConnection::sessionBus().connect(
-        QStringLiteral("org.freedesktop.portal.Desktop"), m_pendingPath, QStringLiteral("org.freedesktop.portal.Request"),
-        QStringLiteral("Response"), this, SLOT(handleResponse(uint, QVariantMap)));
+namespace {
+const QString portalService = QStringLiteral("org.freedesktop.portal.Desktop");
+const QString requestInterface = QStringLiteral("org.freedesktop.portal.Request");
 }
 
-void PortalFilePicker::closePendingRequest() {
-    if (m_pendingPath.isEmpty())
-        return;
-    QDBusInterface request(QStringLiteral("org.freedesktop.portal.Desktop"), m_pendingPath,
-                           QStringLiteral("org.freedesktop.portal.Request"), QDBusConnection::sessionBus());
-    request.asyncCall(QStringLiteral("Close"));
+QString PortalFilePicker::senderName() const {
+    const QDBusConnection bus = QDBusConnection::sessionBus();
+    return bus.isConnected() ? bus.baseService() : QString();
+}
+
+bool PortalFilePicker::listen(const QString &requestPath) {
+    return QDBusConnection::sessionBus().connect(portalService, requestPath, requestInterface,
+                                                 QStringLiteral("Response"), this,
+                                                 SLOT(handleResponse(uint, QVariantMap, QDBusMessage)));
+}
+
+void PortalFilePicker::stopListening(const QString &requestPath) {
+    QDBusConnection::sessionBus().disconnect(portalService, requestPath, requestInterface, QStringLiteral("Response"),
+                                             this, SLOT(handleResponse(uint, QVariantMap, QDBusMessage)));
+}
+
+void PortalFilePicker::send(const QDBusMessage &call, int generation) {
+    auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(call), this);
+    m_pendingWatcher = watcher;
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation]() {
+        const QDBusPendingReply<QDBusObjectPath> reply = *watcher;
+        watcher->deleteLater();
+        if (m_pendingWatcher == watcher)
+            m_pendingWatcher = nullptr;
+        if (!reply.isError()) {
+            replied(generation, reply.value().path(), {});
+            return;
+        }
+        const QDBusError error = reply.error();
+        replied(generation, {}, error.message().isEmpty() ? error.name() : error.message());
+    });
+}
+
+void PortalFilePicker::closeRequest(const QString &requestPath) {
+    QDBusConnection::sessionBus().send(
+        QDBusMessage::createMethodCall(portalService, requestPath, requestInterface, QStringLiteral("Close")));
 }
 
 void PortalFilePicker::requestFile(const QString &method, const QString &title, QVariantMap options, Action action) {
@@ -134,15 +163,12 @@ void PortalFilePicker::requestFile(const QString &method, const QString &title, 
     // killed with the dialog up) must not wedge every later dialog behind
     // it: close the stuck one best-effort and replace it.
     if (m_pendingAction != Action::None) {
-        closePendingRequest();
+        closeRequest(m_pendingPath);
         clearPending();
     }
 
-    QDBusConnection bus = QDBusConnection::sessionBus();
-    QDBusInterface portal(QStringLiteral("org.freedesktop.portal.Desktop"),
-                          QStringLiteral("/org/freedesktop/portal/desktop"),
-                          QStringLiteral("org.freedesktop.portal.FileChooser"), bus);
-    if (!portal.isValid()) {
+    const QString name = senderName();
+    if (name.isEmpty()) {
         emit failed(tr("The desktop portal's file chooser is not available (is xdg-desktop-portal running?)."));
         return;
     }
@@ -152,59 +178,68 @@ void PortalFilePicker::requestFile(const QString &method, const QString &title, 
     // can't slip past while our match rule is still being installed.
     const QString token = portalToken();
     options.insert(QStringLiteral("handle_token"), token);
-    QString sender = bus.baseService().mid(1);
+    QString sender = name.mid(1);
     sender.replace(QLatin1Char('.'), QLatin1Char('_'));
     const QString predictedPath = QStringLiteral("/org/freedesktop/portal/desktop/request/%1/%2").arg(sender, token);
 
     m_pendingAction = action;
-    if (!connectToRequestPath(predictedPath)) {
+    m_pendingPath = predictedPath;
+    if (!listen(predictedPath)) {
         clearPending();
         emit failed(tr("Could not listen for the file chooser's answer."));
         return;
     }
 
     const int generation = ++m_pendingGeneration;
-    auto *watcher = new QDBusPendingCallWatcher(portal.asyncCall(method, QString(), title, options), this);
-    m_pendingWatcher = watcher;
-
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation]() {
-        QDBusPendingReply<QDBusObjectPath> reply = *watcher;
-        watcher->deleteLater();
-        if (m_pendingWatcher == watcher)
-            m_pendingWatcher = nullptr;
-
-        // Superseded by a newer request, or a response may already have
-        // been handled while the reply was in flight.
-        if (generation != m_pendingGeneration || m_pendingAction == Action::None)
-            return;
-
-        if (reply.isError()) {
-            clearPending();
-            emit failed(tr("The file chooser failed: %1").arg(reply.error().message()));
-            return;
-        }
-
-        // Old portal versions can hand back a different request path than the
-        // handle_token predicts; move our subscription over if so.
-        const QString actualPath = reply.value().path();
-        if (actualPath != m_pendingPath) {
-            QDBusConnection::sessionBus().disconnect(
-                QStringLiteral("org.freedesktop.portal.Desktop"), m_pendingPath,
-                QStringLiteral("org.freedesktop.portal.Request"), QStringLiteral("Response"), this,
-                SLOT(handleResponse(uint, QVariantMap)));
-            if (!connectToRequestPath(actualPath)) {
-                clearPending();
-                emit failed(tr("Could not listen for the file chooser's answer."));
-            }
-        }
-    });
+    QDBusMessage call = QDBusMessage::createMethodCall(portalService, QStringLiteral("/org/freedesktop/portal/desktop"),
+                                                       QStringLiteral("org.freedesktop.portal.FileChooser"), method);
+    call << QString() << title << options;
+    send(call, generation);
 }
 
-void PortalFilePicker::handleResponse(uint response, const QVariantMap &results) {
+void PortalFilePicker::replied(int generation, const QString &requestPath, const QString &error) {
+    // Superseded by a newer request, or a response may already have been
+    // handled while the reply was in flight.
+    if (generation != m_pendingGeneration || m_pendingAction == Action::None)
+        return;
+
+    if (!error.isEmpty()) {
+        clearPending();
+        emit failed(tr("The file chooser failed: %1").arg(error));
+        return;
+    }
+
+    // Old portal versions can hand back a different request path than the
+    // handle_token predicts; move our subscription over if so.
+    if (requestPath != m_pendingPath) {
+        stopListening(m_pendingPath);
+        m_pendingPath = requestPath;
+        if (!listen(requestPath)) {
+            clearPending();
+            emit failed(tr("Could not listen for the file chooser's answer."));
+        }
+    }
+}
+
+void PortalFilePicker::handleResponse(uint response, const QVariantMap &results, const QDBusMessage &message) {
+    responded(message.path(), response, results);
+}
+
+void PortalFilePicker::responded(const QString &requestPath, uint response, const QVariantMap &results) {
+    // Only the pending request's answer counts; one for a request replaced
+    // since (still subscribed for a moment) is dropped.
+    if (m_pendingAction == Action::None || requestPath != m_pendingPath)
+        return;
     const Action action = m_pendingAction;
     clearPending();
-    if (response != 0)
+    // 1 is the user cancelling, which needs no word; 2 is the dialog ending
+    // some other way.
+    if (response == 1)
         return;
+    if (response != 0) {
+        emit failed(tr("The file chooser closed without a file."));
+        return;
+    }
     const QStringList uris = results.value(QStringLiteral("uris")).toStringList();
     if (uris.isEmpty())
         return;
@@ -222,12 +257,8 @@ void PortalFilePicker::clearPending() {
         m_pendingWatcher->deleteLater();
         m_pendingWatcher = nullptr;
     }
-    if (!m_pendingPath.isEmpty()) {
-        QDBusConnection::sessionBus().disconnect(
-            QStringLiteral("org.freedesktop.portal.Desktop"), m_pendingPath,
-            QStringLiteral("org.freedesktop.portal.Request"), QStringLiteral("Response"), this,
-            SLOT(handleResponse(uint, QVariantMap)));
-    }
+    if (!m_pendingPath.isEmpty())
+        stopListening(m_pendingPath);
     m_pendingPath.clear();
     m_pendingAction = Action::None;
 }

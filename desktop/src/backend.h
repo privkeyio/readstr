@@ -1,15 +1,18 @@
 #pragma once
 
+#include <QHash>
 #include <QObject>
 #include <QSet>
 #include <QThread>
 #include <QTimer>
 #include <QUrl>
 #include <QVariant>
+#include <atomic>
 #include <functional>
 #include <memory>
 
 #include "articlemodel.h"
+#include "feedparser.h"
 #include "fetcher.h"
 #include "library.h"
 #include "sourcemodel.h"
@@ -21,12 +24,16 @@ class LibraryWorker;
 // The facade QML talks to as `backend`: the sources and articles models, the
 // article in the reader, and every action the window offers.
 //
-// Reads and the small writes (read, starred) use a Store on this thread; the
-// library is in WAL mode, so they never wait on a refresh. Refreshing and
-// subscribing fetch on this thread's event loop through Fetcher, never in a
-// nested loop, and hand each response to a worker thread with its own Store,
-// which parses and saves it with the same Library code the headless commands
-// use. The models reload once a batch is done.
+// Reads use a Store on this thread; the library is in WAL mode, so they never
+// wait on a refresh. Every write goes to a worker thread with its own Store,
+// since a write on this thread would wait (up to the 5 s busy timeout) behind
+// a refresh saving there. The user's own writes (read, starred, mark the view
+// read, unsubscribe) show in the window at once and are reconciled with the
+// library when the worker reports back; any still queued when the window
+// closes are done then. Refreshing and subscribing fetch on this thread's
+// event loop through Fetcher, never in a nested loop, and hand each response
+// to the worker, which parses and saves it with the same Library code the
+// headless commands use. The models reload once a batch is done.
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(SourceModel *sources READ sources CONSTANT)
@@ -82,9 +89,9 @@ public:
     bool hasArticle() const { return m_article.id != 0; }
     qint64 articleId() const { return m_article.id; }
     QString articleTitle() const { return m_article.title; }
-    QString articleFeed() const { return m_article.feedTitle; }
+    QString articleFeed() const { return FeedParser::cleanText(m_article.feedTitle); }
     QString articleAuthor() const { return m_article.author; }
-    QString articleUrl() const { return m_article.url; }
+    QString articleUrl() const;
     QVariant articlePublished() const;
     QString articleHtml() const { return m_articleHtml; }
     bool articleRead() const { return m_article.read; }
@@ -149,6 +156,27 @@ private:
     template <typename Result>
     void onWorker(std::function<Result(Store &)> work, std::function<void(const Result &)> done);
 
+    struct WriteResult {
+        int changed = 0;
+        QString error;
+    };
+    // A write the user asked for; `work` returns how many rows it changed,
+    // or -1 with the reason in the Store's lastError().
+    struct UserWrite {
+        std::function<int(Store &)> work;
+        std::atomic<bool> done = false;
+    };
+    void writeOnWorker(std::function<int(Store &)> work, std::function<void(const WriteResult &)> done);
+    // Flags shown before the worker has saved them.
+    struct PendingFlags {
+        bool read = false;
+        bool starred = false;
+        int writes = 0;
+    };
+    void applyPending(Article &article) const;
+    void saveFlags(const Article &before, bool read, bool starred, const QString &failure);
+    void showFlags(qint64 id, bool read, bool starred);
+
     void setStatus(const QString &message, bool error = false);
     void reloadLibrary();
     void reloadCounts();
@@ -156,6 +184,10 @@ private:
     ArticleFilter currentFilter() const;
     void showArticle(const Article &article);
     void setFlags(bool read, bool starred);
+    // A local file path for a file: URL, or empty for anything else
+    // (another host's file: URL included).
+    static QString localPath(const QUrl &url);
+    void hideRemoving(QList<Feed> &feeds) const;
     void refresh(const QList<Feed> &targets);
     void refreshApplied(const Feed &feed, const Library::Refresh &outcome);
     void searchRound(const std::shared_ptr<Discovery::Search> &search);
@@ -170,6 +202,8 @@ private:
     FilePicker *m_picker = nullptr;
     std::function<bool(const QUrl &)> m_openUrl;
     bool m_closing = false;
+    QList<std::shared_ptr<UserWrite>> m_userWrites;
+    QHash<qint64, PendingFlags> m_pendingFlags;
 
     SourceModel m_sources;
     ArticleModel m_articles;
@@ -186,7 +220,12 @@ private:
     int m_refreshFailed = 0;
     int m_refreshAdded = 0;
     QString m_firstFailure;
-    QSet<qint64> m_removedDuringRefresh;
+    // Ids are never reused, so a failed save for one of these is always a
+    // refresh racing its unsubscribe, which is no news to anyone. A failed
+    // delete takes its id out again.
+    QSet<qint64> m_unsubscribed;
+    // Feeds whose delete the worker has not done yet, hidden meanwhile.
+    QSet<qint64> m_removing;
     bool m_fetchNewFeeds = false;
     bool m_autoRefreshOn = false;
     QTimer m_autoRefresh;

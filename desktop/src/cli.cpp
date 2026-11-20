@@ -6,6 +6,7 @@
 #include <QSet>
 
 #include "discovery.h"
+#include "feedparser.h"
 #include "fetcher.h"
 #include "library.h"
 #include "store.h"
@@ -91,8 +92,7 @@ QString printable(const QString &text) {
         const char16_t code = character.unicode();
         if (code < 0x20 || (code >= 0x7F && code <= 0x9F))
             safe += ' ';
-        else if (code == 0x061C || code == 0x200E || code == 0x200F || (code >= 0x202A && code <= 0x202E)
-                 || (code >= 0x2066 && code <= 0x2069))
+        else if (FeedParser::isBidiFormat(character))
             continue;
         else
             safe += character;
@@ -377,10 +377,16 @@ int importOpml(const QString &command, const QStringList &arguments, QTextStream
         return 1;
     if (options.positional.size() != 1)
         return fail(command, "needs one OPML file", err);
+    // A file that cannot be read or parsed is refused before the library is
+    // opened, which would create it.
+    QString error;
+    const auto outlines = Library::readOpml(options.positional.first(), &error);
+    if (!outlines)
+        return fail(command, error, err);
     Store store;
     if (!openStore(command, store, err))
         return 1;
-    const Library::Import imported = Library::importFile(store, options.positional.first());
+    const Library::Import imported = Library::importOutlines(store, *outlines);
     if (!imported.error.isEmpty())
         return fail(command, imported.error, err);
 

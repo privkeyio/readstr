@@ -108,5 +108,6 @@
   "Export": "Exportar",
   "The desktop portal's file chooser is not available (is xdg-desktop-portal running?).": "O seletor de ficheiros do portal do ambiente de trabalho não está disponível (o xdg-desktop-portal está em execução?).",
   "Could not listen for the file chooser's answer.": "Não foi possível aguardar a resposta do seletor de ficheiros.",
-  "The file chooser failed: %1": "O seletor de ficheiros falhou: %1"
+  "The file chooser failed: %1": "O seletor de ficheiros falhou: %1",
+  "The file chooser closed without a file.": "O seletor de ficheiros fechou sem um ficheiro."
 }

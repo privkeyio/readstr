@@ -31,7 +31,15 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl, 
     m_roundingTimeout.setSingleShot(true);
     m_roundingTimeout.setInterval(500);
     connect(&m_roundingTimeout, &QTimer::timeout, &m_roundingProcess, &QProcess::kill);
-    connect(&m_roundingProcess, &QProcess::errorOccurred, this, [this] { m_roundingTimeout.stop(); });
+    m_roundingRetry.setSingleShot(true);
+    m_roundingRetry.setInterval(2000);
+    connect(&m_roundingRetry, &QTimer::timeout, this, &Theme::refreshRounding);
+    // Failing to start emits no finished(); a crash or the timeout's kill
+    // emits both, which roundingFailed() takes once.
+    connect(&m_roundingProcess, &QProcess::errorOccurred, this, [this] {
+        m_roundingTimeout.stop();
+        roundingFailed();
+    });
     connect(&m_roundingProcess, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
         m_roundingTimeout.stop();
         if (m_roundingAgain) {
@@ -39,8 +47,11 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl, 
             QTimer::singleShot(0, this, &Theme::refreshRounding);
         }
         const auto value = QJsonDocument::fromJson(m_roundingProcess.readAllStandardOutput()).object().value("int");
-        if (code != 0 || status != QProcess::NormalExit || !value.isDouble() || value.toInt(-1) < 0)
+        if (code != 0 || status != QProcess::NormalExit || !value.isDouble() || value.toInt(-1) < 0) {
+            roundingFailed();
             return;
+        }
+        m_roundingRetried = false;
         if (value.toInt() != m_radius) {
             m_radius = value.toInt();
             emit changed();
@@ -65,8 +76,16 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl, 
         // A line that never ends must not pile up.
         if (m_events.bytesAvailable() > 64 * 1024)
             m_events.readAll();
-        if (reloaded)
-            refreshRounding();
+        // A flood of reloads asks hyprctl at most once per debounce, not
+        // once per event.
+        if (reloaded && !m_reloadDebounce.isActive())
+            m_reloadDebounce.start();
+    });
+    m_reloadDebounce.setSingleShot(true);
+    m_reloadDebounce.setInterval(200);
+    connect(&m_reloadDebounce, &QTimer::timeout, this, [this] {
+        m_roundingRetried = false;
+        refreshRounding();
     });
     connect(&m_events, &QLocalSocket::errorOccurred, this, &Theme::pollRounding);
     connect(&m_events, &QLocalSocket::disconnected, this, &Theme::pollRounding);
@@ -94,6 +113,14 @@ void Theme::pollRounding() {
         return;
     m_roundingPoll.start();
     refreshRounding();
+}
+
+void Theme::roundingFailed() {
+    // Polling asks again within a second anyway.
+    if (m_roundingPoll.isActive() || m_roundingRetried || m_hyprctl.isEmpty())
+        return;
+    m_roundingRetried = true;
+    m_roundingRetry.start();
 }
 
 void Theme::refreshRounding() {

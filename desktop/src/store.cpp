@@ -233,6 +233,15 @@ bool Store::commit() {
 
 void Store::rollback() { QSqlQuery(m_db).exec(QStringLiteral("ROLLBACK")); }
 
+bool Store::transaction(const std::function<bool()> &work) {
+    if (!begin())
+        return false;
+    if (work())
+        return commit();
+    rollback();
+    return false;
+}
+
 bool Store::migrate() {
     // The common case, an up-to-date library, takes no write lock.
     int current = schemaVersion();
@@ -492,11 +501,17 @@ QString filterSql(const ArticleFilter &filter, QVariantList &values) {
         sql += " AND i.feed_id = ?";
         values << filter.feedId;
     }
+    QStringList only;
     if (filter.unreadOnly)
-        sql += " AND i.is_read = 0";
+        only << QStringLiteral("i.is_read = 0");
     if (filter.starredOnly)
-        sql += " AND i.is_starred = 1";
-    return sql;
+        only << QStringLiteral("i.is_starred = 1");
+    if (only.isEmpty())
+        return sql;
+    if (!filter.alsoId)
+        return sql + " AND " + only.join(" AND ");
+    values << filter.alsoId;
+    return sql + " AND ((" + only.join(" AND ") + ") OR i.id = ?)";
 }
 }
 

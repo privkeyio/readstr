@@ -34,6 +34,11 @@ struct SearchStep {
     Library::Subscription subscription;
     QString error;
 };
+
+QString richText(const Article &article) {
+    return article.content.isEmpty() ? Sanitizer::plainToRichText(article.summary)
+                                     : Sanitizer::toRichText(article.content, QUrl(article.url));
+}
 }
 
 Backend::Backend(FilePicker *picker, QObject *parent)
@@ -72,6 +77,12 @@ Backend::~Backend() {
     m_fetcher.reset();
     m_thread.quit();
     m_thread.wait();
+    // The user's own changes still queued behind a refresh are not lost
+    // with it; nothing else writes now, so this store does not wait.
+    if (m_storeOpen)
+        for (const std::shared_ptr<UserWrite> &write : std::as_const(m_userWrites))
+            if (!write->done)
+                write->work(m_store);
 }
 
 template <typename Result>
@@ -91,6 +102,25 @@ void Backend::onWorker(std::function<Result(Store &)> work, std::function<void(c
                 this, [done, result] { done(result); }, Qt::QueuedConnection);
         },
         Qt::QueuedConnection);
+}
+
+void Backend::writeOnWorker(std::function<int(Store &)> work, std::function<void(const WriteResult &)> done) {
+    auto write = std::make_shared<UserWrite>();
+    write->work = std::move(work);
+    m_userWrites << write;
+    onWorker<WriteResult>(
+        [write](Store &store) {
+            WriteResult result;
+            result.changed = write->work(store);
+            if (result.changed < 0)
+                result.error = store.lastError();
+            write->done = true;
+            return result;
+        },
+        [this, write, done = std::move(done)](const WriteResult &result) {
+            m_userWrites.removeOne(write);
+            done(result);
+        });
 }
 
 void Backend::setStatus(const QString &message, bool error) {
@@ -116,10 +146,19 @@ QVariant Backend::articlePublished() const {
     return m_article.published.isValid() ? QVariant(m_article.published) : QVariant();
 }
 
+QString Backend::articleUrl() const {
+    // Credentials in a link only serve to disguise where it goes.
+    return m_article.url.isEmpty() ? QString() : QUrl(m_article.url).adjusted(QUrl::RemoveUserInfo).toString();
+}
+
 ArticleFilter Backend::currentFilter() const {
     ArticleFilter filter;
     filter.limit = viewLimit;
     filter.withContent = false;
+    // The open article stays in Unread or Starred after it no longer
+    // belongs there, until the view changes, so a reload in the background
+    // neither drops it from under the reader nor loses its place for J and K.
+    filter.alsoId = m_article.id;
     const SourceModel::Row row = m_sources.row(m_sourceIndex);
     if (row.kind == SourceModel::Kind::Unread)
         filter.unreadOnly = true;
@@ -139,6 +178,7 @@ void Backend::reloadLibrary() {
         if (!m_store.lastError().isEmpty())
             setStatus(tr("Cannot read the library: %1").arg(m_store.lastError()), true);
         counts = m_store.counts().value_or(LibraryCounts{});
+        hideRemoving(feeds);
     }
     m_sources.setLibrary(feeds, counts);
     if (m_feedCount != feeds.size()) {
@@ -151,12 +191,36 @@ void Backend::reloadLibrary() {
     loadArticles();
 }
 
+void Backend::hideRemoving(QList<Feed> &feeds) const {
+    if (!m_removing.isEmpty())
+        feeds.removeIf([this](const Feed &feed) { return m_removing.contains(feed.id); });
+}
+
 void Backend::reloadCounts() {
     if (!m_storeOpen)
         return;
-    const QList<Feed> feeds = m_store.feeds();
-    if (const auto counts = m_store.counts(); counts && m_store.lastError().isEmpty())
-        m_sources.setLibrary(feeds, *counts);
+    QList<Feed> feeds = m_store.feeds();
+    const auto counts = m_store.counts();
+    if (!counts || !m_store.lastError().isEmpty())
+        return;
+    hideRemoving(feeds);
+    // Another process can add, rename, or remove feeds, which moves rows;
+    // the selection follows its source rather than its row.
+    const SourceModel::Row selected = m_sources.row(m_sourceIndex);
+    m_sources.setLibrary(feeds, *counts);
+    const int row = m_sources.rowOf(selected.kind, selected.feedId);
+    if (m_feedCount != feeds.size()) {
+        m_feedCount = int(feeds.size());
+        emit libraryChanged();
+    }
+    if (row == m_sourceIndex)
+        return;
+    // A feed that is gone leaves All articles selected, as after a reload,
+    // and the list it showed goes with it.
+    m_sourceIndex = row < 0 ? 0 : row;
+    emit sourceChanged();
+    if (row < 0)
+        loadArticles();
 }
 
 void Backend::loadArticles() {
@@ -169,13 +233,28 @@ void Backend::loadArticles() {
         if (!m_store.lastError().isEmpty())
             setStatus(tr("Cannot read the library: %1").arg(m_store.lastError()), true);
     }
+    if (!m_pendingFlags.isEmpty())
+        for (Article &article : list)
+            applyPending(article);
+    // A feed being unsubscribed takes its articles with it right away.
+    if (!m_removing.isEmpty()) {
+        list.removeIf([this](const Article &article) { return m_removing.contains(article.feedId); });
+        if (m_removing.contains(m_article.feedId)) {
+            m_article = Article{};
+            m_articleHtml.clear();
+        }
+    }
     m_articles.setArticles(list);
-    // The reader keeps its article across a reload, with fresh flags, even
-    // when the view no longer lists it (a read article in Unread).
+    // The reader keeps its article across a reload, as the library has it
+    // now: a refresh may have updated its text as well as its flags.
     if (m_article.id) {
-        if (const auto article = m_storeOpen ? m_store.article(m_article.id) : std::nullopt) {
-            m_article.read = article->read;
-            m_article.starred = article->starred;
+        if (auto article = m_storeOpen ? m_store.article(m_article.id) : std::nullopt) {
+            applyPending(*article);
+            const bool textChanged = article->content != m_article.content || article->summary != m_article.summary
+                                     || article->url != m_article.url;
+            m_article = *article;
+            if (textChanged)
+                m_articleHtml = richText(m_article);
         } else {
             m_article = Article{};
             m_articleHtml.clear();
@@ -203,8 +282,7 @@ void Backend::moveSource(int step) {
 
 void Backend::showArticle(const Article &article) {
     m_article = article;
-    m_articleHtml = article.content.isEmpty() ? Sanitizer::plainToRichText(article.summary)
-                                              : Sanitizer::toRichText(article.content, QUrl(article.url));
+    m_articleHtml = richText(article);
     emit articleChanged();
 }
 
@@ -216,24 +294,20 @@ void Backend::selectArticle(int row) {
         setStatus(tr("Cannot read the article: %1").arg(m_store.lastError()), true);
         return;
     }
+    applyPending(*article);
     m_articleIndex = row;
-    if (!article->read) {
-        if (m_store.setRead(article->id, true)) {
-            article->read = true;
-            m_articles.setFlags(row, true, article->starred);
-            reloadCounts();
-        } else {
-            setStatus(tr("Cannot mark the article read: %1").arg(m_store.lastError()), true);
-        }
-    }
     showArticle(*article);
+    if (!article->read)
+        saveFlags(*article, true, article->starred, tr("Cannot mark the article read: %1"));
 }
 
 void Backend::moveArticle(int step) {
     const int count = m_articles.count();
     if (count == 0)
         return;
-    const int target = m_articleIndex < 0 ? 0 : qBound(0, m_articleIndex + step, count - 1);
+    // Widened, so no step from QML overflows.
+    const int target =
+        m_articleIndex < 0 ? 0 : int(qBound(qint64(0), qint64(m_articleIndex) + step, qint64(count - 1)));
     if (target != m_articleIndex)
         selectArticle(target);
 }
@@ -249,19 +323,58 @@ void Backend::nextUnread() {
 void Backend::setFlags(bool read, bool starred) {
     if (!m_storeOpen || !m_article.id)
         return;
-    if (read != m_article.read && !m_store.setRead(m_article.id, read)) {
-        setStatus(tr("Cannot change the article: %1").arg(m_store.lastError()), true);
+    saveFlags(m_article, read, starred, tr("Cannot change the article: %1"));
+}
+
+void Backend::applyPending(Article &article) const {
+    const auto pending = m_pendingFlags.constFind(article.id);
+    if (pending == m_pendingFlags.cend())
         return;
+    article.read = pending->read;
+    article.starred = pending->starred;
+}
+
+void Backend::showFlags(qint64 id, bool read, bool starred) {
+    m_articles.setFlags(m_articles.rowOf(id), read, starred);
+    if (m_article.id == id && (m_article.read != read || m_article.starred != starred)) {
+        m_article.read = read;
+        m_article.starred = starred;
+        emit articleChanged();
     }
-    if (starred != m_article.starred && !m_store.setStarred(m_article.id, starred)) {
-        setStatus(tr("Cannot change the article: %1").arg(m_store.lastError()), true);
+}
+
+void Backend::saveFlags(const Article &before, bool read, bool starred, const QString &failure) {
+    const qint64 id = before.id;
+    const bool readChanged = read != before.read, starredChanged = starred != before.starred;
+    if (!readChanged && !starredChanged)
         return;
-    }
-    m_article.read = read;
-    m_article.starred = starred;
-    m_articles.setFlags(m_articles.rowOf(m_article.id), read, starred);
-    reloadCounts();
-    emit articleChanged();
+    PendingFlags &pending = m_pendingFlags[id];
+    pending.read = read;
+    pending.starred = starred;
+    ++pending.writes;
+    showFlags(id, read, starred);
+    // The worker takes writes in order, so each only needs what it changes.
+    writeOnWorker(
+        [id, read, starred, readChanged, starredChanged](Store &store) {
+            return (!readChanged || store.setRead(id, read)) && (!starredChanged || store.setStarred(id, starred))
+                       ? 1
+                       : -1;
+        },
+        [this, id, failure](const WriteResult &result) {
+            if (!result.error.isEmpty())
+                setStatus(failure.arg(result.error), true);
+            const auto pending = m_pendingFlags.find(id);
+            if (pending != m_pendingFlags.end()) {
+                if (--pending->writes > 0)
+                    return;
+                m_pendingFlags.erase(pending);
+            }
+            // The library has the flags asked for now, or the old ones back
+            // where a write failed.
+            if (const auto saved = m_store.article(id))
+                showFlags(id, saved->read, saved->starred);
+            reloadCounts();
+        });
 }
 
 void Backend::toggleRead() { setFlags(!m_article.read, m_article.starred); }
@@ -273,7 +386,8 @@ void Backend::openOriginal() {
 }
 
 bool Backend::openLink(const QString &link) {
-    const QUrl url(link.trimmed());
+    // Credentials in a link only serve to disguise where it goes.
+    const QUrl url = QUrl(link.trimmed()).adjusted(QUrl::RemoveUserInfo);
     if (!Library::isWebUrl(url)) {
         setStatus(tr("Only web links (http and https) can be opened"), true);
         return false;
@@ -288,14 +402,18 @@ bool Backend::openLink(const QString &link) {
 void Backend::markViewRead() {
     if (!m_storeOpen)
         return;
-    const int changed = m_store.markRead(currentFilter(), m_viewLastId);
-    if (changed < 0) {
-        setStatus(tr("Cannot mark the view read: %1").arg(m_store.lastError()), true);
-        return;
-    }
-    setStatus(tr("Marked %n articles read", nullptr, changed));
-    reloadCounts();
-    loadArticles();
+    const ArticleFilter filter = currentFilter();
+    const qint64 upToId = m_viewLastId;
+    writeOnWorker([filter, upToId](Store &store) { return store.markRead(filter, upToId); },
+                  [this](const WriteResult &result) {
+                      if (!result.error.isEmpty()) {
+                          setStatus(tr("Cannot mark the view read: %1").arg(result.error), true);
+                          return;
+                      }
+                      setStatus(tr("Marked %n articles read", nullptr, result.changed));
+                      reloadCounts();
+                      loadArticles();
+                  });
 }
 
 void Backend::addFeed(const QString &address) {
@@ -383,15 +501,30 @@ void Backend::subscribeFinished(const Library::Subscription &subscription) {
 bool Backend::unsubscribe(qint64 feedId) {
     if (!m_storeOpen)
         return false;
+    // Asked twice before the worker got to it: once is enough.
+    if (m_removing.contains(feedId))
+        return true;
     const std::optional<Feed> feed = m_store.feed(feedId);
-    if (!feed || !m_store.removeFeed(feedId)) {
+    if (!feed) {
         setStatus(tr("Cannot unsubscribe: %1").arg(m_store.lastError()), true);
         return false;
     }
-    if (m_refreshing)
-        m_removedDuringRefresh.insert(feedId);
-    setStatus(tr("Unsubscribed from %1").arg(feed->title));
+    // The feed leaves the window at once and comes back if the delete fails.
+    m_removing.insert(feedId);
+    m_unsubscribed.insert(feedId);
     reloadLibrary();
+    writeOnWorker([feedId](Store &store) { return store.removeFeed(feedId) ? 1 : -1; },
+                  [this, feedId, title = feed->title](const WriteResult &result) {
+                      m_removing.remove(feedId);
+                      if (!result.error.isEmpty()) {
+                          // Still subscribed, so its refresh errors count again.
+                          m_unsubscribed.remove(feedId);
+                          setStatus(tr("Cannot unsubscribe: %1").arg(result.error), true);
+                      } else {
+                          setStatus(tr("Unsubscribed from %1").arg(title));
+                      }
+                      reloadLibrary();
+                  });
     return true;
 }
 
@@ -401,6 +534,8 @@ void Backend::refreshAll() {
     const QList<Feed> feeds = m_store.feeds();
     if (!m_store.lastError().isEmpty()) {
         setStatus(tr("Cannot read the library: %1").arg(m_store.lastError()), true);
+        // Tried again later, like a refresh that failed.
+        scheduleAutoRefresh();
         return;
     }
     if (feeds.isEmpty()) {
@@ -428,29 +563,33 @@ void Backend::refresh(const QList<Feed> &targets) {
     m_refreshFailed = 0;
     m_refreshAdded = 0;
     m_firstFailure.clear();
-    m_removedDuringRefresh.clear();
     emit refreshChanged();
 
     QList<FetchRequest> requests;
     for (const Feed &feed : targets)
         requests << FetchRequest{QUrl(feed.url), feed.etag, feed.lastModified};
-    // Each response goes to the worker as it arrives, so only the few in
-    // flight hold a body.
-    m_fetcher->fetchEachLater(requests, [this, targets](qsizetype index, const FetchResult &fetched) {
-        if (m_closing)
-            return;
-        const Feed feed = targets.at(index);
-        onWorker<Library::Refresh>(
-            [feed, fetched](Store &store) { return Library::apply(store, feed, fetched); },
-            [this, feed](const Library::Refresh &outcome) { refreshApplied(feed, outcome); });
-    });
+    // Each response goes to the worker as it arrives and keeps its fetch
+    // slot until the worker has saved it, so at most maxConcurrent bodies
+    // are held at once, in flight or waiting there, however many feeds.
+    m_fetcher->fetchEachHeld(
+        requests, [this, targets](qsizetype index, const FetchResult &fetched, const Fetcher::Release &release) {
+            if (m_closing)
+                return;
+            const Feed feed = targets.at(index);
+            onWorker<Library::Refresh>(
+                [feed, fetched](Store &store) { return Library::apply(store, feed, fetched); },
+                [this, feed, release](const Library::Refresh &outcome) {
+                    release();
+                    refreshApplied(feed, outcome);
+                });
+        });
 }
 
 void Backend::refreshApplied(const Feed &feed, const Library::Refresh &outcome) {
     ++m_refreshDone;
     // A feed unsubscribed while its fetch was out fails to save, which is
     // no news to anyone.
-    if (!outcome.error.isEmpty() && !m_removedDuringRefresh.contains(feed.id)) {
+    if (!outcome.error.isEmpty() && !m_unsubscribed.contains(feed.id)) {
         ++m_refreshFailed;
         if (m_firstFailure.isEmpty())
             m_firstFailure = QStringLiteral("%1: %2").arg(outcome.title.isEmpty() ? feed.url : outcome.title,
@@ -521,17 +660,30 @@ void Backend::exportOpml() {
     m_picker->saveOpml(QStringLiteral("readstr-subscriptions.opml"));
 }
 
+QString Backend::localPath(const QUrl &url) {
+    if (!url.isLocalFile())
+        return {};
+    // file://host/path names a file on another machine, which toLocalFile()
+    // turns into the network path //host/path.
+    if (url.host().isEmpty())
+        return url.toLocalFile();
+    const bool here = url.host().compare(QLatin1String("localhost"), Qt::CaseInsensitive) == 0;
+    return here ? url.path(QUrl::FullyDecoded) : QString();
+}
+
 void Backend::importFrom(const QUrl &url) {
-    if (!url.isLocalFile()) {
+    const QString path = localPath(url);
+    if (path.isEmpty()) {
         setStatus(tr("Only local files can be imported"), true);
         return;
     }
     if (!m_storeOpen)
         return;
-    const QString path = url.toLocalFile();
     setStatus(tr("Importing %1…").arg(QFileInfo(path).fileName()));
     onWorker<Library::Import>([path](Store &store) { return Library::importFile(store, path); },
                               [this](const Library::Import &result) {
+                                  // The import is one transaction, so a failed
+                                  // one added nothing to reload or fetch.
                                   if (!result.error.isEmpty()) {
                                       setStatus(tr("Cannot import: %1").arg(result.error), true);
                                       return;
@@ -552,13 +704,13 @@ void Backend::importFrom(const QUrl &url) {
 }
 
 void Backend::exportTo(const QUrl &url) {
-    if (!url.isLocalFile()) {
+    const QString path = localPath(url);
+    if (path.isEmpty()) {
         setStatus(tr("Only local files can be written"), true);
         return;
     }
     if (!m_storeOpen)
         return;
-    const QString path = url.toLocalFile();
     QString error;
     const QByteArray opml = Library::exportOpml(m_store, &error);
     if (!error.isEmpty() || !Library::writePrivately(path, opml, &error)) {

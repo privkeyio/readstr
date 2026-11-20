@@ -24,13 +24,50 @@ const QSet<QString> separating{"div",  "section", "article", "header", "footer",
                                "main", "aside",   "nav",     "address", "details", "summary", "dl",
                                "dt",   "dd",      "center",  "caption", "hgroup",  "body",   "html"};
 
+// Kept, but only one level deep and within the caps below.
+const QSet<QString> tableParts{"table", "tr", "td", "th"};
 // Kept tags that do not start a block of their own.
 const QSet<QString> inlines{"a", "code", "em", "i", "strong", "b"};
 
 constexpr qsizetype maxAltLength = 200;
+// Qt lays out a table inside a table in time exponential in the depth (21
+// levels took minutes), and every cell and row costs layout time, so tables
+// do not nest and stay this big; what does not fit becomes block text.
+constexpr int maxTableRows = 1000;
+constexpr int maxTableCells = 32;
+// A link's address is not text, so the output cap only notices it after the
+// fact; one this long is no link anyone follows.
+constexpr qsizetype maxUrlLength = 8 * 1024;
+// Qt's line layout slows down badly on long runs without a break opportunity
+// (a 512K-character word took seconds), so text gets a zero-width space after
+// this many characters without one. It shows as nothing.
+constexpr int maxRunLength = 80;
 
 bool isSpace(QChar character) {
     return character == ' ' || character == '\t' || character == '\n' || character == '\r' || character == '\f';
+}
+
+// A break opportunity for Qt's line layout; a no-break space is none.
+bool breaksLines(QChar character) {
+    return isSpace(character) || (character.isSpace() && character != QChar::Nbsp);
+}
+
+// Whether text[at] belongs to the character before it: a combining mark
+// (Thai, Lao, Khmer, and Burmese vowels and tones among them), a zero-width
+// joiner, a variation selector, or the second half of a surrogate pair.
+bool joinsPrevious(const QString &text, qsizetype at) {
+    const QChar character = text.at(at);
+    const char16_t code = character.unicode();
+    if (character.isLowSurrogate() || code == 0x200D || (code >= 0xFE00 && code <= 0xFE0F))
+        return true;
+    if (character.isHighSurrogate() && at + 1 < text.size() && text.at(at + 1).isLowSurrogate()) {
+        const char32_t point = QChar::surrogateToUcs4(character, text.at(at + 1));
+        // Supplementary variation selectors, and the emoji skin tone
+        // modifiers, which also join the emoji before them.
+        return (point >= 0xE0100 && point <= 0xE01EF) || (point >= 0x1F3FB && point <= 0x1F3FF)
+               || QChar::isMark(point);
+    }
+    return character.isMark();
 }
 
 bool isAsciiLetter(QChar character) {
@@ -58,12 +95,32 @@ public:
                 m_boundary = false;
                 break;
             }
-        QString escaped = decoded.toHtmlEscaped();
+        QString broken;
+        broken.reserve(decoded.size());
+        for (qsizetype k = 0; k < decoded.size(); ++k) {
+            const QChar character = decoded.at(k);
+            // Once the run is long enough the space goes before the next
+            // character that starts a cluster of its own, never inside one.
+            const QChar previous = k > 0 ? decoded.at(k - 1) : m_last;
+            if (m_run >= maxRunLength && !breaksLines(character) && !joinsPrevious(decoded, k)
+                && previous != QChar(0x200D)) {
+                broken += QChar(0x200B);
+                m_run = 0;
+            }
+            broken += character;
+            m_run = breaksLines(character) ? 0 : m_run + 1;
+        }
+        if (!decoded.isEmpty())
+            m_last = decoded.back();
+        QString escaped = broken.toHtmlEscaped();
         const qsizetype room = Sanitizer::maxOutputLength - m_out.size();
         if (escaped.size() > room) {
             // Escaping makes a character at most six ("&quot;").
-            decoded.truncate(qMax<qsizetype>(0, room / 6));
-            escaped = decoded.toHtmlEscaped();
+            broken.truncate(qMax<qsizetype>(0, room / 6));
+            // Never half of a surrogate pair.
+            if (!broken.isEmpty() && broken.back().isHighSurrogate())
+                broken.chop(1);
+            escaped = broken.toHtmlEscaped();
             m_full = true;
         }
         m_out += escaped;
@@ -75,12 +132,14 @@ public:
         const QString &name = tag.name;
         if (name == QLatin1String("br")) {
             m_out += QLatin1String("<br>");
-            m_boundary = true;
+            boundary();
         } else if (name == QLatin1String("hr")) {
             m_out += QLatin1String("<hr>");
-            m_boundary = true;
+            boundary();
         } else if (name == QLatin1String("img")) {
             image(tag);
+        } else if (tableParts.contains(name)) {
+            startTablePart(tag);
         } else if (separating.contains(name)) {
             separate();
         } else if (kept.contains(name)) {
@@ -92,7 +151,19 @@ public:
         if (name == QLatin1String("br")) {
             // Browsers read a stray </br> as <br>.
             m_out += QLatin1String("<br>");
-            m_boundary = true;
+            boundary();
+        } else if (!m_flatOpen.isEmpty() && tableParts.contains(name)) {
+            const qsizetype at = m_flatOpen.lastIndexOf(name);
+            if (at >= 0) {
+                m_flatOpen.resize(at);
+                separate();
+            } else {
+                // Not one of the flattened tables' own: it ends the open
+                // table's cell, row, or the table itself, and the tables
+                // left unclosed in there with it, as in a browser.
+                m_flatOpen.clear();
+                close(name);
+            }
         } else if (separating.contains(name)) {
             separate();
         } else if (kept.contains(name)) {
@@ -107,11 +178,61 @@ public:
     }
 
 private:
+    void boundary() {
+        m_boundary = true;
+        m_run = 0;
+    }
+
     void separate() {
         if (m_boundary)
             return;
         m_out += QLatin1String("<br>");
-        m_boundary = true;
+        boundary();
+    }
+
+    // A table inside an open table, a row or cell outside one, and rows and
+    // cells past the caps become separators, so only one level of table
+    // with bounded rows and cells ever reaches Qt.
+    void startTablePart(const Tag &tag) {
+        const QString &name = tag.name;
+        const qsizetype table = m_open.lastIndexOf(QLatin1String("table"));
+        if (!m_flatOpen.isEmpty() || (table >= 0 && name == QLatin1String("table"))) {
+            if (m_flatOpen.size() < Sanitizer::maxDepth)
+                m_flatOpen << name;
+            separate();
+            return;
+        }
+        if (name == QLatin1String("table")) {
+            m_rows = 0;
+            open(tag);
+            return;
+        }
+        if (table < 0) {
+            separate();
+            return;
+        }
+        if (name == QLatin1String("tr")) {
+            // A new row ends the one still open, as in a browser.
+            if (m_open.lastIndexOf(QLatin1String("tr")) > table)
+                close(QStringLiteral("tr"));
+            if (++m_rows > maxTableRows) {
+                separate();
+                return;
+            }
+            m_cells = 0;
+            open(tag);
+            return;
+        }
+        const qsizetype row = m_open.lastIndexOf(QLatin1String("tr"));
+        if (row < table || ++m_cells > maxTableCells) {
+            separate();
+            return;
+        }
+        // So does a new cell the one still open.
+        const qsizetype cell = qMax(m_open.lastIndexOf(QLatin1String("td")), m_open.lastIndexOf(QLatin1String("th")));
+        if (cell > row)
+            close(QString(m_open.at(cell)));
+        open(tag);
     }
 
     void open(const Tag &tag) {
@@ -121,33 +242,48 @@ private:
             // browser.
             if (m_open.contains(QLatin1String("a")))
                 close(QStringLiteral("a"));
-            const QUrl url = Sanitizer::webUrl(tag.href, m_base);
+            const QString url = linkTarget(tag.href);
             if (url.isEmpty())
                 return;
-            opening = QLatin1String("<a href=\"") + url.toString(QUrl::FullyEncoded).toHtmlEscaped()
-                      + QLatin1String("\">");
+            opening = QLatin1String("<a href=\"") + url.toHtmlEscaped() + QLatin1String("\">");
         }
         if (m_open.size() >= Sanitizer::maxDepth)
             return;
         m_open << tag.name;
         m_out += opening;
         if (!inlines.contains(tag.name))
-            m_boundary = true;
+            boundary();
     }
 
     void close(const QString &name) {
         const qsizetype at = m_open.lastIndexOf(name);
         if (at < 0)
             return;
-        while (m_open.size() > at)
-            m_out += QLatin1String("</") + m_open.takeLast() + '>';
-        m_boundary = true;
+        // Only the end of a block is a boundary: after "a<em>b</em>" a block
+        // that Qt does not get still needs its separator.
+        bool block = false;
+        while (m_open.size() > at) {
+            const QString closed = m_open.takeLast();
+            block |= !inlines.contains(closed);
+            m_out += QLatin1String("</") + closed + '>';
+        }
+        if (block)
+            boundary();
+        if (!m_open.contains(QLatin1String("table")))
+            m_flatOpen.clear();
+    }
+
+    // The checked, encoded address for a link or image, or empty.
+    QString linkTarget(const QString &href) const {
+        const QUrl url = Sanitizer::webUrl(href, m_base);
+        const QString encoded = url.isEmpty() ? QString() : url.toString(QUrl::FullyEncoded);
+        return encoded.size() > maxUrlLength ? QString() : encoded;
     }
 
     void image(const Tag &tag) {
-        QUrl url = Sanitizer::webUrl(tag.src, m_base);
+        QString url = linkTarget(tag.src);
         if (url.isEmpty())
-            url = Sanitizer::webUrl(tag.dataSrc, m_base);
+            url = linkTarget(tag.dataSrc);
         if (url.isEmpty())
             return;
         QString alt = tag.alt.simplified();
@@ -160,8 +296,8 @@ private:
         if (m_open.contains(QLatin1String("a")))
             m_out += label.toHtmlEscaped();
         else
-            m_out += QLatin1String("<a href=\"") + url.toString(QUrl::FullyEncoded).toHtmlEscaped()
-                     + QLatin1String("\">") + label.toHtmlEscaped() + QLatin1String("</a>");
+            m_out += QLatin1String("<a href=\"") + url.toHtmlEscaped() + QLatin1String("\">") + label.toHtmlEscaped()
+                     + QLatin1String("</a>");
         m_boundary = false;
     }
 
@@ -170,6 +306,14 @@ private:
     QStringList m_open;
     bool m_boundary = true;
     bool m_full = false;
+    // Characters since the last line break opportunity, and the last one.
+    int m_run = 0;
+    QChar m_last;
+    // The table parts opened inside the open table, which are shown flat;
+    // rows of the open table, and cells of its open row.
+    QStringList m_flatOpen;
+    int m_rows = 0;
+    int m_cells = 0;
 };
 
 // Reads the tag starting at html[i] == '<' (a start or end tag whose name

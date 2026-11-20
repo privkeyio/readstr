@@ -1,4 +1,9 @@
+#include <QAbstractTextDocumentLayout>
 #include <QBuffer>
+#include <QDBusMessage>
+#include <QQmlComponent>
+#include <QQmlEngine>
+#include <QTextDocument>
 #include <QDir>
 #include <QDirIterator>
 #include <QElapsedTimer>
@@ -17,8 +22,10 @@
 #include <QtTest>
 #include <atomic>
 #include <cstdio>
+#include <climits>
 #include <optional>
 #include <sys/stat.h>
+#include <thread>
 
 #include "articlemodel.h"
 #include "backend.h"
@@ -28,8 +35,10 @@
 #include "feedparser.h"
 #include "fetcher.h"
 #include "filepicker.h"
+#include "localnetwork.h"
 #include "opml.h"
 #include "paths.h"
+#include "portalfilepicker.h"
 #include "sanitizer.h"
 #include "sourcemodel.h"
 #include "store.h"
@@ -56,6 +65,37 @@ public:
         else if (!saveUrl.isEmpty())
             emit saveSelected(saveUrl);
     }
+};
+
+// The portal picker with its D-Bus side replaced, so tests can play the
+// portal's replies and Response signals in any order.
+class FakePortalPicker : public PortalFilePicker {
+public:
+    using PortalFilePicker::replied;
+    using PortalFilePicker::responded;
+
+    bool bus = true;
+    QStringList listening, closed;
+    QList<QDBusMessage> calls;
+    QList<int> generations;
+
+    QString requestPath(int call) const {
+        return "/org/freedesktop/portal/desktop/request/1_42/"
+               + calls.at(call).arguments().at(2).toMap().value("handle_token").toString();
+    }
+
+protected:
+    QString senderName() const override { return bus ? QStringLiteral(":1.42") : QString(); }
+    bool listen(const QString &path) override {
+        listening << path;
+        return true;
+    }
+    void stopListening(const QString &path) override { listening.removeOne(path); }
+    void send(const QDBusMessage &call, int generation) override {
+        calls << call;
+        generations << generation;
+    }
+    void closeRequest(const QString &path) override { closed << path; }
 };
 
 class ReadstrTests : public QObject {
@@ -1687,8 +1727,9 @@ private slots:
                                        "title='t'>l</a>",
                                        base),
                  QString("<a href=\"https://a.example/x\">l</a>"));
-        QCOMPARE(Sanitizer::toRichText("<td background=\"https://t.example/bg.png\">c</td>", base),
-                 QString("<td>c</td>"));
+        QCOMPARE(Sanitizer::toRichText("<table><tr><td background=\"https://t.example/bg.png\">c</td></tr></table>",
+                                       base),
+                 QString("<table><tr><td>c</td></tr></table>"));
     }
 
     void sanitizerDropsDangerousElementsWithTheirContent_data()
@@ -1964,7 +2005,8 @@ private slots:
         QVERIFY(backend.articleRead());
         QVERIFY2(!backend.articleHtml().contains("script"), qPrintable(backend.articleHtml()));
         QVERIFY(backend.articleHtml().contains("<strong>full</strong>"));
-        QCOMPARE(backend.sources()->data(backend.sources()->index(0), SourceModel::CountRole).toInt(), 3);
+        // Saved on the worker; the count follows once it is.
+        QTRY_COMPARE(backend.sources()->data(backend.sources()->index(0), SourceModel::CountRole).toInt(), 3);
         backend.moveArticle(1);
         QCOMPARE(backend.articleTitle(), QString("Second A"));
         backend.moveArticle(10);
@@ -1975,10 +2017,7 @@ private slots:
         Store store;
         QVERIFY(store.open());
         QCOMPARE(store.articles({}).size(), 5);
-        int unread = 0;
-        for (const Article &article : store.articles({}))
-            unread += !article.read;
-        QCOMPARE(unread, 1);
+        QTRY_COMPARE(store.counts()->unread, 1);
 
         backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Unread));
         QCOMPARE(backend.sourceKind(), QString("unread"));
@@ -2018,9 +2057,9 @@ private slots:
         QVERIFY(!backend.articleRead());
         Store store;
         QVERIFY(store.open());
-        QVERIFY(store.article(id)->starred);
-        QVERIFY(!store.article(id)->read);
-        QCOMPARE(backend.sources()->data(backend.sources()->index(2), SourceModel::CountRole).toInt(), 1);
+        QTRY_VERIFY(store.article(id)->starred);
+        QTRY_VERIFY(!store.article(id)->read);
+        QTRY_COMPARE(backend.sources()->data(backend.sources()->index(2), SourceModel::CountRole).toInt(), 1);
         QVERIFY(backend.articles()->at(0).starred);
 
         backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Starred));
@@ -2029,7 +2068,7 @@ private slots:
         QVERIFY(!backend.hasArticle());
         backend.selectArticle(0);
         backend.toggleStar();
-        QVERIFY(!store.article(id)->starred);
+        QTRY_VERIFY(!store.article(id)->starred);
 
         // Marking a feed read leaves the other feed, and anything newer than
         // the list, alone.
@@ -2039,7 +2078,7 @@ private slots:
         late.title = "Late";
         QCOMPARE(store.saveItems(first, {late}), 1);
         backend.markViewRead();
-        QVERIFY(backend.status().contains("articles read"));
+        QTRY_VERIFY(backend.status().contains("articles read"));
         for (const Article &article : store.articles({}))
             QCOMPARE(article.read, article.feedId == first ? article.guid != "late" : article.guid == "second-b");
         QCOMPARE(backend.articles()->count(), 4);
@@ -2120,11 +2159,11 @@ private slots:
         backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Feed, first));
         backend.selectArticle(0);
         QVERIFY(backend.unsubscribe(first));
-        QCOMPARE(backend.feedCount(), 1);
+        QTRY_COMPARE(backend.feedCount(), 1);
         QCOMPARE(backend.sourceKind(), QString("all"));
         QVERIFY(!backend.hasArticle());
         QCOMPARE(backend.articles()->count(), 2);
-        QVERIFY(backend.status().contains("First"));
+        QTRY_VERIFY(backend.status().contains("First"));
         QVERIFY(!backend.unsubscribe(first));
         QVERIFY(backend.statusError());
     }
@@ -2284,6 +2323,810 @@ private slots:
         store.saveItems(feed, {two});
         QVERIFY(store.articles(light).at(0).content.isEmpty());
         QCOMPARE(store.article(counts.lastId)->content, QString("<p>body</p>"));
+    }
+
+    // Review and stress-test regressions
+
+    // Qt lays out nested tables in time exponential in their depth: 21
+    // levels from a 316-byte article froze the window for minutes.
+    void sanitizerKeepsTablesFlatAndBounded()
+    {
+        const QUrl base("https://blog.example.com/");
+        auto layoutMs = [](const QString &html) {
+            QElapsedTimer timer;
+            timer.start();
+            QTextDocument document;
+            document.setTextWidth(800);
+            document.setHtml(html);
+            document.documentLayout()->documentSize();
+            return timer.elapsed();
+        };
+        for (int depth : {16, 21, 64}) {
+            const QString out = Sanitizer::toRichText(QString("<table><tr><td>").repeated(depth) + "x", base);
+            QCOMPARE(out, QString("<table><tr><td>x</td></tr></table>"));
+            const qint64 ms = layoutMs(out);
+            QVERIFY2(ms < 500, qPrintable(QString("depth %1: %2 ms").arg(depth).arg(ms)));
+        }
+        QCOMPARE(Sanitizer::toRichText("<table><tr><td>a<table><tr><td>b</td><td>c</td></tr></table>d</td></tr>"
+                                       "<tr><td>e</td></tr></table>",
+                                       base),
+                 QString("<table><tr><td>a<br>b<br>c<br>d</td></tr><tr><td>e</td></tr></table>"));
+        // An inner table left open ends with the cell around it.
+        QCOMPARE(Sanitizer::toRichText("<table><tr><td><table>x</td></tr><tr><td>y</td></tr></table><p>after</p>"
+                                       "<table><tr><td>z</td></tr></table>",
+                                       base),
+                 QString("<table><tr><td>x</td></tr><tr><td>y</td></tr></table><p>after</p>"
+                         "<table><tr><td>z</td></tr></table>"));
+        // Rows and cells outside a table are only separators.
+        QCOMPARE(Sanitizer::toRichText("a<td>b<tr>c", base), QString("a<br>b<br>c"));
+
+        const QString wide =
+            Sanitizer::toRichText("<table><tr>" + QString("<td>x</td>").repeated(40) + "</tr></table>", base);
+        QCOMPARE(wide.count("<td>"), 32);
+        const QString tall =
+            Sanitizer::toRichText("<table>" + QString("<tr><td>x</td></tr>").repeated(1100) + "</table>", base);
+        QCOMPARE(tall.count("<tr>"), 1000);
+        const QString largest = Sanitizer::toRichText("<table><tr>" + QString("<td>x</td>").repeated(24000) + "</tr>"
+                                                           + QString("<tr><td>x</td></tr>").repeated(14000) + "</table>",
+                                                       base);
+        QCOMPARE(largest.count("<table>"), 1);
+        const qint64 ms = layoutMs(largest);
+        QVERIFY2(ms < 5000, qPrintable(QString("%1 ms").arg(ms)));
+    }
+
+    // Qt's line layout crawls on long runs without a break opportunity.
+    void sanitizerBreaksLongRuns()
+    {
+        const QUrl base("https://blog.example.com/");
+        const QString out = Sanitizer::toRichText(QString(500, 'x'), base);
+        QCOMPARE(out.count(QChar(0x200B)), 6);
+        QCOMPARE(out.indexOf(QChar(0x200B)), 80);
+        QCOMPARE(Sanitizer::toRichText(QString(79, 'y') + " " + QString(79, 'y'), base).count(QChar(0x200B)), 0);
+        // Never inside a cluster: a Thai vowel stays on its consonant, and
+        // an emoji sequence stays whole, but long runs of either still break.
+        const QString thai = QString(80, QChar(0x0E01)) + QChar(0x0E31) + QString(10, QChar(0x0E01));
+        const QString thaiOut = Sanitizer::toRichText(thai, base);
+        QVERIFY(!thaiOut.contains(QString(QChar(0x200B)) + QChar(0x0E31)));
+        QCOMPARE(thaiOut.count(QChar(0x200B)), 1);
+        QCOMPARE(thaiOut.indexOf(QChar(0x200B)), 81);
+        const QString family = QString::fromUtf8("\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x91\xA7\xEF\xB8\x8F");
+        const QString emojiOut = Sanitizer::toRichText(family.repeated(40), base);
+        QVERIFY(emojiOut.count(QChar(0x200B)) > 0);
+        for (const QString &part : emojiOut.split(QChar(0x200B))) {
+            QVERIFY(!part.isEmpty() && !part.front().isLowSurrogate() && part.front() != QChar(0x200D)
+                    && part.front() != QChar(0xFE0F));
+            QVERIFY(!part.endsWith(QChar(0x200D)));
+        }
+        // The address of a link is never touched.
+        const QString link = "https://a.example/" + QString(200, 'p');
+        QVERIFY(Sanitizer::toRichText("<a href=\"" + link + "\">t</a>", base).contains("href=\"" + link + "\""));
+
+        for (const QString &input : {QString(Sanitizer::maxInputLength, 'x'),
+                                     ("<td>" + QString(1000, 'x') + " ").repeated(500),
+                                     QString("&#99999999;").repeated(45000)}) {
+            QElapsedTimer timer;
+            timer.start();
+            QTextDocument document;
+            document.setTextWidth(800);
+            document.setHtml(Sanitizer::toRichText(input, base));
+            document.documentLayout()->documentSize();
+            QVERIFY2(timer.elapsed() < 2000, qPrintable(QString("%1 ms").arg(timer.elapsed())));
+        }
+    }
+
+    // Closing an inline tag is no block boundary, so text after it still
+    // gets its separator before a block Qt does not get.
+    void sanitizerSeparatesBlocksAfterInlineText()
+    {
+        const QUrl base("https://blog.example.com/");
+        QCOMPARE(Sanitizer::toRichText("text<em>x</em><div>y</div>", base), QString("text<em>x</em><br>y<br>"));
+        QCOMPARE(Sanitizer::toRichText("<p><b>a</b></p><div>b</div>", base), QString("<p><b>a</b></p>b<br>"));
+        QCOMPARE(Sanitizer::toRichText("<p><b>a</b></p><p>b</p>", base), QString("<p><b>a</b></p><p>b</p>"));
+        QCOMPARE(Sanitizer::toRichText("text<em>x</em><p>y</p>", base), QString("text<em>x</em><p>y</p>"));
+    }
+
+    void sanitizerNeverSplitsASurrogatePairOrKeepsHugeLinks()
+    {
+        const QUrl base("https://blog.example.com/");
+        // Escaped, this text is past the output cap, which then keeps its
+        // first maxOutputLength / 6 characters: up to the emoji's first half.
+        const qsizetype cut = Sanitizer::maxOutputLength / 6;
+        QString input = QString("& ").repeated((cut - 1) / 2) + "&";
+        QCOMPARE(input.size(), cut - 1);
+        input += QString::fromUtf8("\xF0\x9F\x98\x80") + QString("& ").repeated(100000);
+        const QString out = Sanitizer::toRichText(input, base);
+        QVERIFY(out.endsWith(QString("<p>") + QChar(0x2026) + "</p>"));
+        QVERIFY(QStringView(out).isValidUtf16());
+        QVERIFY(!out.contains(QChar(0xD83D)));
+
+        const QString huge = "https://a.example/" + QString(9000, 'p');
+        QCOMPARE(Sanitizer::toRichText("<a href=\"" + huge + "\">words</a><img src=\"" + huge + "\">", base),
+                 QString("words"));
+    }
+
+    void bidiFormattingNeverReachesTheWindow()
+    {
+        QCOMPARE(FeedParser::cleanText(QString(u"a\u202eb\u2066c\nd\u200fe\u061cf")), QString("abc def"));
+        const QByteArray rss = "<rss version=\"2.0\"><channel><title>Feed&#x202e;txt</title><item><guid>1</guid>"
+                               "<title>Item&#x2067;&#x061c;one</title></item></channel></rss>";
+        const auto parsed = FeedParser::parse(rss, QUrl("https://a.example/"));
+        QVERIFY(parsed);
+        QCOMPARE(parsed->title, QString("Feedtxt"));
+        QCOMPARE(parsed->items.at(0).title, QString("Itemone"));
+        // Names from OPML are stored as written but shown clean.
+        SourceModel model;
+        Feed feed;
+        feed.id = 1;
+        feed.title = QString(u"Evil\u202etxt\nmore");
+        feed.category = QString(u"Fold\u2066er");
+        model.setLibrary({feed}, {});
+        const int row = model.rowOf(SourceModel::Kind::Feed, 1);
+        QCOMPARE(model.data(model.index(row), SourceModel::TitleRole).toString(), QString("Eviltxt more"));
+        QCOMPARE(model.data(model.index(row), SourceModel::CategoryRole).toString(), QString("Folder"));
+    }
+
+    void modelsAndBackendTakeExtremeSteps()
+    {
+        SourceModel sources;
+        Feed feed;
+        feed.id = 1;
+        sources.setLibrary({feed}, {});
+        QCOMPARE(sources.step(1, INT_MIN), 0);
+        QCOMPARE(sources.step(0, INT_MAX), sources.count() - 1);
+        ArticleModel articles;
+        Article article;
+        article.id = 1;
+        articles.setArticles({article});
+        QCOMPARE(articles.nextUnread(INT_MAX), -1);
+        QCOMPARE(articles.nextUnread(-1), 0);
+
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        Backend backend;
+        backend.moveArticle(1);
+        backend.moveArticle(INT_MAX);
+        QCOMPARE(backend.articleIndex(), 4);
+        backend.moveArticle(INT_MIN);
+        QCOMPARE(backend.articleIndex(), 0);
+        backend.moveSource(INT_MIN);
+        QCOMPARE(backend.sourceKind(), QString("all"));
+    }
+
+    // A failure part way through an import leaves nothing behind.
+    void importIsAllOrNothing()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/library.db"));
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", "importIsAllOrNothing");
+        db.setDatabaseName(dir.path() + "/library.db");
+        QVERIFY(db.open());
+        QVERIFY(QSqlQuery(db).exec("CREATE TRIGGER refuse BEFORE INSERT ON feeds WHEN NEW.url LIKE '%refused%'"
+                                   " BEGIN SELECT RAISE(ABORT, 'refused by the test'); END"));
+        db.close();
+        db = QSqlDatabase();
+        QSqlDatabase::removeDatabase("importIsAllOrNothing");
+
+        const QList<Opml::Outline> outlines{{"A", "https://a.example/feed", {}, {}, {}},
+                                            {"B", "https://b.example/refused", {}, "Folder", {}},
+                                            {"C", "https://c.example/feed", {}, {}, {}}};
+        const Library::Import result = Library::importOutlines(store, outlines);
+        QVERIFY2(result.error.contains("refused by the test"), qPrintable(result.error));
+        QCOMPARE(result.added, 0);
+        QVERIFY(store.feeds().isEmpty());
+        QVERIFY(store.lastError().isEmpty());
+        // The store still works after the rollback.
+        QCOMPARE(Library::importOutlines(store, {outlines.at(0), outlines.at(2)}).added, 2);
+    }
+
+    void cliRefusesABadImportBeforeCreatingTheLibrary()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", (dir.path() + "/home").toUtf8());
+        QString out, err;
+        QCOMPARE(run({"import", dir.path() + "/missing.opml"}, out, err), 1);
+        QVERIFY2(err.contains("cannot read"), qPrintable(err));
+        write(dir.path() + "/bad.opml", "<opml><body><outline");
+        QCOMPARE(run({"import", dir.path() + "/bad.opml"}, out, err), 1);
+        QVERIFY(!QFile::exists(dir.path() + "/home"));
+    }
+
+    // Slots are the Fetcher's, not each batch's.
+    void fetcherSharesItsSlotsAcrossBatches()
+    {
+        FakeHttpServer server;
+        QList<FetchRequest> first, second;
+        for (int i = 0; i < 6; ++i) {
+            const QByteArray path = "/feed" + QByteArray::number(i);
+            server.route(path, [path](const FakeHttpServer::Request &) {
+                FakeHttpServer::Response response{200, {}, path};
+                response.delayMs = 150;
+                return response;
+            });
+            (i < 3 ? first : second) << FetchRequest{server.url(QString::fromLatin1(path)), {}, {}};
+        }
+        Fetcher fetcher;
+        fetcher.setLimits({1024 * 1024, 5000, 5, 2});
+        int done = 0;
+        fetcher.fetchEachLater(first, [](qsizetype, const FetchResult &) {}, [&done] { ++done; });
+        fetcher.fetchEachLater(second, [](qsizetype, const FetchResult &) {}, [&done] { ++done; });
+        QTRY_COMPARE(done, 2);
+        QCOMPARE(server.requests.size(), 6);
+        QCOMPARE(server.peakInFlight, 2);
+
+        // A held slot stays taken until it is released.
+        QList<Fetcher::Release> held;
+        bool finished = false;
+        fetcher.fetchEachHeld(
+            first, [&held](qsizetype, const FetchResult &, const Fetcher::Release &release) { held << release; },
+            [&finished] { finished = true; });
+        QTRY_COMPARE(held.size(), 2);
+        QTest::qWait(400);
+        QCOMPARE(held.size(), 2);
+        QCOMPARE(server.requests.size(), 8);
+        held.at(0)();
+        held.at(0)();
+        QTRY_COMPARE(held.size(), 3);
+        QVERIFY(!finished);
+        held.at(1)();
+        held.at(2)();
+        QTRY_VERIFY(finished);
+    }
+
+    // fetchEach() calls the caller's own callable, not a copy of it.
+    void fetcherCallsTheCallersCallback()
+    {
+        FakeHttpServer server;
+        server.serve("/a", "a");
+        Fetcher fetcher;
+        int seen = 0;
+        const std::function<void(qsizetype, const FetchResult &)> each =
+            [count = 0, &seen](qsizetype, const FetchResult &) mutable { seen = ++count; };
+        fetcher.fetchEach({{server.url("/a"), {}, {}}, {server.url("/a"), {}, {}}}, each);
+        QCOMPARE(seen, 2);
+        each(0, {});
+        QCOMPARE(seen, 3);
+    }
+
+    // While the worker cannot save (another process holds the write lock),
+    // the refresh stops fetching instead of piling bodies up for it.
+    void backendBoundsBodiesWaitingForTheWorker()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        {
+            Store store;
+            QVERIFY(store.open());
+            for (int i = 0; i < 12; ++i) {
+                const QByteArray path = "/f" + QByteArray::number(i) + ".xml";
+                server.serve(path, fixture("rss2.xml"));
+                QVERIFY(store.addFeed(server.url(QString::fromLatin1(path)).toString(), QString("F%1").arg(i)));
+            }
+        }
+        Backend backend;
+        backend.setFetchLimits({1024 * 1024, 30000, 5, 2});
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", "locker");
+            db.setDatabaseName(Paths::databaseFile());
+            QVERIFY(db.open());
+            QVERIFY(QSqlQuery(db).exec("BEGIN IMMEDIATE"));
+            backend.refreshAll();
+            QTest::qWait(1200);
+            QCOMPARE(server.requests.size(), 2);
+            QVERIFY(QSqlQuery(db).exec("COMMIT"));
+            db.close();
+        }
+        QSqlDatabase::removeDatabase("locker");
+        QVERIFY(finished.wait(30000));
+        QCOMPARE(server.requests.size(), 12);
+        QCOMPARE(backend.refreshDone(), 12);
+        QVERIFY2(!backend.statusError(), qPrintable(backend.status()));
+    }
+
+    // Flags change at once even while a refresh holds the library's write
+    // lock, and land once it is free.
+    void backendNeverWaitsToChangeFlags()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        Backend backend;
+        qint64 id = 0;
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", "locker");
+            db.setDatabaseName(Paths::databaseFile());
+            QVERIFY(db.open());
+            QVERIFY(QSqlQuery(db).exec("BEGIN IMMEDIATE"));
+            QElapsedTimer timer;
+            timer.start();
+            backend.selectArticle(0);
+            id = backend.articleId();
+            backend.toggleStar();
+            QVERIFY2(timer.elapsed() < 1000, qPrintable(QString::number(timer.elapsed())));
+            QVERIFY(backend.articleRead() && backend.articleStarred());
+            // A reload meanwhile shows what is about to be saved.
+            backend.selectSource(0);
+            QCOMPARE(backend.articles()->at(0).id, id);
+            QVERIFY(backend.articles()->at(0).read && backend.articles()->at(0).starred);
+            QVERIFY(QSqlQuery(db).exec("COMMIT"));
+            db.close();
+        }
+        QSqlDatabase::removeDatabase("locker");
+        Store store;
+        QVERIFY(store.open());
+        QTRY_VERIFY(store.article(id)->starred && store.article(id)->read);
+        QTRY_COMPARE(backend.sources()->data(backend.sources()->index(2), SourceModel::CountRole).toInt(), 1);
+        QVERIFY(!backend.statusError());
+    }
+
+    // The selection follows its source when another process moves rows.
+    void backendKeepsTheSelectedSourceWhenRowsMove()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        Backend backend;
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Feed, second));
+        const int before = backend.sourceIndex();
+        Store other;
+        QVERIFY(other.open());
+        QVERIFY(other.addFeed("https://aardvark.example.com/feed", "Aardvark"));
+        backend.selectArticle(0);
+        QTRY_COMPARE(backend.feedCount(), 3);
+        QCOMPARE(backend.selectedFeedId(), second);
+        QCOMPARE(backend.sourceIndex(), before + 1);
+        QCOMPARE(backend.sourceIndex(), backend.sources()->rowOf(SourceModel::Kind::Feed, second));
+
+        // The selected feed removed elsewhere: back to All articles.
+        QVERIFY(other.removeFeed(second));
+        backend.markViewRead();
+        QTRY_COMPARE(backend.sourceKind(), QString("all"));
+        QCOMPARE(backend.articles()->count(), 3);
+        QVERIFY(!backend.hasArticle());
+    }
+
+    // A read article stays in Unread, in its place, until the view changes.
+    void backendKeepsTheOpenArticleInItsView()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        Backend backend;
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Unread));
+        QCOMPARE(backend.articles()->count(), 4);
+        backend.selectArticle(2);
+        QCOMPARE(backend.articleTitle(), QString("Older"));
+        Store store;
+        QVERIFY(store.open());
+        QTRY_COMPARE(store.counts()->unread, 3);
+        // A reload in the background (here, an unsubscribe).
+        QVERIFY(backend.unsubscribe(second));
+        QTRY_COMPARE(backend.feedCount(), 1);
+        QCOMPARE(backend.articles()->count(), 3);
+        QCOMPARE(backend.articleIndex(), 1);
+        QCOMPARE(backend.articles()->at(1).title, QString("Older"));
+        backend.moveArticle(1);
+        QCOMPARE(backend.articleTitle(), QString("Oldest"));
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::All));
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Unread));
+        QTRY_COMPARE(store.counts()->unread, 1);
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::All));
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Unread));
+        QCOMPARE(backend.articles()->count(), 1);
+    }
+
+    // A refresh that changes the open article shows the new text.
+    void backendRefreshesTheOpenArticle()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        QByteArray text = "Old words";
+        server.route("/feed.xml", [&text](const FakeHttpServer::Request &) {
+            return FakeHttpServer::Response{200,
+                                            {{"Content-Type", "application/rss+xml"}},
+                                            "<rss version=\"2.0\"><channel><title>T</title><item><guid>g</guid>"
+                                            "<title>Item</title><link>https://a.example/item</link><description>"
+                                                + text + "</description></item></channel></rss>"};
+        });
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.addFeed(server.url("/feed.xml").toString(), "Feed"));
+        }
+        Backend backend;
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        backend.refreshAll();
+        QVERIFY(finished.wait(20000));
+        backend.selectArticle(0);
+        const qint64 id = backend.articleId();
+        QVERIFY2(backend.articleHtml().contains("Old words"), qPrintable(backend.articleHtml()));
+        text = "New words";
+        backend.refreshAll();
+        QVERIFY(finished.wait(20000));
+        QCOMPARE(backend.articleId(), id);
+        QVERIFY2(backend.articleHtml().contains("New words"), qPrintable(backend.articleHtml()));
+    }
+
+    void backendRetriesARefreshThatCannotReadTheLibrary()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        Backend backend;
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", "breaker");
+            db.setDatabaseName(Paths::databaseFile());
+            QVERIFY(db.open());
+            QVERIFY(QSqlQuery(db).exec("ALTER TABLE feeds RENAME TO feeds_gone"));
+            db.close();
+        }
+        QSqlDatabase::removeDatabase("breaker");
+        backend.startAutoRefresh();
+        QVERIFY(backend.statusError());
+        QVERIFY(backend.nextAutoRefreshMs() > 0);
+    }
+
+    // An unsubscribe that races the refresh fetching the feed reports
+    // nothing and leaves no articles without a feed.
+    void backendUnsubscribesDuringARefresh()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.route("/slow.xml", [](const FakeHttpServer::Request &) {
+            FakeHttpServer::Response response{200, {{"Content-Type", "application/rss+xml"}}, fixture("rss2.xml")};
+            response.delayMs = 800;
+            return response;
+        });
+        server.serve("/fast.xml", fixture("atom.xml"), "application/atom+xml");
+        qint64 slow = 0;
+        {
+            Store store;
+            QVERIFY(store.open());
+            slow = store.addFeed(server.url("/slow.xml").toString(), "Slow");
+            QVERIFY(store.addFeed(server.url("/fast.xml").toString(), "Fast"));
+        }
+        Backend backend;
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        backend.refreshAll();
+        QVERIFY(backend.unsubscribe(slow));
+        QVERIFY(finished.wait(20000));
+        QTRY_COMPARE(backend.feedCount(), 1);
+        QVERIFY2(!backend.statusError(), qPrintable(backend.status()));
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", "orphans");
+        db.setDatabaseName(Paths::databaseFile());
+        QVERIFY(db.open());
+        QSqlQuery query(db);
+        QVERIFY(query.exec("SELECT COUNT(*) FROM items WHERE feed_id NOT IN (SELECT id FROM feeds)") && query.next());
+        QCOMPARE(query.value(0).toInt(), 0);
+        query = QSqlQuery();
+        db.close();
+        db = QSqlDatabase();
+        QSqlDatabase::removeDatabase("orphans");
+    }
+
+    // An unsubscribe hides the feed at once, takes a repeat quietly, and
+    // gives the feed back, errors and all, when the delete fails.
+    void backendUnsubscribesOptimistically()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        qint64 kept = 0, gone = 0;
+        {
+            Store store;
+            QVERIFY(store.open());
+            kept = store.addFeed(server.url("/kept.xml").toString(), "Kept");
+            gone = store.addFeed(server.url("/gone.xml").toString(), "Gone");
+        }
+        Backend backend;
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", "locker");
+            db.setDatabaseName(Paths::databaseFile());
+            QVERIFY(db.open());
+            QVERIFY(QSqlQuery(db).exec("BEGIN IMMEDIATE"));
+            QVERIFY(backend.unsubscribe(gone));
+            QCOMPARE(backend.feedCount(), 1);
+            QCOMPARE(backend.sources()->rowOf(SourceModel::Kind::Feed, gone), -1);
+            QVERIFY(backend.unsubscribe(gone));
+            QVERIFY(!backend.statusError());
+            QVERIFY(QSqlQuery(db).exec("COMMIT"));
+            QTRY_VERIFY(backend.status().startsWith("Unsubscribed from Gone"));
+            QVERIFY(!backend.statusError());
+            QCOMPARE(backend.feedCount(), 1);
+            QVERIFY(QSqlQuery(db).exec("CREATE TRIGGER keep BEFORE DELETE ON feeds"
+                                       " BEGIN SELECT RAISE(ABORT, 'kept by the test'); END"));
+            db.close();
+        }
+        QSqlDatabase::removeDatabase("locker");
+
+        QVERIFY(backend.unsubscribe(kept));
+        QCOMPARE(backend.feedCount(), 0);
+        QTRY_VERIFY(backend.statusError());
+        QVERIFY2(backend.status().contains("kept by the test"), qPrintable(backend.status()));
+        QCOMPARE(backend.feedCount(), 1);
+        // Its refresh errors show again.
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        backend.refreshAll();
+        QVERIFY(finished.wait(20000));
+        QVERIFY2(backend.statusError() && backend.status().contains("HTTP 404"), qPrintable(backend.status()));
+    }
+
+    // Feeds imported while a refresh runs are fetched right after it.
+    void backendFetchesFeedsImportedDuringARefresh()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", (dir.path() + "/home").toUtf8());
+        FakeHttpServer server;
+        server.route("/slow.xml", [](const FakeHttpServer::Request &) {
+            FakeHttpServer::Response response{200, {{"Content-Type", "application/rss+xml"}}, fixture("rss2.xml")};
+            response.delayMs = 800;
+            return response;
+        });
+        server.serve("/new.xml", fixture("atom.xml"), "application/atom+xml");
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.addFeed(server.url("/slow.xml").toString(), "Slow"));
+        }
+        write(dir.path() + "/in.opml", "<opml><body><outline type=\"rss\" text=\"New\" xmlUrl=\""
+                                           + server.url("/new.xml").toString().toUtf8() + "\"/></body></opml>");
+        FakePicker picker;
+        Backend backend(&picker);
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        QSignalSpy imported(&backend, &Backend::imported);
+        backend.refreshAll();
+        picker.openUrl = QUrl::fromLocalFile(dir.path() + "/in.opml");
+        backend.importOpml();
+        QVERIFY(imported.wait(20000));
+        QVERIFY(backend.refreshing());
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 2, 20000);
+        QCOMPARE(backend.feedCount(), 2);
+        QCOMPARE(backend.articles()->count(), 4 + 3);
+    }
+
+    // Closing the window with a fetch out and work queued on the worker:
+    // nothing runs after, and the user's own changes are still saved.
+    void backendClosesWithWorkInFlight()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.serve("/fast.xml", fixture("atom.xml"), "application/atom+xml");
+        server.route("/slow.xml", [](const FakeHttpServer::Request &) {
+            FakeHttpServer::Response response{200, {{"Content-Type", "application/rss+xml"}}, fixture("rss2.xml")};
+            response.delayMs = 2000;
+            return response;
+        });
+        {
+            Store store;
+            QVERIFY(store.open());
+            const qint64 fast = store.addFeed(server.url("/fast.xml").toString(), "Fast");
+            QVERIFY(store.addFeed(server.url("/slow.xml").toString(), "Slow"));
+            ParsedItem item;
+            item.guid = item.title = "kept";
+            QCOMPARE(store.saveItems(fast, {item}), 1);
+        }
+        auto backend = std::make_unique<Backend>();
+        // A writer in another thread holds the lock for a while, so the
+        // fast feed's save blocks the worker and the flags queue behind it.
+        std::atomic<bool> locked = false;
+        std::thread locker([&locked, path = Paths::databaseFile()] {
+            {
+                QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", "threadLocker");
+                db.setDatabaseName(path);
+                db.open();
+                QSqlQuery(db).exec("BEGIN IMMEDIATE");
+                locked = true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                QSqlQuery(db).exec("COMMIT");
+                db.close();
+            }
+            QSqlDatabase::removeDatabase("threadLocker");
+        });
+        QTRY_VERIFY(locked.load());
+        backend->refreshAll();
+        QTRY_VERIFY(server.requests.size() == 2);
+        QTest::qWait(300);
+        backend->selectArticle(0);
+        const qint64 id = backend->articleId();
+        backend->toggleStar();
+        QVERIFY(id);
+        backend.reset();
+        locker.join();
+        // The slow answer arrives after the window has gone.
+        QTest::qWait(2500);
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.article(id)->read);
+        QVERIFY(store.article(id)->starred);
+    }
+
+    void backendStripsCredentialsAndOpensOnlyLocalFiles()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        {
+            Store store;
+            QVERIFY(store.open());
+            const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+            ParsedItem item;
+            item.guid = item.title = "one";
+            item.url = "https://me:secret@a.example.com/one";
+            QCOMPARE(store.saveItems(feed, {item}), 1);
+        }
+        FakePicker picker;
+        Backend backend(&picker);
+        QList<QUrl> opened;
+        backend.setUrlOpener([&opened](const QUrl &url) {
+            opened << url;
+            return true;
+        });
+        backend.selectArticle(0);
+        QCOMPARE(backend.articleUrl(), QString("https://a.example.com/one"));
+        backend.openOriginal();
+        QVERIFY(backend.openLink("http://user@b.example.org/x"));
+        QCOMPARE(opened, (QList<QUrl>{QUrl("https://a.example.com/one"), QUrl("http://b.example.org/x")}));
+
+        backend.importFrom(QUrl("file://remotehost/tmp/in.opml"));
+        QVERIFY(backend.status().contains("Only local files"));
+        backend.exportTo(QUrl("file://remotehost/tmp/out.opml"));
+        QVERIFY(backend.status().contains("Only local files"));
+        backend.exportTo(QUrl("file://localhost" + dir.path() + "/out.opml"));
+        QVERIFY2(!backend.statusError(), qPrintable(backend.status()));
+        QVERIFY(QFile::exists(dir.path() + "/out.opml"));
+    }
+
+    void portalPickerFollowsItsRequest()
+    {
+        const QVariantMap chosen{{"uris", QStringList{"file:///home/me/feeds.opml"}}};
+        FakePortalPicker picker;
+        QSignalSpy opened(&picker, &FilePicker::openSelected);
+        QSignalSpy saved(&picker, &FilePicker::saveSelected);
+        QSignalSpy failed(&picker, &FilePicker::failed);
+
+        // Listening at the predicted path before the call goes out.
+        picker.openOpml();
+        QCOMPARE(picker.calls.size(), 1);
+        QCOMPARE(picker.calls.at(0).member(), QString("OpenFile"));
+        QCOMPARE(picker.calls.at(0).service(), QString("org.freedesktop.portal.Desktop"));
+        QCOMPARE(picker.listening, QStringList{picker.requestPath(0)});
+        // The answer before the reply: taken, and the reply then ignored.
+        picker.responded(picker.requestPath(0), 0, chosen);
+        QCOMPARE(opened.count(), 1);
+        QCOMPARE(opened.at(0).at(0).toUrl(), QUrl("file:///home/me/feeds.opml"));
+        QVERIFY(picker.listening.isEmpty());
+        picker.replied(picker.generations.at(0), picker.requestPath(0), {});
+        QVERIFY(picker.listening.isEmpty());
+        QCOMPARE(failed.count(), 0);
+
+        // A request replaced by a newer one is closed and its answer dropped.
+        picker.openOpml();
+        picker.saveOpml("readstr-subscriptions.opml");
+        QCOMPARE(picker.calls.at(2).member(), QString("SaveFile"));
+        QCOMPARE(picker.closed, QStringList{picker.requestPath(1)});
+        picker.responded(picker.requestPath(1), 0, chosen);
+        picker.replied(picker.generations.at(1), "/elsewhere", {});
+        QCOMPARE(opened.count(), 1);
+        QCOMPARE(picker.listening, QStringList{picker.requestPath(2)});
+        picker.responded(picker.requestPath(2), 0, chosen);
+        QCOMPARE(saved.count(), 1);
+
+        // The portal names another path: the answer comes from there only.
+        picker.openOpml();
+        picker.replied(picker.generations.at(3), "/org/freedesktop/portal/desktop/request/1_42/other", {});
+        QCOMPARE(picker.listening, QStringList{"/org/freedesktop/portal/desktop/request/1_42/other"});
+        picker.responded(picker.requestPath(3), 0, chosen);
+        QCOMPARE(opened.count(), 1);
+        picker.responded("/org/freedesktop/portal/desktop/request/1_42/other", 0, chosen);
+        QCOMPARE(opened.count(), 2);
+
+        // Cancelled says nothing; ended otherwise, or a failed call, says so.
+        picker.openOpml();
+        picker.responded(picker.requestPath(4), 1, {});
+        QCOMPARE(failed.count(), 0);
+        picker.openOpml();
+        picker.responded(picker.requestPath(5), 2, {});
+        QCOMPARE(failed.count(), 1);
+        picker.openOpml();
+        picker.replied(picker.generations.at(6), {}, "boom");
+        QCOMPARE(failed.count(), 2);
+        QCOMPARE(failed.at(1).at(0).toString(), QString("The file chooser failed: boom"));
+        QVERIFY(picker.listening.isEmpty());
+        picker.bus = false;
+        picker.openOpml();
+        QCOMPARE(failed.count(), 3);
+        QCOMPARE(picker.calls.size(), 7);
+    }
+
+    // Rounding follows the event socket without polling; a failed query is
+    // tried once more, and a flood of reloads asks only now and then.
+    void themeRetriesOnceAndDebouncesReloads()
+    {
+        QTemporaryDir dir;
+        QVERIFY(QDir(dir.path()).mkpath("hypr") && QDir(dir.path()).mkpath("current"));
+        const QString count = dir.filePath("hypr/count"), command = dir.filePath("hypr/hyprctl");
+        write(command, "#!/bin/sh\nn=$(cat '" + count.toUtf8() + "' 2>/dev/null || echo 0)\nn=$((n+1))\necho $n > '"
+                           + count.toUtf8() + "'\n[ $n -le 1 ] && exit 1\necho '{\"int\":4}'\n");
+        QVERIFY(QFile::setPermissions(command, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QLocalServer server;
+        QVERIFY(server.listen(dir.filePath("hypr/socket2.sock")));
+        auto runs = [&count] { return fixtureAt(count).trimmed().toInt(); };
+
+        Theme theme(dir.filePath("current"), nullptr, command, server.fullServerName());
+        QVERIFY(server.waitForNewConnection(5000) || server.hasPendingConnections());
+        QLocalSocket *events = server.nextPendingConnection();
+        QVERIFY(events);
+        QTRY_VERIFY(theme.listening());
+        QTRY_COMPARE_WITH_TIMEOUT(theme.radius(), 4, 6000);
+        QCOMPARE(runs(), 2);
+        QTest::qWait(2500);
+        QCOMPARE(runs(), 2);
+
+        for (int i = 0; i < 40; ++i) {
+            events->write("configreloaded>>\n");
+            events->flush();
+            QTest::qWait(10);
+        }
+        QTest::qWait(600);
+        QVERIFY2(runs() - 2 >= 1 && runs() - 2 <= 5, qPrintable(QString::number(runs())));
+    }
+
+    // QML reaches no network: a remote image or rich text image is never
+    // requested.
+    void qmlReachesNoNetwork()
+    {
+        QVERIFY(LocalNetworkAccessManager::allowed(QUrl("qrc:/Main.qml")));
+        QVERIFY(LocalNetworkAccessManager::allowed(QUrl("file:///usr/share/icons/x.png")));
+        for (const char *url : {"http://a.example/x.png", "https://a.example/", "file://host/x.png", "data:image/png,x",
+                                "ftp://a.example/x"})
+            QVERIFY2(!LocalNetworkAccessManager::allowed(QUrl(url)), url);
+
+        FakeHttpServer server;
+        server.serve("/pixel.png", "not really a png", "image/png");
+        const QByteArray url = server.url("/pixel.png").toString().toUtf8();
+        const QByteArray qml = "import QtQuick\nItem {\n property alias status: image.status\n"
+                               " Image { id: image; source: \"" + url + "\" }\n"
+                               " Text { textFormat: Text.RichText; text: \"<img src='" + url + "?text'>\" }\n}\n";
+        auto load = [&qml](QQmlEngine &engine) {
+            QQmlComponent component(&engine);
+            component.setData(qml, QUrl("qrc:/probe.qml"));
+            std::unique_ptr<QObject> item(component.create());
+            if (!item)
+                qWarning() << component.errors();
+            return item;
+        };
+        {
+            LocalNetworkFactory factory;
+            QQmlEngine engine;
+            engine.setNetworkAccessManagerFactory(&factory);
+            const auto item = load(engine);
+            QVERIFY(item);
+            QTRY_COMPARE(item->property("status").toInt(), 3);
+            QTest::qWait(300);
+            QVERIFY(server.requests.isEmpty());
+        }
+        // The probe does reach the server without the factory.
+        QQmlEngine engine;
+        const auto item = load(engine);
+        QVERIFY(item);
+        QTRY_VERIFY(!server.requests.isEmpty());
     }
 
 private:

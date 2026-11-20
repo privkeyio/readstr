@@ -3,9 +3,11 @@
 #include <QByteArray>
 #include <QString>
 #include <QUrl>
+#include <optional>
 
 #include "discovery.h"
 #include "fetcher.h"
+#include "opml.h"
 #include "store.h"
 
 // What the headless commands and the window both do to the library, written
@@ -45,8 +47,14 @@ struct Import {
     int unsupported = 0;
     QString error;
 };
-// Reads an OPML file (a regular file of at most Opml::maxBytes) and adds the
-// feeds it lists that are not subscribed yet; folders become categories.
+// Reads and parses an OPML file (a regular file of at most Opml::maxBytes)
+// without touching the library, so a bad file is refused before one is
+// opened. Null with the reason in `error` when it cannot.
+std::optional<QList<Opml::Outline>> readOpml(const QString &path, QString *error);
+// Adds the feeds the outlines list that are not subscribed yet, all of them
+// or, when one cannot be saved, none; folders become categories.
+Import importOutlines(Store &store, const QList<Opml::Outline> &outlines);
+// readOpml() and then importOutlines().
 Import importFile(Store &store, const QString &path);
 // The subscriptions as OPML, or null with the reason in `error`.
 QByteArray exportOpml(Store &store, QString *error);

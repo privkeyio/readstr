@@ -2,6 +2,9 @@
 
 #include <QCollator>
 #include <QMap>
+#include <limits>
+
+#include "feedparser.h"
 
 SourceModel::SourceModel(QObject *parent) : QAbstractListModel(parent) {
     setLibrary({}, {});
@@ -60,8 +63,12 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
     collator.setCaseSensitivity(Qt::CaseInsensitive);
     std::sort(categories.begin(), categories.end(), collator);
 
+    // Names from OPML are stored as the file had them, so they are cleaned
+    // for display here like a feed's own text: no line breaks, and no
+    // bidirectional overrides that would show them reversed.
     auto add = [&rows](const Feed &feed) {
-        rows << Row{Kind::Feed, feed.id, feed.title, feed.url, feed.category, feed.lastError, feed.unread};
+        rows << Row{Kind::Feed, feed.id, FeedParser::cleanText(feed.title), feed.url,
+                    FeedParser::cleanText(feed.category), feed.lastError, feed.unread};
     };
     if (!uncategorized.isEmpty()) {
         rows << Row{Kind::Category, 0, {}, {}, {}, {}, 0};
@@ -72,7 +79,8 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
         int unread = 0;
         for (const Feed &feed : byCategory.value(category))
             unread += feed.unread;
-        rows << Row{Kind::Category, 0, category, {}, category, {}, unread};
+        const QString name = FeedParser::cleanText(category);
+        rows << Row{Kind::Category, 0, name, {}, name, {}, unread};
         for (const Feed &feed : byCategory.value(category))
             add(feed);
     }
@@ -110,7 +118,9 @@ int SourceModel::rowOf(Kind kind, qint64 feedId) const {
 
 int SourceModel::step(int from, int step) const {
     const int direction = step < 0 ? -1 : 1;
-    int remaining = qAbs(step), found = from;
+    // qAbs(INT_MIN) overflows; no list has that many rows anyway.
+    int remaining = step == std::numeric_limits<int>::min() ? std::numeric_limits<int>::max() : qAbs(step);
+    int found = from;
     for (int i = from + direction; i >= 0 && i < m_rows.size() && remaining > 0; i += direction) {
         if (isSelectable(i)) {
             found = i;

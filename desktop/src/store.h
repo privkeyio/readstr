@@ -4,6 +4,7 @@
 #include <QList>
 #include <QSqlDatabase>
 #include <QString>
+#include <functional>
 #include <optional>
 
 #include "feedparser.h"
@@ -44,6 +45,9 @@ struct ArticleFilter {
     bool unreadOnly = false;
     bool starredOnly = false;
     int limit = 50;
+    // Listed even when unreadOnly or starredOnly leaves it out (still within
+    // feedId), so the article open in the window keeps its place.
+    qint64 alsoId = 0;
     // Lists in the window leave the content out; the reader asks article().
     bool withContent = true;
 };
@@ -58,8 +62,8 @@ struct LibraryCounts {
 
 // The local library in SQLite: feeds, their items with read and starred flags,
 // and categories. Synchronous on purpose: the headless commands use one
-// directly, and the window keeps one on its own thread for reads and flags
-// and another on a worker thread for refreshes, imports, and subscriptions
+// directly, and the window keeps one on its own thread for reads and another
+// on a worker thread for every write
 // (each connection belongs to the thread that opened it), so it must stay
 // free of GUI types. Every method that can fail returns false, 0, or nullopt
 // and leaves the reason in lastError().
@@ -101,6 +105,11 @@ public:
     // unread. Returns how many changed, or -1 on failure.
     int markRead(const ArticleFilter &filter, qint64 upToId);
     bool setStarred(qint64 articleId, bool starred);
+
+    // Runs `work` in one transaction that commits when it returns true and
+    // rolls back when it returns false, keeping its lastError(). `work` must
+    // not call saveItems(), which runs its own.
+    bool transaction(const std::function<bool()> &work);
 
     // The key two feed URLs share when they are the same subscription.
     static QString urlKey(const QString &url);

@@ -42,10 +42,13 @@ status bar shows the progress and says what went wrong.
 Articles are shown as a strict subset of HTML: paragraphs, headings, lists,
 quotes, code, emphasis, simple tables, and links. Scripts, styles, frames,
 forms, and every attribute but a link's address are removed, and only http
-and https links open (in your browser). Images are never loaded, since loading
-them would tell the feed's owner who reads what and when; each shows as an
-`[image: description]` link to open it in the browser instead. `O` opens the
-whole article there.
+and https links open (in your browser). Images are never loaded inline, since
+loading them would tell the feed's owner who reads what and when. An image
+with an http or https address shows as an `[image: description]` link (or
+`[image]` without a description) that opens it in the browser instead; one
+with any other address, or none, is dropped along with its description. An
+image inside a link becomes that text inside the link, which opens the
+link's address rather than the image's. `O` opens the whole article there.
 
 ## Command line
 

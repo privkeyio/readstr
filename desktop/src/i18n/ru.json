@@ -115,5 +115,6 @@
   "Export": "Экспортировать",
   "The desktop portal's file chooser is not available (is xdg-desktop-portal running?).": "Диалог выбора файлов портала рабочего стола недоступен (запущен ли xdg-desktop-portal?).",
   "Could not listen for the file chooser's answer.": "Не удалось дождаться ответа диалога выбора файлов.",
-  "The file chooser failed: %1": "Ошибка диалога выбора файлов: %1"
+  "The file chooser failed: %1": "Ошибка диалога выбора файлов: %1",
+  "The file chooser closed without a file.": "Диалог выбора файлов закрылся без файла."
 }

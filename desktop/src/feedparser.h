@@ -49,6 +49,12 @@ QString plainText(const QString &html);
 // Decodes character references (&amp;, &#38;, &#x26;) and the common named
 // entities; anything else is left as written.
 QString decodeEntities(const QString &text);
+// Bidirectional formatting characters (embeddings, overrides, isolates, and
+// marks), which can make text read differently than it is.
+bool isBidiFormat(QChar character);
+// Control characters become spaces, bidirectional formatting characters go,
+// and whitespace collapses, as for every text field a feed gives.
+QString cleanText(const QString &text);
 // True when the reader sits on a DTD that declares entities, which
 // QXmlStreamReader would expand. Every XML reader here refuses such documents.
 bool declaresEntities(const QXmlStreamReader &xml);
