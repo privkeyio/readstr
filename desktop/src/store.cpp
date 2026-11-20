@@ -535,9 +535,11 @@ QList<Article> Store::articles(const ArticleFilter &filter) {
     } else {
         // The limit applies to the rest, so the open article is listed even
         // when it is older than every one of them, still within feedId.
-        sql += " WHERE i.id IN (SELECT id FROM (SELECT i.id FROM items i WHERE 1" + filterSql(filter, values) + order
-               + " LIMIT ?) UNION SELECT i.id FROM items i WHERE i.id = ?";
-        values << (filter.limit > 0 ? filter.limit : -1) << filter.alsoId;
+        ArticleFilter rest = filter;
+        rest.alsoId = 0;
+        sql += " WHERE i.id IN (SELECT id FROM (SELECT i.id FROM items i WHERE 1" + filterSql(rest, values)
+               + " AND i.id <> ?" + order + " LIMIT ?) UNION SELECT i.id FROM items i WHERE i.id = ?";
+        values << filter.alsoId << (filter.limit > 0 ? filter.limit : -1) << filter.alsoId;
         if (filter.feedId) {
             sql += " AND i.feed_id = ?";
             values << filter.feedId;

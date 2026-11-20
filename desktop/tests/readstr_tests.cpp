@@ -3049,6 +3049,17 @@ private slots:
         filter.feedId = other;
         QCOMPARE(titles(filter), QStringList({"other"}));
         filter.feedId = 0;
+        filter.unreadOnly = false;
+        qint64 recent = 0;
+        for (const Article &article : store.articles({}))
+            if (article.guid == "day6")
+                recent = article.id;
+        QVERIFY(recent);
+        filter.alsoId = recent;
+        QCOMPARE(titles(filter), QStringList({"other", "day6", "day5", "day4"}));
+        filter.unreadOnly = true;
+        QCOMPARE(titles(filter), QStringList({"other", "day6", "day5", "day4"}));
+        filter.unreadOnly = false;
         filter.alsoId = 0;
         QCOMPARE(titles(filter), QStringList({"other", "day6", "day5"}));
         QVERIFY(store.lastError().isEmpty());
