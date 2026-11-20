@@ -1,6 +1,12 @@
 <RCC>
     <qresource prefix="/">
         <file alias="Main.qml">Main.qml</file>
+        <file alias="SourcePane.qml">SourcePane.qml</file>
+        <file alias="ArticleList.qml">ArticleList.qml</file>
+        <file alias="ReaderPane.qml">ReaderPane.qml</file>
+        <file alias="AddFeedDialog.qml">AddFeedDialog.qml</file>
+        <file alias="UnsubscribeDialog.qml">UnsubscribeDialog.qml</file>
+        <file alias="ShortcutsOverlay.qml">ShortcutsOverlay.qml</file>
         <file alias="i18n/en.json">i18n/en.json</file>
         <file alias="i18n/da.json">i18n/da.json</file>
         <file alias="i18n/pt.json">i18n/pt.json</file>

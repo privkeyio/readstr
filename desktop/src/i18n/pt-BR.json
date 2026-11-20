@@ -1,4 +1,46 @@
 {
   "No feeds yet": "Nenhum feed ainda",
-  "Press ? to see the keyboard shortcuts": "Pressione ? para ver os atalhos de teclado"
+  "Pick an article to read it": "Escolha um artigo para ler",
+  "Add a feed with Ctrl+N or import your subscriptions with Ctrl+O. Press ? to see the keyboard shortcuts.": "Adicione um feed com Ctrl+N ou importe suas assinaturas com Ctrl+O. Pressione ? para ver os atalhos de teclado.",
+  "Looking for the feed…": "Procurando o feed…",
+  "Unread": "Não lidos",
+  "All caught up": "Tudo em dia",
+  "Press S to star an article": "Pressione S para marcar um artigo com estrela",
+  "Unsubscribe?": "Cancelar a assinatura?",
+  "%1 and its articles will be removed from the library.": "%1 e seus artigos serão removidos da biblioteca.",
+  "Unsubscribe": "Cancelar assinatura",
+  "Next unread article": "Próximo artigo não lido",
+  "Scroll the article": "Rolar o artigo",
+  "Mark read or unread": "Marcar como lido ou não lido",
+  "Mark everything in the view read": "Marcar tudo na visualização como lido",
+  "Unsubscribe from the selected feed": "Cancelar a assinatura do feed selecionado",
+  "Refreshing %1 of %2": "Atualizando %1 de %2",
+  "Unsubscribe…": "Cancelar assinatura…",
+  "No more unread articles in this view": "Não há mais artigos não lidos nesta visualização",
+  "Only web links (http and https) can be opened": "Só é possível abrir links da web (http e https)",
+  "Cannot mark the view read: %1": "Não é possível marcar a visualização como lida: %1",
+  "Enter a web address, like https://example.com/feed.xml": "Digite um endereço da web, como https://example.com/feed.xml",
+  "Subscribed to %1 (%n articles)": {
+    "one": "Você assinou %1 (%n artigo)",
+    "many": "Você assinou %1 (%n de artigos)",
+    "other": "Você assinou %1 (%n artigos)"
+  },
+  "Already subscribed to %1": "Você já assina %1",
+  "Cannot unsubscribe: %1": "Não é possível cancelar a assinatura: %1",
+  "Unsubscribed from %1": "Assinatura de %1 cancelada",
+  "No file chooser is available": "Nenhum seletor de arquivos disponível",
+  "Only local files can be imported": "Só é possível importar arquivos locais",
+  "Importing %1…": "Importando %1…",
+  "Imported %n feeds (%1 already subscribed, %2 not supported yet)": {
+    "one": "%n feed importado (%1 já assinados, %2 ainda sem suporte)",
+    "many": "%n de feeds importados (%1 já assinados, %2 ainda sem suporte)",
+    "other": "%n feeds importados (%1 já assinados, %2 ainda sem suporte)"
+  },
+  "Only local files can be written": "Só é possível gravar arquivos locais",
+  "OPML files": "Arquivos OPML",
+  "All files": "Todos os arquivos",
+  "The desktop portal's file chooser is not available (is xdg-desktop-portal running?).": "O seletor de arquivos do portal da área de trabalho não está disponível (o xdg-desktop-portal está em execução?).",
+  "Could not listen for the file chooser's answer.": "Não foi possível aguardar a resposta do seletor de arquivos.",
+  "The file chooser failed: %1": "O seletor de arquivos falhou: %1",
+  "The file chooser closed without a file.": "O seletor de arquivos fechou sem um arquivo."
 }

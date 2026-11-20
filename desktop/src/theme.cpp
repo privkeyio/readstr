@@ -13,7 +13,7 @@
 
 #include "smallfile.h"
 
-Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
+Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl, const QString &eventSocket)
     : QObject(parent),
       m_directory(directory.isEmpty() ? QDir::homePath() + "/.local/state/omarchy/current" : directory) {
     m_debounce.setSingleShot(true);
@@ -31,12 +31,27 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
     m_roundingTimeout.setSingleShot(true);
     m_roundingTimeout.setInterval(500);
     connect(&m_roundingTimeout, &QTimer::timeout, &m_roundingProcess, &QProcess::kill);
-    connect(&m_roundingProcess, &QProcess::errorOccurred, this, [this] { m_roundingTimeout.stop(); });
+    m_roundingRetry.setSingleShot(true);
+    m_roundingRetry.setInterval(2000);
+    connect(&m_roundingRetry, &QTimer::timeout, this, &Theme::refreshRounding);
+    // Failing to start emits no finished(); a crash or the timeout's kill
+    // emits both, which roundingFailed() takes once.
+    connect(&m_roundingProcess, &QProcess::errorOccurred, this, [this] {
+        m_roundingTimeout.stop();
+        roundingFailed();
+    });
     connect(&m_roundingProcess, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
         m_roundingTimeout.stop();
+        if (m_roundingAgain) {
+            m_roundingAgain = false;
+            QTimer::singleShot(0, this, &Theme::refreshRounding);
+        }
         const auto value = QJsonDocument::fromJson(m_roundingProcess.readAllStandardOutput()).object().value("int");
-        if (code != 0 || status != QProcess::NormalExit || !value.isDouble() || value.toInt(-1) < 0)
+        if (code != 0 || status != QProcess::NormalExit || !value.isDouble() || value.toInt(-1) < 0) {
+            roundingFailed();
             return;
+        }
+        m_roundingRetried = false;
         if (value.toInt() != m_radius) {
             m_radius = value.toInt();
             emit changed();
@@ -44,21 +59,77 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
     });
     m_roundingPoll.setInterval(1000);
     connect(&m_roundingPoll, &QTimer::timeout, this, &Theme::refreshRounding);
-    if (!m_hyprctl.isEmpty())
-        m_roundingPoll.start();
+
+    // Hyprland announces every config reload on its event socket, so the
+    // rounding is asked for again only then. Without the socket (an older
+    // Hyprland, or it went away) it falls back to asking every second.
+    const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
+    const QString instance = qEnvironmentVariable("HYPRLAND_INSTANCE_SIGNATURE");
+    const QString socketPath = !eventSocket.isEmpty() ? eventSocket
+                               : directory.isEmpty() && !runtime.isEmpty() && !instance.isEmpty()
+                                   ? runtime + "/hypr/" + instance + "/.socket2.sock"
+                                   : QString();
+    connect(&m_events, &QLocalSocket::readyRead, this, [this] {
+        bool reloaded = false;
+        while (m_events.canReadLine())
+            reloaded |= m_events.readLine().startsWith("configreloaded>>");
+        // A line that never ends must not pile up.
+        if (m_events.bytesAvailable() > 64 * 1024)
+            m_events.readAll();
+        // A flood of reloads asks hyprctl at most once per debounce, not
+        // once per event.
+        if (reloaded && !m_reloadDebounce.isActive())
+            m_reloadDebounce.start();
+    });
+    m_reloadDebounce.setSingleShot(true);
+    m_reloadDebounce.setInterval(200);
+    connect(&m_reloadDebounce, &QTimer::timeout, this, [this] {
+        m_roundingRetried = false;
+        refreshRounding();
+    });
+    connect(&m_events, &QLocalSocket::errorOccurred, this, &Theme::pollRounding);
+    connect(&m_events, &QLocalSocket::disconnected, this, &Theme::pollRounding);
+    if (!m_hyprctl.isEmpty()) {
+        if (!socketPath.isEmpty() && QFileInfo::exists(socketPath))
+            m_events.connectToServer(socketPath);
+        else
+            m_roundingPoll.start();
+    }
     reload();
 }
 
 Theme::~Theme() {
+    // Closing the socket emits disconnected, which must not start polling now.
+    disconnect(&m_events, nullptr, this, nullptr);
+    m_events.abort();
     if (m_roundingProcess.state() != QProcess::NotRunning) {
         m_roundingProcess.kill();
         m_roundingProcess.waitForFinished(1000);
     }
 }
 
-void Theme::refreshRounding() {
-    if (m_hyprctl.isEmpty() || m_roundingProcess.state() != QProcess::NotRunning)
+void Theme::pollRounding() {
+    if (m_hyprctl.isEmpty() || m_roundingPoll.isActive())
         return;
+    m_roundingPoll.start();
+    refreshRounding();
+}
+
+void Theme::roundingFailed() {
+    // Polling asks again within a second anyway.
+    if (m_roundingPoll.isActive() || m_roundingRetried || m_hyprctl.isEmpty())
+        return;
+    m_roundingRetried = true;
+    m_roundingRetry.start();
+}
+
+void Theme::refreshRounding() {
+    if (m_hyprctl.isEmpty())
+        return;
+    if (m_roundingProcess.state() != QProcess::NotRunning) {
+        m_roundingAgain = true;
+        return;
+    }
     m_roundingProcess.start(m_hyprctl, {"-j", "getoption", "decoration:rounding"});
     m_roundingTimeout.start();
 }

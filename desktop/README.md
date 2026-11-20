@@ -6,14 +6,16 @@ as an Arch package so it shows up in the app launcher. It is built with C++
 and Qt Quick, following the Omarchy app conventions. See
 [`docs/OMARCHY_APP_PLAN.md`](../docs/OMARCHY_APP_PLAN.md) for the plan.
 
-This is phase 1a: the local feed engine (SQLite library, fetcher, RSS, Atom,
-and JSON Feed parser, discovery, OPML) driven from the command line. The window
-is themed but still empty; its panes arrive in phase 1b.
+This is phase 1: a local RSS reader. The window has three panes (sources,
+articles, reader) driven from the keyboard, and the same feed engine (SQLite
+library, fetcher, RSS, Atom, and JSON Feed parser, discovery, OPML) runs
+headless from the command line. Nostr and sync come in later phases.
 
 ## Build, test, install
 
 Everything needed comes with Omarchy (`qmake6`, `make`, a C++ compiler, and
-Qt's base, declarative, SVG, and Wayland modules).
+Qt's base, declarative, SVG, and Wayland modules). The open and save dialogs
+are the desktop's own, through `xdg-desktop-portal` over D-Bus.
 
 ```sh
 bin/build      # qmake6 + make into build/readstr
@@ -22,6 +24,31 @@ bin/install    # makepkg -fsi, so Readstr appears in the launcher (Super + Space
 ```
 
 Run `build/readstr` (or `build/readstr open`) to open the window.
+
+## The window
+
+Sources on the left (All articles, Unread, Starred, then your feeds by
+category, with unread counts and a feed's last refresh error under it),
+the articles of the selected source in the middle, newest first, and the
+article itself on the right. Selecting an article marks it read. Right-click
+a feed to refresh it or unsubscribe; the `⋮` menu has refresh, mark the view
+read, and OPML import and export.
+
+Feeds refresh when the window opens and then about every 30 minutes (give or
+take 10%, so many readers don't all ask at once) for as long as it stays open;
+`Ctrl+R` refreshes now. Nothing refreshes while the window is closed. The
+status bar shows the progress and says what went wrong.
+
+Articles are shown as a strict subset of HTML: paragraphs, headings, lists,
+quotes, code, emphasis, simple tables, and links. Scripts, styles, frames,
+forms, and every attribute but a link's address are removed, and only http
+and https links open (in your browser). Images are never loaded inline, since
+loading them would tell the feed's owner who reads what and when. An image
+with an http or https address shows as an `[image: description]` link (or
+`[image]` without a description) that opens it in the browser instead; one
+with any other address, or none, is dropped along with its description. An
+image inside a link becomes that text inside the link, which opens the
+link's address rather than the image's. `O` opens the whole article there.
 
 ## Command line
 
@@ -111,8 +138,25 @@ tests avoid touching your real files.
 
 ## Shortcuts
 
+The keys follow [omafeed](https://github.com/pch/omafeed)'s, so muscle memory
+carries over. Single keys do nothing while you type in a dialog.
+
 | Key | Action |
 |---|---|
+| `J`, `K` | Next or previous article |
+| `N` | Next unread article |
+| `Up`, `Down` | Move in the selected list (sources or articles) |
+| `Tab` | Switch between sources and articles |
+| `Space`, `Shift+Space` | Scroll the article |
+| `M` | Mark read or unread |
+| `S` | Star or unstar |
+| `O` | Open the original in the browser |
+| `Ctrl+R` | Refresh all feeds |
+| `Ctrl+N` | Add a feed (its address, or a site's) |
+| `Ctrl+Shift+A` | Mark everything in the view read |
+| `Ctrl+O` | Import OPML |
+| `Ctrl+Shift+E` | Export OPML |
+| `Delete` | Unsubscribe from the selected feed (asks first) |
 | `?` | Show or hide the shortcuts |
 | `Esc` | Close the shortcuts |
 | `Q`, `Ctrl+Q` | Quit |
@@ -120,4 +164,6 @@ tests avoid touching your real files.
 ## License
 
 MIT, see [`LICENSE`](LICENSE). The theme and language following code
-comes from Omacut and Monologue (MIT, David Heinemeier Hansson).
+comes from Omacut and Monologue, and the portal file picker
+(`src/filepicker.h`, `src/portalfilepicker.{h,cpp}`) from
+[Omacut](https://github.com/omacom-io/omacut) (MIT, David Heinemeier Hansson).

@@ -7,6 +7,7 @@
 #include <QString>
 #include <QUrl>
 #include <functional>
+#include <memory>
 
 struct FetchRequest {
     QUrl url;
@@ -46,9 +47,11 @@ public:
         qint64 maxBytes = 10 * 1024 * 1024;
         int timeoutMs = 30 * 1000;
         int maxRedirects = 5;
-        // Requests fetchEach() keeps in flight at once. Qt's network access
-        // manager runs at most six connections per host and queues the rest,
-        // with their deadlines already running, so this stays at six.
+        // Requests in flight at once across every batch (fetchEach() and the
+        // like) on one Fetcher; fetch() on its own is not counted. Qt's
+        // network access manager runs at most six connections per host and
+        // queues the rest, with their deadlines already running, so this
+        // stays at six.
         int maxConcurrent = 6;
     };
 
@@ -63,17 +66,41 @@ public:
     // for all of them in a local event loop, for the headless commands. Each
     // result goes to `each` (with the index of its request) as soon as it
     // arrives, so a caller that consumes it keeps only a few bodies in memory.
-    // The window uses fetch().
     void fetchEach(const QList<FetchRequest> &requests, const std::function<void(qsizetype, const FetchResult &)> &each);
     QList<FetchResult> fetchAll(const QList<FetchRequest> &requests);
+    // fetchEach() without the local event loop: it returns at once, and
+    // `finished` runs on this object's thread after the last `each`. The
+    // window uses this, so nothing waits in a nested loop.
+    void fetchEachLater(const QList<FetchRequest> &requests,
+                        std::function<void(qsizetype, const FetchResult &)> each,
+                        std::function<void()> finished = {});
+    // Gives a request's slot back. Called at most once; later calls, and
+    // calls after the Fetcher is gone, do nothing. Meant for the Fetcher's
+    // thread, where it takes effect at once; called on another thread it is
+    // queued to the Fetcher's, which must not be destroyed during that call.
+    using Release = std::function<void()>;
+    // fetchEachLater() whose requests keep their slots until `each` calls the
+    // Release it gets, so a caller that hands each body on to be processed
+    // elsewhere bounds how many wait there too. `finished` runs after the
+    // last release.
+    void fetchEachHeld(const QList<FetchRequest> &requests,
+                       std::function<void(qsizetype, const FetchResult &, const Release &)> each,
+                       std::function<void()> finished = {});
     FetchResult get(const FetchRequest &request) { return fetchAll({request}).constFirst(); }
 
     static QByteArray userAgent();
 
 private:
+    struct Batch;
+    // Issues requests while slots are free, a batch at a time in turn, so a
+    // long refresh does not hold up the few requests of a subscription.
+    void pump();
+    void issue(const std::shared_ptr<Batch> &batch);
     void fetchWithin(const FetchRequest &request, std::function<void(const FetchResult &)> done,
                      const Limits &limits);
 
     QNetworkAccessManager m_network;
     Limits m_limits;
+    QList<std::shared_ptr<Batch>> m_waiting;
+    int m_inFlight = 0;
 };

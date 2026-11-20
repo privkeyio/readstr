@@ -10,9 +10,8 @@
 class QXmlStreamReader;
 
 // Feed bodies are untrusted input. Titles, summaries, and authors come out as
-// plain text; `content` keeps the feed's HTML as it was, so the window in 1b
-// must show it with Text.PlainText or through the sanitizer, never as raw rich
-// text.
+// plain text; `content` keeps the feed's HTML as it was, so the window shows
+// it only through Sanitizer::toRichText, never as raw rich text.
 struct ParsedItem {
     QString guid;
     QString title;
@@ -47,6 +46,18 @@ QDateTime parseDate(const QString &text);
 // Drops tags, comments, scripts, and styles, decodes entities, and collapses
 // whitespace.
 QString plainText(const QString &html);
+// Decodes character references (&amp;, &#38;, &#x26;) and the common named
+// entities; anything else is left as written.
+QString decodeEntities(const QString &text);
+// Bidirectional formatting characters (embeddings, overrides, isolates, and
+// marks), which can make text read differently than it is.
+bool isBidiFormat(QChar character);
+// Control characters become spaces, bidirectional formatting characters go,
+// and whitespace collapses, as for every text field a feed gives. The
+// sanitizer drops the embeddings, overrides and isolates from an article's
+// text and image labels but keeps the direction marks, which right-to-left
+// prose relies on, and leaves the rest of its text as it is.
+QString cleanText(const QString &text);
 // True when the reader sits on a DTD that declares entities, which
 // QXmlStreamReader would expand. Every XML reader here refuses such documents.
 bool declaresEntities(const QXmlStreamReader &xml);

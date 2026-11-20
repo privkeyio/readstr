@@ -34,5 +34,27 @@ struct Result {
 QList<Link> feedLinks(const QByteArray &html, const QUrl &pageUrl);
 // The paths sites commonly serve feeds from, on the page's origin.
 QList<QUrl> commonFeedUrls(const QUrl &pageUrl);
+
+// The discovery steps without the fetching, so the headless commands can
+// fetch each round in a local event loop while the window fetches on its own
+// loop and parses on a worker thread. Each round, fetch requests() and hand
+// the results, in the same order, to examine(), until finished().
+class Search {
+public:
+    explicit Search(const QUrl &url);
+    bool finished() const { return m_stage == Stage::Done; }
+    QList<FetchRequest> requests() const;
+    void examine(const QList<FetchResult> &results);
+    const Result &result() const { return m_result; }
+
+private:
+    enum class Stage { Page, Advertised, Common, Done };
+    Stage m_stage = Stage::Page;
+    QUrl m_url;
+    QUrl m_pageUrl;
+    QList<QUrl> m_urls;
+    Result m_result;
+};
+
 Result discover(Fetcher &fetcher, const QUrl &url);
 }

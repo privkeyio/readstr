@@ -45,14 +45,7 @@ QString webLink(const QUrl &base, const QString &text) {
     return url.toString(QUrl::FullyEncoded);
 }
 
-// Control characters would make exported OPML invalid XML and garble the
-// terminal, so text fields lose them along with runs of whitespace.
-QString cleanText(QString text) {
-    for (QChar &character : text)
-        if (character.category() == QChar::Other_Control)
-            character = ' ';
-    return text.simplified();
-}
+using FeedParser::cleanText;
 
 // Takes text that is already plain, so a literal '<' in a text field survives.
 QString summarize(QString text) {
@@ -538,8 +531,6 @@ QDateTime parseDate(const QString &text) {
 }
 
 QString plainText(const QString &html) {
-    static const QRegularExpression entity(QStringLiteral("&(#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z]{2,8});"));
-
     // One pass, each closer searched for once, so hostile markup (thousands
     // of unclosed <script or <!-- openers) stays linear in the input.
     QString text;
@@ -582,6 +573,13 @@ QString plainText(const QString &html) {
         }
     }
 
+    return cleanText(decodeEntities(text));
+}
+
+QString decodeEntities(const QString &text) {
+    static const QRegularExpression entity(QStringLiteral("&(#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z]{2,8});"));
+    if (!text.contains('&'))
+        return text;
     QString decoded;
     decoded.reserve(text.size());
     qsizetype last = 0;
@@ -594,7 +592,7 @@ QString plainText(const QString &html) {
         last = match.capturedEnd();
     }
     decoded += QStringView(text).mid(last);
-    return cleanText(decoded);
+    return decoded;
 }
 
 bool declaresEntities(const QXmlStreamReader &xml) {
@@ -603,5 +601,28 @@ bool declaresEntities(const QXmlStreamReader &xml) {
     return xml.isDTD()
            && (!xml.entityDeclarations().isEmpty()
                || xml.text().contains(QLatin1String("<!ENTITY"), Qt::CaseInsensitive));
+}
+}
+
+namespace FeedParser {
+bool isBidiFormat(QChar character) {
+    const char16_t code = character.unicode();
+    return code == 0x061C || code == 0x200E || code == 0x200F || (code >= 0x202A && code <= 0x202E)
+           || (code >= 0x2066 && code <= 0x2069);
+}
+
+// Control characters would make exported OPML invalid XML and garble the
+// terminal, and bidirectional formatting characters can make a title read
+// reversed, so text fields lose them along with runs of whitespace.
+QString cleanText(const QString &input) {
+    QString text;
+    text.reserve(input.size());
+    for (const QChar character : input) {
+        if (character.category() == QChar::Other_Control)
+            text += ' ';
+        else if (!isBidiFormat(character))
+            text += character;
+    }
+    return text.simplified();
 }
 }
