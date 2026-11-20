@@ -4,6 +4,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPointer>
+#include <QThread>
 #include <QTimer>
 #include <memory>
 
@@ -222,7 +223,7 @@ void Fetcher::issue(const std::shared_ptr<Batch> &batch) {
     fetch(batch->requests.at(index), [this, batch, index](const FetchResult &result) {
         auto released = std::make_shared<bool>(false);
         const QPointer<Fetcher> self(this);
-        batch->each(index, result, [self, batch, released] {
+        const std::function<void()> release = [self, batch, released] {
             if (*released || !self)
                 return;
             *released = true;
@@ -230,6 +231,15 @@ void Fetcher::issue(const std::shared_ptr<Batch> &batch) {
             self->pump();
             if (--batch->pending == 0 && batch->finished)
                 batch->finished();
+        };
+        // The slot count and the batch belong to this thread, so a release
+        // from any other is carried out here.
+        QThread *const home = thread();
+        batch->each(index, result, [self, home, release] {
+            if (QThread::currentThread() == home)
+                release();
+            else if (Fetcher *fetcher = self.data())
+                QMetaObject::invokeMethod(fetcher, release, Qt::QueuedConnection);
         });
     });
 }

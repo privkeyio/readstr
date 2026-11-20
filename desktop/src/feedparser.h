@@ -53,7 +53,10 @@ QString decodeEntities(const QString &text);
 // marks), which can make text read differently than it is.
 bool isBidiFormat(QChar character);
 // Control characters become spaces, bidirectional formatting characters go,
-// and whitespace collapses, as for every text field a feed gives.
+// and whitespace collapses, as for every text field a feed gives. The
+// sanitizer drops the embeddings, overrides and isolates from an article's
+// text and image labels but keeps the direction marks, which right-to-left
+// prose relies on, and leaves the rest of its text as it is.
 QString cleanText(const QString &text);
 // True when the reader sits on a DTD that declares entities, which
 // QXmlStreamReader would expand. Every XML reader here refuses such documents.

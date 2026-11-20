@@ -45,8 +45,9 @@ struct ArticleFilter {
     bool unreadOnly = false;
     bool starredOnly = false;
     int limit = 50;
-    // Listed even when unreadOnly or starredOnly leaves it out (still within
-    // feedId), so the article open in the window keeps its place.
+    // Listed even when unreadOnly or starredOnly or the limit leaves it out
+    // (still within feedId), so the article open in the window keeps its
+    // place.
     qint64 alsoId = 0;
     // Lists in the window leave the content out; the reader asks article().
     bool withContent = true;
@@ -107,7 +108,8 @@ public:
     bool setStarred(qint64 articleId, bool starred);
 
     // Runs `work` in one transaction that commits when it returns true and
-    // rolls back when it returns false, keeping its lastError(). `work` must
+    // rolls back when it returns false, keeping its lastError(), or throws,
+    // passing the exception on. `work` must
     // not call saveItems(), which runs its own.
     bool transaction(const std::function<bool()> &work);
 

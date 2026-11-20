@@ -2,6 +2,7 @@
 
 #include <QCollator>
 #include <QMap>
+#include <QUrl>
 #include <limits>
 
 #include "feedparser.h"
@@ -66,9 +67,14 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
     // Names from OPML are stored as the file had them, so they are cleaned
     // for display here like a feed's own text: no line breaks, and no
     // bidirectional overrides that would show them reversed.
+    // A title that cleans away to nothing still needs a name in the list:
+    // its address, without the credentials that only disguise it.
     auto add = [&rows](const Feed &feed) {
-        rows << Row{Kind::Feed, feed.id, FeedParser::cleanText(feed.title), feed.url,
-                    FeedParser::cleanText(feed.category), feed.lastError, feed.unread};
+        QString title = FeedParser::cleanText(feed.title);
+        if (title.isEmpty())
+            title = FeedParser::cleanText(QUrl(feed.url).adjusted(QUrl::RemoveUserInfo).toString());
+        rows << Row{Kind::Feed, feed.id, title, feed.url, FeedParser::cleanText(feed.category), feed.lastError,
+                    feed.unread};
     };
     if (!uncategorized.isEmpty()) {
         rows << Row{Kind::Category, 0, {}, {}, {}, {}, 0};

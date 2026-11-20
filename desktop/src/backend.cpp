@@ -1,7 +1,9 @@
 #include "backend.h"
 
+#include <QClipboard>
 #include <QDesktopServices>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QRandomGenerator>
 
 #include "filepicker.h"
@@ -62,6 +64,22 @@ Backend::Backend(FilePicker *picker, QObject *parent)
         connect(m_picker, &FilePicker::failed, this, [this](const QString &message) { setStatus(message, true); });
     }
 
+    // The reader's TextEdit puts a mouse selection in the primary selection
+    // itself as the button goes up, zero-width spaces and all; they come out
+    // once it has. Queued, so this never runs inside the clipboard's own call.
+    QClipboard *clipboard = QGuiApplication::clipboard();
+    if (clipboard->supportsSelection())
+        connect(
+            clipboard, &QClipboard::selectionChanged, this,
+            [clipboard] {
+                if (!clipboard->ownsSelection())
+                    return;
+                const QString text = clipboard->text(QClipboard::Selection);
+                if (text.contains(QChar(0x200B)))
+                    clipboard->setText(copyableText(text), QClipboard::Selection);
+            },
+            Qt::QueuedConnection);
+
     m_storeOpen = m_store.open();
     if (!m_storeOpen)
         setStatus(tr("Cannot open the library: %1").arg(m_store.lastError()), true);
@@ -78,11 +96,18 @@ Backend::~Backend() {
     m_thread.quit();
     m_thread.wait();
     // The user's own changes still queued behind a refresh are not lost
-    // with it; nothing else writes now, so this store does not wait.
-    if (m_storeOpen)
-        for (const std::shared_ptr<UserWrite> &write : std::as_const(m_userWrites))
-            if (!write->done)
-                write->work(m_store);
+    // with it; nothing else writes now, so this store does not wait. Those
+    // the worker saved are not done twice, and as the window can no longer
+    // say that one failed, stderr does.
+    for (const std::shared_ptr<UserWrite> &write : std::as_const(m_userWrites)) {
+        QString error;
+        if (write->state == UserWrite::Failed)
+            error = write->error;
+        else if (write->state == UserWrite::Queued && write->work(m_store) < 0)
+            error = m_store.lastError();
+        if (!error.isEmpty())
+            qWarning("readstr: %s", qPrintable(write->failure.arg(error)));
+    }
 }
 
 template <typename Result>
@@ -104,17 +129,21 @@ void Backend::onWorker(std::function<Result(Store &)> work, std::function<void(c
         Qt::QueuedConnection);
 }
 
-void Backend::writeOnWorker(std::function<int(Store &)> work, std::function<void(const WriteResult &)> done) {
+void Backend::writeOnWorker(std::function<int(Store &)> work, const QString &failure,
+                            std::function<void(const WriteResult &)> done) {
     auto write = std::make_shared<UserWrite>();
     write->work = std::move(work);
+    write->failure = failure;
     m_userWrites << write;
     onWorker<WriteResult>(
         [write](Store &store) {
             WriteResult result;
             result.changed = write->work(store);
-            if (result.changed < 0)
+            if (result.changed < 0) {
                 result.error = store.lastError();
-            write->done = true;
+                write->error = result.error;
+            }
+            write->state = result.changed < 0 ? UserWrite::Failed : UserWrite::Saved;
             return result;
         },
         [this, write, done = std::move(done)](const WriteResult &result) {
@@ -213,8 +242,13 @@ void Backend::reloadCounts() {
         m_feedCount = int(feeds.size());
         emit libraryChanged();
     }
-    if (row == m_sourceIndex)
+    if (row == m_sourceIndex) {
+        // Renamed in place, by another process or a refresh: the title
+        // shown for it follows.
+        if (m_sources.row(row).title != selected.title)
+            emit sourceChanged();
         return;
+    }
     // A feed that is gone leaves All articles selected, as after a reload,
     // and the list it showed goes with it.
     m_sourceIndex = row < 0 ? 0 : row;
@@ -360,6 +394,7 @@ void Backend::saveFlags(const Article &before, bool read, bool starred, const QS
                        ? 1
                        : -1;
         },
+        failure,
         [this, id, failure](const WriteResult &result) {
             if (!result.error.isEmpty())
                 setStatus(failure.arg(result.error), true);
@@ -370,9 +405,15 @@ void Backend::saveFlags(const Article &before, bool read, bool starred, const QS
                 m_pendingFlags.erase(pending);
             }
             // The library has the flags asked for now, or the old ones back
-            // where a write failed.
-            if (const auto saved = m_store.article(id))
+            // where a write failed. An article that is gone (its feed
+            // unsubscribed meanwhile) leaves the list and the reader instead.
+            if (const auto saved = m_store.article(id)) {
                 showFlags(id, saved->read, saved->starred);
+            } else {
+                reloadCounts();
+                loadArticles();
+                return;
+            }
             reloadCounts();
         });
 }
@@ -404,10 +445,11 @@ void Backend::markViewRead() {
         return;
     const ArticleFilter filter = currentFilter();
     const qint64 upToId = m_viewLastId;
-    writeOnWorker([filter, upToId](Store &store) { return store.markRead(filter, upToId); },
-                  [this](const WriteResult &result) {
+    const QString failure = tr("Cannot mark the view read: %1");
+    writeOnWorker([filter, upToId](Store &store) { return store.markRead(filter, upToId); }, failure,
+                  [this, failure](const WriteResult &result) {
                       if (!result.error.isEmpty()) {
-                          setStatus(tr("Cannot mark the view read: %1").arg(result.error), true);
+                          setStatus(failure.arg(result.error), true);
                           return;
                       }
                       setStatus(tr("Marked %n articles read", nullptr, result.changed));
@@ -513,13 +555,14 @@ bool Backend::unsubscribe(qint64 feedId) {
     m_removing.insert(feedId);
     m_unsubscribed.insert(feedId);
     reloadLibrary();
-    writeOnWorker([feedId](Store &store) { return store.removeFeed(feedId) ? 1 : -1; },
-                  [this, feedId, title = feed->title](const WriteResult &result) {
+    const QString failure = tr("Cannot unsubscribe: %1");
+    writeOnWorker([feedId](Store &store) { return store.removeFeed(feedId) ? 1 : -1; }, failure,
+                  [this, feedId, title = feed->title, failure](const WriteResult &result) {
                       m_removing.remove(feedId);
                       if (!result.error.isEmpty()) {
                           // Still subscribed, so its refresh errors count again.
                           m_unsubscribed.remove(feedId);
-                          setStatus(tr("Cannot unsubscribe: %1").arg(result.error), true);
+                          setStatus(failure.arg(result.error), true);
                       } else {
                           setStatus(tr("Unsubscribed from %1").arg(title));
                       }
@@ -658,6 +701,30 @@ void Backend::exportOpml() {
         return;
     }
     m_picker->saveOpml(QStringLiteral("readstr-subscriptions.opml"));
+}
+
+QString Backend::copyableText(const QString &text) {
+    QString plain;
+    plain.reserve(text.size());
+    for (const QChar character : text) {
+        const char16_t code = character.unicode();
+        if (code == 0x200B)
+            continue;
+        // Paragraph and line separators, and where a table or its cells
+        // begin and end.
+        plain += code == 0x2029 || code == 0x2028 || code == 0xFDD0 || code == 0xFDD1 ? QChar('\n') : character;
+    }
+    return plain;
+}
+
+void Backend::copyText(const QString &text) {
+    const QString plain = copyableText(text);
+    if (plain.isEmpty())
+        return;
+    QClipboard *clipboard = QGuiApplication::clipboard();
+    clipboard->setText(plain, QClipboard::Clipboard);
+    if (clipboard->supportsSelection())
+        clipboard->setText(plain, QClipboard::Selection);
 }
 
 QString Backend::localPath(const QUrl &url) {

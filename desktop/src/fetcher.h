@@ -75,7 +75,9 @@ public:
                         std::function<void(qsizetype, const FetchResult &)> each,
                         std::function<void()> finished = {});
     // Gives a request's slot back. Called at most once; later calls, and
-    // calls after the Fetcher is gone, do nothing.
+    // calls after the Fetcher is gone, do nothing. Meant for the Fetcher's
+    // thread, where it takes effect at once; called on another thread it is
+    // queued to the Fetcher's, which must not be destroyed during that call.
     using Release = std::function<void()>;
     // fetchEachLater() whose requests keep their slots until `each` calls the
     // Release it gets, so a caller that hands each body on to be processed

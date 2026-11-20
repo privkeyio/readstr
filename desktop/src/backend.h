@@ -125,6 +125,14 @@ public:
     Q_INVOKABLE void refreshFeed(qint64 feedId);
     Q_INVOKABLE void importOpml();
     Q_INVOKABLE void exportOpml();
+    // Puts text selected in the reader on the clipboard (and the primary
+    // selection), as plain text without the zero-width spaces the
+    // sanitizer adds to break long words.
+    Q_INVOKABLE void copyText(const QString &text);
+    // `text` as a TextEdit showing rich text gives it (paragraph and line
+    // separators, frame markers), as plain text without zero-width spaces;
+    // ones the feed had itself go too.
+    static QString copyableText(const QString &text);
     // Refreshes now and then every autoRefreshMinutes, give or take 10%,
     // for as long as the window is open.
     Q_INVOKABLE void startAutoRefresh();
@@ -161,12 +169,18 @@ private:
         QString error;
     };
     // A write the user asked for; `work` returns how many rows it changed,
-    // or -1 with the reason in the Store's lastError().
+    // or -1 with the reason in the Store's lastError(). `failure` describes
+    // a failed one, given the reason, when the window is gone to show it.
     struct UserWrite {
+        enum State { Queued, Saved, Failed };
         std::function<int(Store &)> work;
-        std::atomic<bool> done = false;
+        QString failure;
+        // Set on the worker before `state`, read once it has stopped.
+        QString error;
+        std::atomic<int> state = Queued;
     };
-    void writeOnWorker(std::function<int(Store &)> work, std::function<void(const WriteResult &)> done);
+    void writeOnWorker(std::function<int(Store &)> work, const QString &failure,
+                       std::function<void(const WriteResult &)> done);
     // Flags shown before the worker has saved them.
     struct PendingFlags {
         bool read = false;

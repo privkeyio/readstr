@@ -6,6 +6,13 @@
 #include "feedparser.h"
 
 namespace {
+// The bidirectional formatting characters that act on a span of text, not the
+// single-position marks (ALM, LRM, RLM).
+bool isDirectionOverride(QChar character) {
+    const char16_t code = character.unicode();
+    return FeedParser::isBidiFormat(character) && code != 0x061C && code != 0x200E && code != 0x200F;
+}
+
 // Each of these is emitted as a bare tag (a keeps its checked href).
 const QSet<QString> kept{"p",  "h1", "h2", "h3",         "h4",  "h5",     "h6",   "ul", "ol", "li", "blockquote",
                          "pre", "code", "em", "i", "strong", "b", "a", "table", "tr", "td", "th"};
@@ -42,6 +49,9 @@ constexpr qsizetype maxUrlLength = 8 * 1024;
 // (a 512K-character word took seconds), so text gets a zero-width space after
 // this many characters without one. It shows as nothing.
 constexpr int maxRunLength = 80;
+// A run that long is one endless cluster (a letter under thousands of
+// combining marks): it breaks anyway, inside the cluster.
+constexpr int maxClusterRunLength = 2 * maxRunLength;
 
 bool isSpace(QChar character) {
     return character == ' ' || character == '\t' || character == '\n' || character == '\r' || character == '\f';
@@ -90,6 +100,10 @@ public:
             return;
         QString decoded = FeedParser::decodeEntities(raw.toString());
         decoded.replace(QChar(0), QChar(0xFFFD));
+        // Embeddings, overrides and isolates can make the article read
+        // differently than it is. The direction marks stay: right-to-left
+        // articles need them to place punctuation and numbers.
+        decoded.removeIf(isDirectionOverride);
         for (const QChar character : decoded)
             if (!isSpace(character)) {
                 m_boundary = false;
@@ -100,10 +114,14 @@ public:
         for (qsizetype k = 0; k < decoded.size(); ++k) {
             const QChar character = decoded.at(k);
             // Once the run is long enough the space goes before the next
-            // character that starts a cluster of its own, never inside one.
+            // character that starts a cluster of its own, never inside one
+            // unless the run is far too long, and never inside a surrogate
+            // pair.
             const QChar previous = k > 0 ? decoded.at(k - 1) : m_last;
-            if (m_run >= maxRunLength && !breaksLines(character) && !joinsPrevious(decoded, k)
-                && previous != QChar(0x200D)) {
+            const bool startsCluster = !joinsPrevious(decoded, k) && previous != QChar(0x200D);
+            if (!breaksLines(character)
+                && ((m_run >= maxRunLength && startsCluster)
+                    || (m_run >= maxClusterRunLength && !character.isLowSurrogate()))) {
                 broken += QChar(0x200B);
                 m_run = 0;
             }
@@ -286,7 +304,9 @@ private:
             url = linkTarget(tag.dataSrc);
         if (url.isEmpty())
             return;
-        QString alt = tag.alt.simplified();
+        QString alt = tag.alt;
+        alt.removeIf(isDirectionOverride);
+        alt = alt.simplified();
         if (alt.size() > maxAltLength)
             alt = alt.left(maxAltLength) + QChar(0x2026);
         const QString label = alt.isEmpty()

@@ -18,6 +18,9 @@ Rectangle {
         flick.contentY = Math.max(0, Math.min(bottom, flick.contentY + direction * page))
     }
 
+    // What is selected in the article, for Ctrl+C.
+    readonly property string selectedText: body.selectedText
+
     // A new article starts at its top.
     property var shownId: backend.articleId
     onShownIdChanged: flick.contentY = 0

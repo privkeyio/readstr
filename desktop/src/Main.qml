@@ -83,6 +83,9 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+Shift+A"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.markViewRead() }
     Shortcut { sequence: "Ctrl+O"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.importOpml() }
     Shortcut { sequence: "Ctrl+Shift+E"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.exportOpml() }
+    // The article never takes the keyboard, so its selection is copied
+    // from here, without the zero-width spaces that break long words.
+    Shortcut { sequence: StandardKey.Copy; context: Qt.ApplicationShortcut; enabled: win.keysFree && reader.selectedText !== ""; onActivated: backend.copyText(reader.selectedText) }
     Shortcut { sequence: "Delete"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: win.askUnsubscribe(backend.selectedFeedId, backend.sourceTitle) }
 
     // Right-to-left languages mirror the window; the Translator sets the

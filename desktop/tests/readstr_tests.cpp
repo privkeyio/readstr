@@ -1,5 +1,9 @@
 #include <QAbstractTextDocumentLayout>
 #include <QBuffer>
+#include <QDeadlineTimer>
+#include <QTextCursor>
+#include <QGuiApplication>
+#include <QClipboard>
 #include <QDBusMessage>
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -10,6 +14,7 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QFile>
 #include <QJsonArray>
@@ -24,6 +29,7 @@
 #include <cstdio>
 #include <climits>
 #include <optional>
+#include <stdexcept>
 #include <sys/stat.h>
 #include <thread>
 
@@ -2017,7 +2023,7 @@ private slots:
         Store store;
         QVERIFY(store.open());
         QCOMPARE(store.articles({}).size(), 5);
-        QTRY_COMPARE(store.counts()->unread, 1);
+        QTRY_VERIFY(unreadIs(store, 1));
 
         backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Unread));
         QCOMPARE(backend.sourceKind(), QString("unread"));
@@ -2057,8 +2063,8 @@ private slots:
         QVERIFY(!backend.articleRead());
         Store store;
         QVERIFY(store.open());
-        QTRY_VERIFY(store.article(id)->starred);
-        QTRY_VERIFY(!store.article(id)->read);
+        QTRY_VERIFY(articleIs(store, id, [](const Article &a) { return a.starred; }));
+        QTRY_VERIFY(articleIs(store, id, [](const Article &a) { return !a.read; }));
         QTRY_COMPARE(backend.sources()->data(backend.sources()->index(2), SourceModel::CountRole).toInt(), 1);
         QVERIFY(backend.articles()->at(0).starred);
 
@@ -2068,7 +2074,7 @@ private slots:
         QVERIFY(!backend.hasArticle());
         backend.selectArticle(0);
         backend.toggleStar();
-        QTRY_VERIFY(!store.article(id)->starred);
+        QTRY_VERIFY(articleIs(store, id, [](const Article &a) { return !a.starred; }));
 
         // Marking a feed read leaves the other feed, and anything newer than
         // the list, alone.
@@ -2397,6 +2403,25 @@ private slots:
                     && part.front() != QChar(0xFE0F));
             QVERIFY(!part.endsWith(QChar(0x200D)));
         }
+        // An endless cluster (a letter under combining marks) breaks inside
+        // itself after a while, but never inside a surrogate pair.
+        const QString zalgo = "a" + QString(100000, QChar(0x0301));
+        const QString zalgoOut = Sanitizer::toRichText(zalgo, base);
+        QVERIFY2(zalgoOut.count(QChar(0x200B)) >= 100000 / 160, qPrintable(QString::number(zalgoOut.count(QChar(0x200B)))));
+        {
+            QElapsedTimer timer;
+            timer.start();
+            QTextDocument document;
+            document.setTextWidth(800);
+            document.setHtml(zalgoOut);
+            document.documentLayout()->documentSize();
+            QVERIFY2(timer.elapsed() < 2000, qPrintable(QString("%1 ms").arg(timer.elapsed())));
+        }
+        const QString wideMark = QString::fromUcs4(U"\U0001D167");
+        const QString wideOut = Sanitizer::toRichText("a" + wideMark.repeated(500), base);
+        QVERIFY(wideOut.count(QChar(0x200B)) > 0);
+        for (const QString &part : wideOut.split(QChar(0x200B)))
+            QVERIFY(!part.isEmpty() && !part.front().isLowSurrogate() && !part.back().isHighSurrogate());
         // The address of a link is never touched.
         const QString link = "https://a.example/" + QString(200, 'p');
         QVERIFY(Sanitizer::toRichText("<a href=\"" + link + "\">t</a>", base).contains("href=\"" + link + "\""));
@@ -2463,6 +2488,17 @@ private slots:
         const int row = model.rowOf(SourceModel::Kind::Feed, 1);
         QCOMPARE(model.data(model.index(row), SourceModel::TitleRole).toString(), QString("Eviltxt more"));
         QCOMPARE(model.data(model.index(row), SourceModel::CategoryRole).toString(), QString("Folder"));
+        // A title of nothing but bidi controls and spaces shows the address,
+        // without credentials; the stored title is not the model's business.
+        Feed blank;
+        blank.id = 2;
+        blank.title = QString(u"\u202e \u2066\t");
+        blank.url = "https://user:secret@example.com/feed";
+        model.setLibrary({feed, blank}, {});
+        const int blankRow = model.rowOf(SourceModel::Kind::Feed, 2);
+        QCOMPARE(model.data(model.index(blankRow), SourceModel::TitleRole).toString(),
+                 QString("https://example.com/feed"));
+        QCOMPARE(model.data(model.index(blankRow), SourceModel::UrlRole).toString(), blank.url);
     }
 
     void modelsAndBackendTakeExtremeSteps()
@@ -2661,7 +2697,7 @@ private slots:
         QSqlDatabase::removeDatabase("locker");
         Store store;
         QVERIFY(store.open());
-        QTRY_VERIFY(store.article(id)->starred && store.article(id)->read);
+        QTRY_VERIFY(articleIs(store, id, [](const Article &a) { return a.starred && a.read; }));
         QTRY_COMPARE(backend.sources()->data(backend.sources()->index(2), SourceModel::CountRole).toInt(), 1);
         QVERIFY(!backend.statusError());
     }
@@ -2707,7 +2743,7 @@ private slots:
         QCOMPARE(backend.articleTitle(), QString("Older"));
         Store store;
         QVERIFY(store.open());
-        QTRY_COMPARE(store.counts()->unread, 3);
+        QTRY_VERIFY(unreadIs(store, 3));
         // A reload in the background (here, an unsubscribe).
         QVERIFY(backend.unsubscribe(second));
         QTRY_COMPARE(backend.feedCount(), 1);
@@ -2718,7 +2754,7 @@ private slots:
         QCOMPARE(backend.articleTitle(), QString("Oldest"));
         backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::All));
         backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Unread));
-        QTRY_COMPARE(store.counts()->unread, 1);
+        QTRY_VERIFY(unreadIs(store, 1));
         backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::All));
         backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Unread));
         QCOMPARE(backend.articles()->count(), 1);
@@ -2925,21 +2961,30 @@ private slots:
         auto backend = std::make_unique<Backend>();
         // A writer in another thread holds the lock for a while, so the
         // fast feed's save blocks the worker and the flags queue behind it.
-        std::atomic<bool> locked = false;
+        // 0 while it tries, 1 once it holds the lock, -1 when it cannot.
+        std::atomic<int> locked = 0;
         std::thread locker([&locked, path = Paths::databaseFile()] {
             {
                 QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", "threadLocker");
                 db.setDatabaseName(path);
-                db.open();
-                QSqlQuery(db).exec("BEGIN IMMEDIATE");
-                locked = true;
-                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-                QSqlQuery(db).exec("COMMIT");
+                if (db.open() && QSqlQuery(db).exec("BEGIN IMMEDIATE")) {
+                    locked = 1;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                    QSqlQuery(db).exec("COMMIT");
+                } else {
+                    locked = -1;
+                }
                 db.close();
             }
             QSqlDatabase::removeDatabase("threadLocker");
         });
-        QTRY_VERIFY(locked.load());
+        // Joined however the test ends, a failed check included.
+        const auto joinLocker = qScopeGuard([&locker] {
+            if (locker.joinable())
+                locker.join();
+        });
+        QTRY_VERIFY(locked.load() != 0);
+        QCOMPARE(locked.load(), 1);
         backend->refreshAll();
         QTRY_VERIFY(server.requests.size() == 2);
         QTest::qWait(300);
@@ -2953,8 +2998,208 @@ private slots:
         QTest::qWait(2500);
         Store store;
         QVERIFY(store.open());
-        QVERIFY(store.article(id)->read);
-        QVERIFY(store.article(id)->starred);
+        const std::optional<Article> saved = store.article(id);
+        QVERIFY(saved);
+        QVERIFY(saved->read);
+        QVERIFY(saved->starred);
+    }
+
+    // The article open in the window is listed even past the limit, in
+    // date order, and still only within its feed.
+    void storeKeepsTheOpenArticlePastTheLimit()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.filePath("library.sqlite")));
+        const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+        const qint64 other = store.addFeed("https://b.example.com/feed", "B");
+        QList<ParsedItem> items;
+        for (int day = 1; day <= 6; ++day) {
+            ParsedItem item;
+            item.guid = item.title = QString("day%1").arg(day);
+            item.published = QDateTime(QDate(2026, 1, day), QTime(12, 0), QTimeZone::UTC);
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 6);
+        ParsedItem late;
+        late.guid = late.title = "other";
+        late.published = QDateTime(QDate(2026, 2, 1), QTime(12, 0), QTimeZone::UTC);
+        QCOMPARE(store.saveItems(other, {late}), 1);
+        qint64 oldest = 0;
+        for (const Article &article : store.articles({}))
+            if (article.guid == "day1")
+                oldest = article.id;
+        QVERIFY(oldest);
+        QVERIFY(store.setRead(oldest, true));
+
+        ArticleFilter filter;
+        filter.limit = 3;
+        filter.alsoId = oldest;
+        auto titles = [&store](const ArticleFilter &filter) {
+            QStringList titles;
+            for (const Article &article : store.articles(filter))
+                titles << article.title;
+            return titles;
+        };
+        QCOMPARE(titles(filter), QStringList({"other", "day6", "day5", "day1"}));
+        filter.unreadOnly = true;
+        QCOMPARE(titles(filter), QStringList({"other", "day6", "day5", "day1"}));
+        filter.feedId = feed;
+        QCOMPARE(titles(filter), QStringList({"day6", "day5", "day4", "day1"}));
+        filter.feedId = other;
+        QCOMPARE(titles(filter), QStringList({"other"}));
+        filter.feedId = 0;
+        filter.alsoId = 0;
+        QCOMPARE(titles(filter), QStringList({"other", "day6", "day5"}));
+        QVERIFY(store.lastError().isEmpty());
+    }
+
+    // A transaction whose work throws is rolled back, and the exception
+    // goes on to the caller.
+    void storeRollsBackAThrowingTransaction()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.filePath("library.sqlite")));
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, store.transaction([&store]() -> bool {
+            store.addFeed("https://a.example.com/feed", "A");
+            throw std::runtime_error("boom");
+        }));
+        QVERIFY(store.feeds().isEmpty());
+        QVERIFY(store.transaction([&store] { return store.addFeed("https://b.example.com/feed", "B") != 0; }));
+        QCOMPARE(store.feeds().size(), 1);
+    }
+
+    // The sanitizer drops bidi controls from text and image labels, as the
+    // feed parser does from every other field.
+    void sanitizerDropsBidiControls()
+    {
+        const QUrl base("https://blog.example.com/");
+        QCOMPARE(Sanitizer::toRichText(QString(u"<p>a\u202eb&#x2067;c&#8207;d</p>"), base), QString(u"<p>abc\u200fd</p>"));
+        QCOMPARE(Sanitizer::toRichText(QString(u"<img src=\"/i.png\" alt=\"x\u202ey&#x2066;z\">"), base),
+                 QString("<a href=\"https://blog.example.com/i.png\">[image: xyz]</a>"));
+        QCOMPARE(Sanitizer::toRichText(QString(u"<img src=\"/i.png\" alt=\"\u202e\">"), base),
+                 QString("<a href=\"https://blog.example.com/i.png\">[image]</a>"));
+    }
+
+    // A slot released on another thread is given back on the Fetcher's.
+    void fetcherTakesAReleaseFromAnotherThread()
+    {
+        FakeHttpServer server;
+        server.serve("/a", "a");
+        Fetcher fetcher;
+        QList<Fetcher::Release> held;
+        QThread *finishedOn = nullptr;
+        fetcher.fetchEachHeld(
+            {FetchRequest{server.url("/a"), {}, {}}},
+            [&held](qsizetype, const FetchResult &, const Fetcher::Release &release) { held << release; },
+            [&finishedOn] { finishedOn = QThread::currentThread(); });
+        QTRY_COMPARE(held.size(), 1);
+        std::thread([release = held.at(0)] { release(); }).join();
+        QVERIFY(!finishedOn);
+        QTRY_VERIFY(finishedOn);
+        QCOMPARE(finishedOn, QThread::currentThread());
+    }
+
+    // Copied text loses the zero-width spaces that break long words, and
+    // reads as plain text with line breaks.
+    void backendCopiesPlainText()
+    {
+        QCOMPARE(Backend::copyableText(QString(u"long\u200bword\u2029next\u2028line")),
+                 QString("longword\nnext\nline"));
+        QTextDocument document;
+        document.setHtml(Sanitizer::toRichText(QString(500, 'x') + "<p>two</p>", QUrl("https://a.example/")));
+        QTextCursor cursor(&document);
+        cursor.select(QTextCursor::Document);
+        QCOMPARE(Backend::copyableText(cursor.selectedText()), QString(500, 'x') + "\ntwo");
+
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        Backend backend;
+        backend.copyText(QString(u"a\u200bb"));
+        QCOMPARE(QGuiApplication::clipboard()->text(), QString("ab"));
+    }
+
+    // A flag change on an article that has gone meanwhile clears it from the
+    // list and the reader rather than leaving them stale.
+    void backendDropsAnArticleThatWentWhileSaving()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        Backend backend;
+        backend.selectArticle(0);
+        const qint64 id = backend.articleId();
+        Store store;
+        QVERIFY(store.open());
+        QTRY_VERIFY(articleIs(store, id, [](const Article &a) { return a.read; }));
+        QVERIFY(store.removeFeed(first));
+        backend.toggleStar();
+        QVERIFY(backend.articleStarred());
+        QTRY_VERIFY(!backend.hasArticle());
+        QCOMPARE(backend.articles()->count(), 2);
+        QCOMPARE(backend.articles()->rowOf(id), -1);
+        QVERIFY(backend.statusError());
+    }
+
+    // The selected feed renamed in place still announces its new title.
+    void backendFollowsTheSelectedSourcesTitle()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        Backend backend;
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Feed, second));
+        const int row = backend.sourceIndex();
+        QSignalSpy changed(&backend, &Backend::sourceChanged);
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", "renamer");
+            db.setDatabaseName(Paths::databaseFile());
+            QVERIFY(db.open());
+            QSqlQuery query(db);
+            query.prepare("UPDATE feeds SET title = 'Second renamed' WHERE id = ?");
+            query.addBindValue(second);
+            QVERIFY(query.exec());
+            db.close();
+        }
+        QSqlDatabase::removeDatabase("renamer");
+        backend.selectArticle(0);
+        QTRY_VERIFY(!changed.isEmpty());
+        QCOMPARE(backend.sourceIndex(), row);
+        QCOMPARE(backend.sourceTitle(), QString("Second renamed"));
+    }
+
+    // At close, a write the worker saved is not done again, and one that
+    // failed, with no window left to say so, is reported on stderr.
+    void backendReportsFailedWritesAtClose()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        auto backend = std::make_unique<Backend>();
+        backend->selectArticle(0);
+        const qint64 id = backend->articleId();
+        Store store;
+        QVERIFY(store.open());
+        QTRY_VERIFY(articleIs(store, id, [](const Article &a) { return a.read; }));
+        QVERIFY(store.removeFeed(first));
+        backend->toggleStar();
+        QVERIFY(backend->unsubscribe(second));
+        // The worker gets to both, but the window never hears back: this
+        // thread waits without taking its events.
+        QDeadlineTimer deadline(5000);
+        while (store.feed(second) && !deadline.hasExpired())
+            QThread::msleep(20);
+        QVERIFY(!store.feed(second));
+        QTest::failOnWarning(QRegularExpression("Cannot unsubscribe"));
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression(QString("^readstr: Cannot change the article: no article with id %1$")
+                                                    .arg(id)));
+        backend.reset();
     }
 
     void backendStripsCredentialsAndOpensOnlyLocalFiles()
@@ -3198,6 +3443,20 @@ private:
             if (article.guid == "second-b")
                 store.setRead(article.id, true);
         return {first, second};
+    }
+
+    // For polling: each looks the library up once per try, and a missing
+    // row or failed query is a miss rather than a crash.
+    static bool unreadIs(Store &store, int expected)
+    {
+        const std::optional<LibraryCounts> counts = store.counts();
+        return counts && counts->unread == expected;
+    }
+
+    static bool articleIs(Store &store, qint64 id, const std::function<bool(const Article &)> &check)
+    {
+        const std::optional<Article> article = store.article(id);
+        return article && check(*article);
     }
 
     static int mode(const QString &path)

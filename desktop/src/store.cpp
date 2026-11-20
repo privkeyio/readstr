@@ -236,7 +236,16 @@ void Store::rollback() { QSqlQuery(m_db).exec(QStringLiteral("ROLLBACK")); }
 bool Store::transaction(const std::function<bool()> &work) {
     if (!begin())
         return false;
-    if (work())
+    bool ok = false;
+    try {
+        ok = work();
+    } catch (...) {
+        // Otherwise the open transaction holds the write lock until this
+        // connection closes, and the next begin() on it fails.
+        rollback();
+        throw;
+    }
+    if (ok)
         return commit();
     rollback();
     return false;
@@ -518,10 +527,23 @@ QString filterSql(const ArticleFilter &filter, QVariantList &values) {
 QList<Article> Store::articles(const ArticleFilter &filter) {
     m_error.clear();
     QVariantList values;
-    QString sql = QString::fromLatin1(articleColumns).arg(filter.withContent ? "i.content" : "NULL") + " WHERE 1"
-                  + filterSql(filter, values);
-    sql += " ORDER BY COALESCE(i.published_at, i.created_at) DESC, i.id DESC LIMIT ?";
-    values << (filter.limit > 0 ? filter.limit : -1);
+    const QString order = QStringLiteral(" ORDER BY COALESCE(i.published_at, i.created_at) DESC, i.id DESC");
+    QString sql = QString::fromLatin1(articleColumns).arg(filter.withContent ? "i.content" : "NULL");
+    if (!filter.alsoId) {
+        sql += " WHERE 1" + filterSql(filter, values) + order + " LIMIT ?";
+        values << (filter.limit > 0 ? filter.limit : -1);
+    } else {
+        // The limit applies to the rest, so the open article is listed even
+        // when it is older than every one of them, still within feedId.
+        sql += " WHERE i.id IN (SELECT id FROM (SELECT i.id FROM items i WHERE 1" + filterSql(filter, values) + order
+               + " LIMIT ?) UNION SELECT i.id FROM items i WHERE i.id = ?";
+        values << (filter.limit > 0 ? filter.limit : -1) << filter.alsoId;
+        if (filter.feedId) {
+            sql += " AND i.feed_id = ?";
+            values << filter.feedId;
+        }
+        sql += ')' + order;
+    }
 
     QList<Article> result;
     QSqlQuery query(m_db);
