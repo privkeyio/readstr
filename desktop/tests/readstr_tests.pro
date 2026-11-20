@@ -5,4 +5,5 @@ TEMPLATE = app
 
 include(../src/sources.pri)
 
+HEADERS += fakehttpserver.h
 SOURCES += readstr_tests.cpp
