@@ -10,9 +10,8 @@
 class QXmlStreamReader;
 
 // Feed bodies are untrusted input. Titles, summaries, and authors come out as
-// plain text; `content` keeps the feed's HTML as it was, so the window in 1b
-// must show it with Text.PlainText or through the sanitizer, never as raw rich
-// text.
+// plain text; `content` keeps the feed's HTML as it was, so the window shows
+// it only through Sanitizer::toRichText, never as raw rich text.
 struct ParsedItem {
     QString guid;
     QString title;
@@ -47,6 +46,9 @@ QDateTime parseDate(const QString &text);
 // Drops tags, comments, scripts, and styles, decodes entities, and collapses
 // whitespace.
 QString plainText(const QString &html);
+// Decodes character references (&amp;, &#38;, &#x26;) and the common named
+// entities; anything else is left as written.
+QString decodeEntities(const QString &text);
 // True when the reader sits on a DTD that declares entities, which
 // QXmlStreamReader would expand. Every XML reader here refuses such documents.
 bool declaresEntities(const QXmlStreamReader &xml);

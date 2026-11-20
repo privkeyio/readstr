@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QFileSystemWatcher>
+#include <QLocalSocket>
 #include <QObject>
 #include <QProcess>
 #include <QTimer>
@@ -14,7 +15,10 @@ class Theme : public QObject {
     Q_PROPERTY(int radius READ radius NOTIFY changed)
 
 public:
-    explicit Theme(const QString &currentDirectory = {}, QObject *parent = nullptr, const QString &hyprctl = {});
+    // Tests pass a theme directory, a fake hyprctl, and a fake Hyprland
+    // event socket; the defaults are Omarchy's and the running Hyprland's.
+    explicit Theme(const QString &currentDirectory = {}, QObject *parent = nullptr, const QString &hyprctl = {},
+                   const QString &eventSocket = {});
     ~Theme() override;
 
     QString accent() const { return m_accent; }
@@ -22,6 +26,8 @@ public:
     QString background() const { return m_background; }
     QString foreground() const { return m_foreground; }
     int radius() const { return m_radius; }
+    // True while rounding follows Hyprland's event socket rather than polling.
+    bool listening() const { return m_events.state() == QLocalSocket::ConnectedState; }
 
     static QString readColor(const QByteArray &colors, const char *key, const QString &fallback);
 
@@ -31,6 +37,7 @@ signals:
 private:
     void reload();
     void refreshRounding();
+    void pollRounding();
 
     QString m_directory;
     QString m_accent = "#FFD60A";
@@ -42,4 +49,7 @@ private:
     int m_radius = 0;
     QProcess m_roundingProcess;
     QTimer m_roundingPoll, m_roundingTimeout;
+    // Asked again once the query running now finishes.
+    bool m_roundingAgain = false;
+    QLocalSocket m_events;
 };

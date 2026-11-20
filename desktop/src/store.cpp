@@ -462,12 +462,32 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
     return commit() ? added : -1;
 }
 
-QList<Article> Store::articles(const ArticleFilter &filter) {
-    m_error.clear();
-    QString sql = QStringLiteral(
-        "SELECT i.id, i.feed_id, f.title, i.guid, i.title, i.url, i.author, i.summary, i.content,"
-        " i.published_at, i.is_read, i.is_starred FROM items i JOIN feeds f ON f.id = i.feed_id WHERE 1");
-    QVariantList values;
+namespace {
+const char articleColumns[] =
+    "SELECT i.id, i.feed_id, f.title, i.guid, i.title, i.url, i.author, i.summary, %1,"
+    " i.published_at, i.is_read, i.is_starred FROM items i JOIN feeds f ON f.id = i.feed_id";
+
+Article articleFrom(const QSqlQuery &query) {
+    Article article;
+    article.id = query.value(0).toLongLong();
+    article.feedId = query.value(1).toLongLong();
+    article.feedTitle = query.value(2).toString();
+    article.guid = query.value(3).toString();
+    article.title = query.value(4).toString();
+    article.url = query.value(5).toString();
+    article.author = query.value(6).toString();
+    article.summary = query.value(7).toString();
+    article.content = query.value(8).toString();
+    if (!query.value(9).isNull())
+        article.published = QDateTime::fromSecsSinceEpoch(query.value(9).toLongLong(), QTimeZone::UTC);
+    article.read = query.value(10).toBool();
+    article.starred = query.value(11).toBool();
+    return article;
+}
+
+// The WHERE conditions a filter adds, after "WHERE 1".
+QString filterSql(const ArticleFilter &filter, QVariantList &values) {
+    QString sql;
     if (filter.feedId) {
         sql += " AND i.feed_id = ?";
         values << filter.feedId;
@@ -476,6 +496,15 @@ QList<Article> Store::articles(const ArticleFilter &filter) {
         sql += " AND i.is_read = 0";
     if (filter.starredOnly)
         sql += " AND i.is_starred = 1";
+    return sql;
+}
+}
+
+QList<Article> Store::articles(const ArticleFilter &filter) {
+    m_error.clear();
+    QVariantList values;
+    QString sql = QString::fromLatin1(articleColumns).arg(filter.withContent ? "i.content" : "NULL") + " WHERE 1"
+                  + filterSql(filter, values);
     sql += " ORDER BY COALESCE(i.published_at, i.created_at) DESC, i.id DESC LIMIT ?";
     values << (filter.limit > 0 ? filter.limit : -1);
 
@@ -488,28 +517,53 @@ QList<Article> Store::articles(const ArticleFilter &filter) {
         fail(query.lastError().text());
         return result;
     }
-    while (query.next()) {
-        Article article;
-        article.id = query.value(0).toLongLong();
-        article.feedId = query.value(1).toLongLong();
-        article.feedTitle = query.value(2).toString();
-        article.guid = query.value(3).toString();
-        article.title = query.value(4).toString();
-        article.url = query.value(5).toString();
-        article.author = query.value(6).toString();
-        article.summary = query.value(7).toString();
-        article.content = query.value(8).toString();
-        if (!query.value(9).isNull())
-            article.published = QDateTime::fromSecsSinceEpoch(query.value(9).toLongLong(), QTimeZone::UTC);
-        article.read = query.value(10).toBool();
-        article.starred = query.value(11).toBool();
-        result << article;
-    }
+    while (query.next())
+        result << articleFrom(query);
     if (query.lastError().isValid()) {
         fail(query.lastError().text());
         return {};
     }
     return result;
+}
+
+std::optional<Article> Store::article(qint64 id) {
+    QSqlQuery query(m_db);
+    query.prepare(QString::fromLatin1(articleColumns).arg("i.content") + " WHERE i.id = ?");
+    query.addBindValue(id);
+    if (!query.exec()) {
+        fail(query.lastError().text());
+        return std::nullopt;
+    }
+    if (!query.next()) {
+        fail(QStringLiteral("no article with id %1").arg(id));
+        return std::nullopt;
+    }
+    return articleFrom(query);
+}
+
+std::optional<LibraryCounts> Store::counts() {
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("SELECT COUNT(*), COALESCE(SUM(is_read = 0), 0),"
+                                   " (SELECT COUNT(*) FROM items WHERE is_starred = 1), COALESCE(MAX(id), 0) FROM items"))
+        || !query.next()) {
+        fail(query.lastError().text());
+        return std::nullopt;
+    }
+    return LibraryCounts{query.value(0).toInt(), query.value(1).toInt(), query.value(2).toInt(),
+                         query.value(3).toLongLong()};
+}
+
+int Store::markRead(const ArticleFilter &filter, qint64 upToId) {
+    QVariantList values;
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("UPDATE items AS i SET is_read = 1 WHERE i.is_read = 0 AND i.id <= ?")
+                  + filterSql(filter, values));
+    query.addBindValue(upToId);
+    for (const QVariant &value : values)
+        query.addBindValue(value);
+    if (!query.exec())
+        return fail(query.lastError().text()), -1;
+    return query.numRowsAffected();
 }
 
 bool Store::setFlag(const char *column, qint64 articleId, bool value) {

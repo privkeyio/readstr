@@ -44,14 +44,25 @@ struct ArticleFilter {
     bool unreadOnly = false;
     bool starredOnly = false;
     int limit = 50;
+    // Lists in the window leave the content out; the reader asks article().
+    bool withContent = true;
+};
+
+struct LibraryCounts {
+    int total = 0;
+    int unread = 0;
+    int starred = 0;
+    // The newest article's id, which markRead() takes as its bound.
+    qint64 lastId = 0;
 };
 
 // The local library in SQLite: feeds, their items with read and starred flags,
-// and categories. Synchronous on purpose for the headless commands; the window
-// (phase 1b) moves a Store onto a worker thread that owns the connection, as
-// docs/OMARCHY_APP_PLAN.md section 3 describes, so it must stay free of GUI
-// types. Every method that can fail returns false, 0, or nullopt and leaves
-// the reason in lastError().
+// and categories. Synchronous on purpose: the headless commands use one
+// directly, and the window keeps one on its own thread for reads and flags
+// and another on a worker thread for refreshes, imports, and subscriptions
+// (each connection belongs to the thread that opened it), so it must stay
+// free of GUI types. Every method that can fail returns false, 0, or nullopt
+// and leaves the reason in lastError().
 class Store {
 public:
     Store();
@@ -82,7 +93,13 @@ public:
     int saveItems(qint64 feedId, const QList<ParsedItem> &items);
 
     QList<Article> articles(const ArticleFilter &filter);
+    std::optional<Article> article(qint64 id);
+    std::optional<LibraryCounts> counts();
     bool setRead(qint64 articleId, bool read);
+    // Marks every unread article the filter matches (its limit aside) read,
+    // up to `upToId`, so articles that arrived after the view was listed stay
+    // unread. Returns how many changed, or -1 on failure.
+    int markRead(const ArticleFilter &filter, qint64 upToId);
     bool setStarred(qint64 articleId, bool starred);
 
     // The key two feed URLs share when they are the same subscription.

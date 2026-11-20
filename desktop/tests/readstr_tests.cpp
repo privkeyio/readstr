@@ -1,5 +1,11 @@
 #include <QBuffer>
 #include <QDir>
+#include <QDirIterator>
+#include <QElapsedTimer>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QRegularExpression>
+#include <QSignalSpy>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -14,16 +20,43 @@
 #include <optional>
 #include <sys/stat.h>
 
+#include "articlemodel.h"
+#include "backend.h"
 #include "cli.h"
 #include "discovery.h"
 #include "fakehttpserver.h"
 #include "feedparser.h"
 #include "fetcher.h"
+#include "filepicker.h"
 #include "opml.h"
 #include "paths.h"
+#include "sanitizer.h"
+#include "sourcemodel.h"
 #include "store.h"
 #include "theme.h"
 #include "translator.h"
+
+// Answers the OPML dialogs the way a user would, without a portal.
+class FakePicker : public FilePicker {
+public:
+    QUrl openUrl, saveUrl;
+    QString failure;
+    QString suggestedName;
+
+    void openOpml() override {
+        if (!failure.isEmpty())
+            emit failed(failure);
+        else if (!openUrl.isEmpty())
+            emit openSelected(openUrl);
+    }
+    void saveOpml(const QString &name) override {
+        suggestedName = name;
+        if (!failure.isEmpty())
+            emit failed(failure);
+        else if (!saveUrl.isEmpty())
+            emit saveSelected(saveUrl);
+    }
+};
 
 class ReadstrTests : public QObject {
     Q_OBJECT
@@ -1518,6 +1551,741 @@ private slots:
         QCOMPARE(subscribed.value("articles").toInt(), 4);
     }
 
+    // Hyprland's event socket
+
+    void themeFollowsHyprlandEventSocket()
+    {
+        // The fake hyprctl lives outside the watched theme directory, so
+        // changing its answer cannot trigger a theme reload (which asks for
+        // the rounding too) and only the event socket can.
+        QTemporaryDir dir;
+        QVERIFY(QDir(dir.path()).mkpath("hypr") && QDir(dir.path()).mkpath("current"));
+        const QString response = dir.filePath("hypr/response.json"), command = dir.filePath("hypr/hyprctl");
+        write(command, "#!/bin/sh\ncat '" + response.toUtf8() + "'\n");
+        QVERIFY(QFile::setPermissions(command, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        write(response, "{\"int\":3}");
+        QLocalServer server;
+        QVERIFY(server.listen(dir.filePath("hypr/socket2.sock")));
+
+        Theme theme(dir.filePath("current"), nullptr, command, server.fullServerName());
+        QTRY_COMPARE(theme.radius(), 3);
+        QVERIFY(server.waitForNewConnection(5000) || server.hasPendingConnections());
+        QLocalSocket *events = server.nextPendingConnection();
+        QVERIFY(events);
+        QTRY_VERIFY(theme.listening());
+
+        // Nothing polls while the socket is up: a changed value waits for
+        // Hyprland's word.
+        write(response, "{\"int\":6}");
+        QTest::qWait(1500);
+        QCOMPARE(theme.radius(), 3);
+        events->write("activewindow>>kitty,~\nconfigreloaded>>\n");
+        events->flush();
+        QTRY_COMPARE(theme.radius(), 6);
+
+        // Without the socket it goes back to asking every second.
+        events->disconnectFromServer();
+        write(response, "{\"int\":9}");
+        QTRY_COMPARE_WITH_TIMEOUT(theme.radius(), 9, 10000);
+        QVERIFY(!theme.listening());
+    }
+
+    void themePollsWithoutAnEventSocket()
+    {
+        QTemporaryDir dir;
+        const QString response = dir.filePath("response.json"), command = dir.filePath("hyprctl");
+        write(command, "#!/bin/sh\ncat '" + response.toUtf8() + "'\n");
+        QVERIFY(QFile::setPermissions(command, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        write(response, "{\"int\":2}");
+        Theme theme(dir.path(), nullptr, command, dir.filePath("missing.sock"));
+        QTRY_COMPARE(theme.radius(), 2);
+        write(response, "{\"int\":5}");
+        QTRY_COMPARE_WITH_TIMEOUT(theme.radius(), 5, 10000);
+    }
+
+    // The catalogs translate every string the window and its C++ show, so a
+    // new string cannot ship in English only.
+    void catalogsCoverEveryString_data()
+    {
+        QTest::addColumn<QString>("language");
+        for (const char *language : {"da", "pt", "pt-BR", "ru"})
+            QTest::newRow(language) << language;
+    }
+
+    void catalogsCoverEveryString()
+    {
+        QFETCH(QString, language);
+        QTemporaryDir dir;
+        write(dir.path() + "/language", language.toUtf8());
+        Translator translator(dir.path() + "/language");
+
+        static const QRegularExpression qmlString(QStringLiteral("qsTr\\(\"((?:[^\"\\\\]|\\\\.)*)\""));
+        static const QRegularExpression cppString(
+            QStringLiteral("(?:\\btr|translate)\\((?:\"[A-Za-z]+\",\\s*)?\"((?:[^\"\\\\]|\\\\.)*)\""));
+        QStringList strings;
+        QDirIterator qml(":/", {"*.qml"});
+        while (qml.hasNext()) {
+            QFile file(qml.next());
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            for (const auto &match : qmlString.globalMatch(QString::fromUtf8(file.readAll())))
+                strings << match.captured(1);
+        }
+        const QString source = QFileInfo(QFINDTESTDATA("../src/backend.cpp")).absolutePath();
+        for (const char *name : {"backend.cpp", "sanitizer.cpp", "portalfilepicker.cpp"}) {
+            QFile file(source + "/" + name);
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            for (const auto &match : cppString.globalMatch(QString::fromUtf8(file.readAll())))
+                strings << match.captured(1);
+        }
+        strings.removeDuplicates();
+        QVERIFY(strings.size() > 60);
+        QStringList missing;
+        for (const QString &text : strings) {
+            const QByteArray key = text.toUtf8();
+            if (translator.translate("Main", key.constData(), nullptr, text.contains("%n") ? 2 : -1).isNull())
+                missing << text;
+        }
+        QVERIFY2(missing.isEmpty(), qPrintable(missing.join(" | ")));
+
+        // English carries the plural forms of every counted string.
+        QTemporaryDir englishDir;
+        write(englishDir.path() + "/language", "en");
+        Translator english(englishDir.path() + "/language");
+        for (const QString &text : strings)
+            if (text.contains("%n"))
+                QVERIFY2(!english.translate("Main", text.toUtf8().constData(), nullptr, 1).isNull(), qPrintable(text));
+    }
+
+    // Sanitizer
+
+    void sanitizerKeepsTheAllowedSubset()
+    {
+        const QUrl base("https://blog.example.com/posts/1");
+        QCOMPARE(Sanitizer::toRichText("<p>Hi <strong>there</strong>, <em>you</em> <b>and</b> <i>them</i></p>", base),
+                 QString("<p>Hi <strong>there</strong>, <em>you</em> <b>and</b> <i>them</i></p>"));
+        QCOMPARE(Sanitizer::toRichText("<H2>Title</H2><UL><LI>one<li>two</UL><hr/><br>", base),
+                 QString("<h2>Title</h2><ul><li>one<li>two</li></li></ul><hr><br>"));
+        QCOMPARE(Sanitizer::toRichText("<blockquote>q</blockquote><pre><code>a &lt; b</code></pre>", base),
+                 QString("<blockquote>q</blockquote><pre><code>a &lt; b</code></pre>"));
+        QCOMPARE(Sanitizer::toRichText("<table><tr><th>a</th><td>b</td></tr></table>", base),
+                 QString("<table><tr><th>a</th><td>b</td></tr></table>"));
+        QCOMPARE(Sanitizer::toRichText("<a href=\"/two?x=1&amp;y=2\">next</a>", base),
+                 QString("<a href=\"https://blog.example.com/two?x=1&amp;y=2\">next</a>"));
+        // Other tags go but keep their text; blocks keep it on its own line.
+        QCOMPARE(Sanitizer::toRichText("<span>a</span><font color=red>b</font><div>c</div>d", base),
+                 QString("ab<br>c<br>d"));
+    }
+
+    void sanitizerDropsAttributes()
+    {
+        const QUrl base("https://blog.example.com/");
+        QCOMPARE(Sanitizer::toRichText("<p style=\"color:red;background:url(https://t.example/x)\" class=\"c\" "
+                                       "onclick=\"steal()\" id=x>t</p>",
+                                       base),
+                 QString("<p>t</p>"));
+        QCOMPARE(Sanitizer::toRichText("<a href='https://a.example/x' onmouseover='x()' style='y' target=_blank "
+                                       "title='t'>l</a>",
+                                       base),
+                 QString("<a href=\"https://a.example/x\">l</a>"));
+        QCOMPARE(Sanitizer::toRichText("<td background=\"https://t.example/bg.png\">c</td>", base),
+                 QString("<td>c</td>"));
+    }
+
+    void sanitizerDropsDangerousElementsWithTheirContent_data()
+    {
+        QTest::addColumn<QString>("html");
+        QTest::newRow("script") << "a<script>secret()</script>b";
+        QTest::newRow("script upper") << "a<SCRIPT type=text/javascript>secret()</SCRIPT >b";
+        QTest::newRow("script quoting") << "a<script>var s = '</scrip' + 't>secret';</script>b";
+        QTest::newRow("style") << "a<style>secret{background:url(https://t.example/p)}</style>b";
+        QTest::newRow("iframe") << "a<iframe src=https://t.example/f>secret</iframe>b";
+        QTest::newRow("object") << "a<object data=x><param name=secret value=1>secret</object>b";
+        QTest::newRow("embed") << "a<embed src=https://t.example/secret.swf>b";
+        QTest::newRow("form") << "a<form action=https://t.example/><input value=secret>secret<button>secret</button></form>b";
+        QTest::newRow("svg") << "a<svg><image href=https://t.example/secret.png/><text>secret</text></svg>b";
+        QTest::newRow("svg nested") << "a<svg><svg>secret</svg>secret</svg>b";
+        QTest::newRow("math") << "a<math><mi>secret</mi></math>b";
+        QTest::newRow("noscript") << "a<noscript><img src=https://t.example/secret.gif></noscript>b";
+        QTest::newRow("template") << "a<template><p>secret</p></template>b";
+        QTest::newRow("title") << "a<title>secret</title>b";
+        QTest::newRow("comment") << "a<!-- secret <img src=x> -->b";
+        QTest::newRow("cdata") << "a<![CDATA[ x ]]>b";
+        QTest::newRow("processing") << "a<?php secret ?>b";
+    }
+
+    void sanitizerDropsDangerousElementsWithTheirContent()
+    {
+        QFETCH(QString, html);
+        const QString out = Sanitizer::toRichText(html, QUrl("https://blog.example.com/"));
+        QVERIFY2(!out.contains("secret", Qt::CaseInsensitive), qPrintable(out));
+        QVERIFY2(out.startsWith('a') && out.endsWith('b'), qPrintable(out));
+    }
+
+    void sanitizerOnlyLinksTheWeb_data()
+    {
+        QTest::addColumn<QString>("href");
+        QTest::addColumn<QString>("expected");
+        QTest::newRow("https") << "https://a.example/x" << "https://a.example/x";
+        QTest::newRow("http") << "http://a.example/x" << "http://a.example/x";
+        QTest::newRow("relative") << "../y" << "https://blog.example.com/y";
+        QTest::newRow("protocol relative") << "//cdn.example.org/z" << "https://cdn.example.org/z";
+        QTest::newRow("credentials") << "https://user:pw@a.example/" << "https://a.example/";
+        QTest::newRow("javascript") << "javascript:alert(1)" << "";
+        QTest::newRow("javascript case") << "JaVaScRiPt:alert(1)" << "";
+        QTest::newRow("javascript hex entity") << "jav&#x61;script:alert(1)" << "";
+        QTest::newRow("javascript decimal entity") << "&#106;avascript:alert(1)" << "";
+        // An entity browsers know and the sanitizer does not stays literal,
+        // which makes the whole thing a relative path on the article's site.
+        QTest::newRow("javascript unknown entity") << "javascript&colon;alert(1)"
+                                                   << "https://blog.example.com/posts/javascript&amp;colon;alert(1)";
+        QTest::newRow("javascript tab") << "java\tscript:alert(1)" << "";
+        QTest::newRow("javascript newline entity") << "java&#10;script:alert(1)" << "";
+        QTest::newRow("javascript leading space") << " \x01javascript:alert(1)" << "";
+        QTest::newRow("data") << "data:text/html;base64,PHNjcmlwdD4=" << "";
+        QTest::newRow("vbscript") << "vbscript:msgbox" << "";
+        QTest::newRow("file") << "file:///etc/passwd" << "";
+        QTest::newRow("ftp") << "ftp://a.example/" << "";
+        QTest::newRow("mailto") << "mailto:a@example.com" << "";
+        QTest::newRow("empty") << "" << "";
+    }
+
+    void sanitizerOnlyLinksTheWeb()
+    {
+        QFETCH(QString, href);
+        QFETCH(QString, expected);
+        const QString out =
+            Sanitizer::toRichText("<a href=\"" + href + "\">x</a>", QUrl("https://blog.example.com/posts/1"));
+        if (expected.isEmpty())
+            QCOMPARE(out, QString("x"));
+        else
+            QCOMPARE(out, QString("<a href=\"%1\">x</a>").arg(expected));
+    }
+
+    void sanitizerNeverEmitsImagesOrRemoteResources()
+    {
+        const QUrl base("https://blog.example.com/");
+        QCOMPARE(Sanitizer::toRichText("<img src=\"https://t.example/chart.png\" alt=\"Sales &amp; <b>chart</b>\">", base),
+                 QString("<a href=\"https://t.example/chart.png\">[image: Sales &amp; &lt;b&gt;chart&lt;/b&gt;]</a>"));
+        QCOMPARE(Sanitizer::toRichText("<img src=/p.gif>", base),
+                 QString("<a href=\"https://blog.example.com/p.gif\">[image]</a>"));
+        QCOMPARE(Sanitizer::toRichText("<img data-src=https://t.example/lazy.png alt=lazy>", base),
+                 QString("<a href=\"https://t.example/lazy.png\">[image: lazy]</a>"));
+        QCOMPARE(Sanitizer::toRichText("<a href=https://a.example/><img src=https://t.example/i.png alt=i></a>", base),
+                 QString("<a href=\"https://a.example/\">[image: i]</a>"));
+        QCOMPARE(Sanitizer::toRichText("<img src=\"data:image/png;base64,AAAA\" alt=x>", base), QString());
+        QCOMPARE(Sanitizer::toRichText("<img src=\"javascript:alert(1)\" onerror=alert(1)>", base), QString());
+
+        const QStringList hostile{
+            "<IMG SRC=https://t.example/a.gif>",
+            "<img/src=https://t.example/a.gif>",
+            "<img\nsrc=https://t.example/a.gif>",
+            "<picture><source srcset=https://t.example/a.webp><img src=https://t.example/a.png></picture>",
+            "<svg><image href=https://t.example/a.png /></svg>",
+            "<input type=image src=https://t.example/a.png>",
+            "<body background=https://t.example/bg.png>x</body>",
+            "<table background=https://t.example/bg.png><tr><td>x</td></tr></table>",
+            "<div style=\"background-image:url(https://t.example/bg.png)\">x</div>",
+            "<link rel=stylesheet href=https://t.example/s.css>",
+            "<base href=https://t.example/>",
+            "<meta http-equiv=refresh content=\"0;url=https://t.example/\">",
+            "<style>@import url(https://t.example/s.css);</style>",
+            "<video poster=https://t.example/p.png src=https://t.example/v.mp4></video>",
+            "<audio src=https://t.example/a.mp3></audio>",
+            "<object data=https://t.example/o></object>",
+            "<a href=https://a.example/ style=\"background:url(https://t.example/p)\">x</a>",
+            "<p onload=\"fetch('https://t.example/')\">x</p>",
+            "<scr<script>ipt>alert(1)</script>",
+            "<<img src=https://t.example/a.gif>>",
+            "<img src=\"https://t.example/a.gif\"",
+        };
+        for (const QString &html : hostile) {
+            const QString out = Sanitizer::toRichText(html, base);
+            for (const char *token : {"<img", "style", "url(", "javascript", "onerror", "onload", "<script", "background",
+                                      "<link", "<base", "<meta", "<source", "<video", "<audio", "<object", "<input",
+                                      "<svg", "srcset", "poster"})
+                QVERIFY2(!out.contains(QLatin1String(token), Qt::CaseInsensitive),
+                         qPrintable(html + " -> " + out));
+        }
+    }
+
+    void sanitizerEscapesText()
+    {
+        const QUrl base("https://blog.example.com/");
+        QCOMPARE(Sanitizer::toRichText("5 < 6 > 4 & \"q\"", base), QString("5 &lt; 6 &gt; 4 &amp; &quot;q&quot;"));
+        QCOMPARE(Sanitizer::toRichText("&lt;script&gt;alert(1)&lt;/script&gt;", base),
+                 QString("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        QCOMPARE(Sanitizer::toRichText("caf&eacute; &unknown; &#0; &#xD800;", base),
+                 QString("caf&amp;eacute; &amp;unknown; &amp;#0; &amp;#xD800;"));
+        QCOMPARE(Sanitizer::toRichText(QString("a") + QChar(0) + "b", base), QString("a") + QChar(0xFFFD) + "b");
+        QCOMPARE(Sanitizer::plainToRichText("1 < 2 <b>"), QString("<p>1 &lt; 2 &lt;b&gt;</p>"));
+        QCOMPARE(Sanitizer::plainToRichText({}), QString());
+    }
+
+    void sanitizerBalancesTags()
+    {
+        const QUrl base("https://blog.example.com/");
+        QCOMPARE(Sanitizer::toRichText("<p><strong>bold", base), QString("<p><strong>bold</strong></p>"));
+        QCOMPARE(Sanitizer::toRichText("</p></div></strong>stray", base), QString("stray"));
+        QCOMPARE(Sanitizer::toRichText("<b><i>x</b>y</i>", base), QString("<b><i>x</i></b>y"));
+        QCOMPARE(Sanitizer::toRichText("<a href=https://a.example/>one<a href=https://b.example/>two</a>", base),
+                 QString("<a href=\"https://a.example/\">one</a><a href=\"https://b.example/\">two</a>"));
+        QCOMPARE(Sanitizer::toRichText("<a href=javascript:x>one</a>two", base), QString("onetwo"));
+        QCOMPARE(Sanitizer::toRichText("text <a href='https://a.example/", base), QString("text "));
+        QCOMPARE(Sanitizer::toRichText("<p>a</p><script>alert(1)", base), QString("<p>a</p>"));
+        QCOMPARE(Sanitizer::toRichText("a < b and </ c>d", base), QString("a &lt; b and d"));
+
+        QString deep;
+        for (int i = 0; i < 1000; ++i)
+            deep += "<blockquote>";
+        deep += "deep";
+        const QString out = Sanitizer::toRichText(deep, base);
+        QCOMPARE(out.count("<blockquote>"), Sanitizer::maxDepth);
+        QCOMPARE(out.count("</blockquote>"), Sanitizer::maxDepth);
+        QVERIFY(out.contains("deep"));
+    }
+
+    void sanitizerStaysFastOnHostileInput_data()
+    {
+        QTest::addColumn<QString>("html");
+        const int n = Sanitizer::maxInputLength;
+        QTest::newRow("unclosed tags") << QString("<a ").repeated(n / 3);
+        QTest::newRow("unclosed comments") << QString("<!--").repeated(n / 4);
+        QTest::newRow("unclosed scripts") << QString("<script>").repeated(n / 8);
+        QTest::newRow("unclosed quotes") << QString("<a href='x>").repeated(n / 11);
+        QTest::newRow("bogus") << QString("<!x").repeated(n / 3);
+        QTest::newRow("end tags") << QString("</b").repeated(n / 3);
+        QTest::newRow("nested") << QString("<b><i>").repeated(n / 6);
+        QTest::newRow("closers") << QString("<p></b>").repeated(n / 7);
+        QTest::newRow("links") << QString("<a href=x>").repeated(n / 10);
+        QTest::newRow("images") << QString("<img src=x>").repeated(n / 11);
+        QTest::newRow("entities") << QString("&#x61;&amp;").repeated(n / 11);
+        QTest::newRow("lt") << QString("<").repeated(n);
+        QTest::newRow("oversized") << QString("<p>x</p>").repeated(n);
+    }
+
+    void sanitizerStaysFastOnHostileInput()
+    {
+        QFETCH(QString, html);
+        // A long base URL makes every link and image expensive to write.
+        const QUrl base("https://blog.example.com/" + QString("a").repeated(4000));
+        QElapsedTimer timer;
+        timer.start();
+        const QString out = Sanitizer::toRichText(html, base);
+        QVERIFY2(timer.elapsed() < 5000, qPrintable(QString::number(timer.elapsed())));
+        QVERIFY(out.size() <= Sanitizer::maxOutputLength + 8192);
+        if (html.size() > Sanitizer::maxInputLength || html.startsWith("<<"))
+            QVERIFY(out.endsWith(QString("<p>") + QChar(0x2026) + "</p>"));
+    }
+
+    // Models
+
+    void sourceModelGroupsFeedsByCategory()
+    {
+        SourceModel model;
+        Feed loose{1, "https://l.example/", "Loose", {}, {}, {}, {}, {}, {}, {}, 2, 3};
+        Feed news{2, "https://n.example/", "Daily", {}, {}, "News", {}, {}, "HTTP 404", {}, 1, 1};
+        Feed alpha{3, "https://a.example/", "Alpha", {}, {}, "art", {}, {}, {}, {}, 4, 4};
+        model.setLibrary({loose, news, alpha}, LibraryCounts{8, 7, 1, 8});
+        QCOMPARE(model.rowCount(), 9);
+        const QStringList kinds{"all", "unread", "starred", "category", "feed", "category", "feed", "category", "feed"};
+        for (int i = 0; i < kinds.size(); ++i)
+            QCOMPARE(model.data(model.index(i), SourceModel::KindRole).toString(), kinds.at(i));
+        QCOMPARE(model.data(model.index(0), SourceModel::CountRole).toInt(), 7);
+        QCOMPARE(model.data(model.index(2), SourceModel::CountRole).toInt(), 1);
+        // Categories sort case-insensitively, each followed by its feeds.
+        QCOMPARE(model.data(model.index(5), SourceModel::CategoryRole).toString(), QString("art"));
+        QCOMPARE(model.data(model.index(5), SourceModel::CountRole).toInt(), 4);
+        QCOMPARE(model.data(model.index(6), SourceModel::TitleRole).toString(), QString("Alpha"));
+        QCOMPARE(model.data(model.index(8), SourceModel::LastErrorRole).toString(), QString("HTTP 404"));
+        QVERIFY(!model.data(model.index(3), SourceModel::SelectableRole).toBool());
+        QCOMPARE(model.step(2, 1), 4);
+        QCOMPARE(model.step(4, -1), 2);
+        QCOMPARE(model.step(8, 1), 8);
+        QCOMPARE(model.rowOf(SourceModel::Kind::Feed, 2), 8);
+
+        // Same rows, new counts: updated in place, no reset.
+        QSignalSpy reset(&model, &QAbstractItemModel::modelReset);
+        QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+        news.unread = 0;
+        model.setLibrary({loose, news, alpha}, LibraryCounts{8, 6, 1, 8});
+        QCOMPARE(reset.count(), 0);
+        // All, Unread, the News heading, and Daily.
+        QCOMPARE(changed.count(), 4);
+        QCOMPARE(model.data(model.index(8), SourceModel::CountRole).toInt(), 0);
+        model.setLibrary({loose, alpha}, LibraryCounts{});
+        QCOMPARE(reset.count(), 1);
+        QCOMPARE(model.rowCount(), 7);
+    }
+
+    void articleModelTracksFlags()
+    {
+        ArticleModel model;
+        QSignalSpy count(&model, &ArticleModel::countChanged);
+        Article a, b, c;
+        a.id = 10, a.read = true, a.title = "a";
+        b.id = 11, b.title = "b", b.published = QDateTime(QDate(2026, 1, 2), QTime(3, 4), QTimeZone::UTC);
+        c.id = 12, c.read = true, c.title = "c";
+        model.setArticles({a, b, c});
+        QCOMPARE(count.count(), 1);
+        QCOMPARE(model.rowOf(12), 2);
+        QCOMPARE(model.nextUnread(-1), 1);
+        QCOMPARE(model.nextUnread(1), -1);
+        QVERIFY(model.data(model.index(0), ArticleModel::PublishedRole).isNull());
+        QCOMPARE(model.data(model.index(1), ArticleModel::PublishedRole).toDateTime(), b.published);
+        QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+        model.setFlags(1, true, true);
+        QCOMPARE(changed.count(), 1);
+        QVERIFY(model.data(model.index(1), ArticleModel::StarredRole).toBool());
+        model.setFlags(1, true, true);
+        QCOMPARE(changed.count(), 1);
+    }
+
+    // The window's backend
+
+    void backendShowsAndNavigatesTheLibrary()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+
+        Backend backend;
+        QCOMPARE(backend.feedCount(), 2);
+        QCOMPARE(backend.sourceKind(), QString("all"));
+        QCOMPARE(backend.articles()->count(), 5);
+        // Newest first, the undated one by arrival.
+        QCOMPARE(backend.articles()->at(0).title, QString("Newest"));
+        QCOMPARE(backend.sources()->data(backend.sources()->index(0), SourceModel::CountRole).toInt(), 4);
+        QVERIFY(!backend.hasArticle());
+
+        backend.moveArticle(1);
+        QCOMPARE(backend.articleIndex(), 0);
+        QCOMPARE(backend.articleTitle(), QString("Newest"));
+        QVERIFY(backend.articleRead());
+        QVERIFY2(!backend.articleHtml().contains("script"), qPrintable(backend.articleHtml()));
+        QVERIFY(backend.articleHtml().contains("<strong>full</strong>"));
+        QCOMPARE(backend.sources()->data(backend.sources()->index(0), SourceModel::CountRole).toInt(), 3);
+        backend.moveArticle(1);
+        QCOMPARE(backend.articleTitle(), QString("Second A"));
+        backend.moveArticle(10);
+        QCOMPARE(backend.articleIndex(), 4);
+        backend.moveArticle(-1);
+        QCOMPARE(backend.articleIndex(), 3);
+
+        Store store;
+        QVERIFY(store.open());
+        QCOMPARE(store.articles({}).size(), 5);
+        int unread = 0;
+        for (const Article &article : store.articles({}))
+            unread += !article.read;
+        QCOMPARE(unread, 1);
+
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Unread));
+        QCOMPARE(backend.sourceKind(), QString("unread"));
+        QCOMPARE(backend.articles()->count(), 1);
+        QVERIFY(!backend.hasArticle());
+        backend.nextUnread();
+        QVERIFY(backend.hasArticle());
+        QCOMPARE(backend.articleIndex(), 0);
+        // A read article stays in the Unread list until the view reloads.
+        QCOMPARE(backend.articles()->count(), 1);
+        backend.nextUnread();
+        QVERIFY(backend.status().contains("No more unread"));
+
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Feed, second));
+        QCOMPARE(backend.selectedFeedId(), second);
+        QCOMPARE(backend.sourceTitle(), QString("Second"));
+        QCOMPARE(backend.articles()->count(), 2);
+        backend.moveSource(-1);
+        QCOMPARE(backend.selectedFeedId(), first);
+        backend.moveSource(-1);
+        QCOMPARE(backend.sourceKind(), QString("starred"));
+    }
+
+    void backendTogglesFlagsAndMarksTheViewRead()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        Backend backend;
+        backend.selectArticle(0);
+        const qint64 id = backend.articleId();
+
+        backend.toggleStar();
+        QVERIFY(backend.articleStarred());
+        backend.toggleRead();
+        QVERIFY(!backend.articleRead());
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.article(id)->starred);
+        QVERIFY(!store.article(id)->read);
+        QCOMPARE(backend.sources()->data(backend.sources()->index(2), SourceModel::CountRole).toInt(), 1);
+        QVERIFY(backend.articles()->at(0).starred);
+
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Starred));
+        QCOMPARE(backend.articles()->count(), 1);
+        backend.toggleStar();
+        QVERIFY(!backend.hasArticle());
+        backend.selectArticle(0);
+        backend.toggleStar();
+        QVERIFY(!store.article(id)->starred);
+
+        // Marking a feed read leaves the other feed, and anything newer than
+        // the list, alone.
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Feed, first));
+        ParsedItem late;
+        late.guid = "late";
+        late.title = "Late";
+        QCOMPARE(store.saveItems(first, {late}), 1);
+        backend.markViewRead();
+        QVERIFY(backend.status().contains("articles read"));
+        for (const Article &article : store.articles({}))
+            QCOMPARE(article.read, article.feedId == first ? article.guid != "late" : article.guid == "second-b");
+        QCOMPARE(backend.articles()->count(), 4);
+    }
+
+    void backendOpensOnlyWebLinks()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        Backend backend;
+        QList<QUrl> opened;
+        backend.setUrlOpener([&opened](const QUrl &url) {
+            opened << url;
+            return true;
+        });
+        backend.openOriginal();
+        QVERIFY(opened.isEmpty());
+        backend.selectArticle(0);
+        backend.openOriginal();
+        QCOMPARE(opened, QList<QUrl>{QUrl("https://first.example.com/newest")});
+        for (const char *link : {"javascript:alert(1)", "file:///etc/passwd", "data:text/html,x", "mailto:a@b.c", ""})
+            QVERIFY2(!backend.openLink(link), link);
+        QVERIFY(backend.statusError());
+        QVERIFY(backend.openLink("http://other.example.org/page"));
+        QCOMPARE(opened.size(), 2);
+        backend.setUrlOpener([](const QUrl &) { return false; });
+        QVERIFY(!backend.openLink("https://other.example.org/"));
+        QVERIFY(backend.status().contains("other.example.org"));
+    }
+
+    void backendSubscribesThroughDiscovery()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.serve("/", "<head><link rel=\"alternate\" type=\"application/rss+xml\" href=\"/feed.xml\"></head>",
+                     "text/html");
+        server.serve("/feed.xml", fixture("rss2.xml"));
+
+        Backend backend;
+        QSignalSpy subscribed(&backend, &Backend::subscribed);
+        backend.addFeed(server.url("/").toString());
+        QVERIFY(backend.adding());
+        QVERIFY(subscribed.wait(20000));
+        QVERIFY(!backend.adding());
+        QVERIFY(backend.addError().isEmpty());
+        QCOMPARE(backend.feedCount(), 1);
+        QCOMPARE(backend.sourceKind(), QString("feed"));
+        QCOMPARE(backend.sourceTitle(), QString("Example & Friends"));
+        QCOMPARE(backend.articles()->count(), 4);
+        QVERIFY2(backend.status().startsWith("Subscribed to Example & Friends"), qPrintable(backend.status()));
+
+        backend.addFeed(server.url("/feed.xml").toString());
+        QVERIFY(subscribed.wait(20000));
+        QVERIFY(backend.status().startsWith("Already subscribed"));
+        QCOMPARE(backend.feedCount(), 1);
+
+        backend.addFeed("not an address");
+        QVERIFY(!backend.adding());
+        QVERIFY(!backend.addError().isEmpty());
+        backend.clearAddError();
+        backend.addFeed(server.url("/missing").toString());
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.adding(), 20000);
+        QVERIFY2(backend.addError().contains("HTTP 404"), qPrintable(backend.addError()));
+        QCOMPARE(backend.feedCount(), 1);
+    }
+
+    void backendUnsubscribes()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        Backend backend;
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Feed, first));
+        backend.selectArticle(0);
+        QVERIFY(backend.unsubscribe(first));
+        QCOMPARE(backend.feedCount(), 1);
+        QCOMPARE(backend.sourceKind(), QString("all"));
+        QVERIFY(!backend.hasArticle());
+        QCOMPARE(backend.articles()->count(), 2);
+        QVERIFY(backend.status().contains("First"));
+        QVERIFY(!backend.unsubscribe(first));
+        QVERIFY(backend.statusError());
+    }
+
+    // The window keeps drawing while feeds load: fetches run on its event
+    // loop and the parsing and saving on the worker thread.
+    void backendRefreshesWithoutBlocking()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.route("/slow.xml", [](const FakeHttpServer::Request &) {
+            FakeHttpServer::Response response{200, {{"Content-Type", "application/rss+xml"}}, fixture("rss2.xml")};
+            response.delayMs = 1500;
+            return response;
+        });
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.addFeed(server.url("/slow.xml").toString(), "Slow"));
+            QVERIFY(store.addFeed(server.url("/missing.xml").toString(), "Missing"));
+        }
+
+        Backend backend;
+        int ticks = 0;
+        QTimer ticker;
+        ticker.setInterval(20);
+        connect(&ticker, &QTimer::timeout, [&ticks] { ++ticks; });
+        ticker.start();
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        QElapsedTimer timer;
+        timer.start();
+        backend.refreshAll();
+        QVERIFY(timer.elapsed() < 1000);
+        QVERIFY(backend.refreshing());
+        QCOMPARE(backend.refreshTotal(), 2);
+        backend.refreshAll();
+        QVERIFY(finished.wait(30000));
+        QCOMPARE(finished.count(), 1);
+        QVERIFY(timer.elapsed() >= 1400);
+        // About 75 ticks at 20 ms; a blocked loop would get one or two.
+        QVERIFY2(ticks >= 15, qPrintable(QString::number(ticks)));
+        QVERIFY(!backend.refreshing());
+        QCOMPARE(backend.refreshDone(), 2);
+        QCOMPARE(backend.articles()->count(), 4);
+        QVERIFY(backend.statusError());
+        QVERIFY2(backend.status().contains("Missing") && backend.status().contains("HTTP 404"),
+                 qPrintable(backend.status()));
+        const int missing = backend.sources()->rowOf(SourceModel::Kind::Feed, 2);
+        QCOMPARE(backend.sources()->data(backend.sources()->index(missing), SourceModel::LastErrorRole).toString(),
+                 QString("HTTP 404"));
+
+        // One feed on its own, and nothing new this time.
+        backend.refreshFeed(1);
+        QCOMPARE(backend.refreshTotal(), 1);
+        QVERIFY(finished.wait(30000));
+        QCOMPARE(backend.status(), QString("No new articles"));
+        QVERIFY(!backend.statusError());
+    }
+
+    void backendRefreshesAutomaticallyWithJitter()
+    {
+        QCOMPARE(Backend::autoRefreshDelayMs(0), 27 * 60 * 1000);
+        QCOMPARE(Backend::autoRefreshDelayMs(0.5), 30 * 60 * 1000);
+        QCOMPARE(Backend::autoRefreshDelayMs(1), 33 * 60 * 1000);
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        Backend backend;
+        QCOMPARE(backend.nextAutoRefreshMs(), -1);
+        backend.startAutoRefresh();
+        const int next = backend.nextAutoRefreshMs();
+        QVERIFY2(next > 26 * 60 * 1000 && next <= 33 * 60 * 1000, qPrintable(QString::number(next)));
+    }
+
+    void backendImportsAndExportsOpml()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", (dir.path() + "/home").toUtf8());
+        FakeHttpServer server;
+        server.serve("/one.xml", fixture("rss2.xml"));
+        server.serve("/two.xml", fixture("atom.xml"), "application/atom+xml");
+        write(dir.path() + "/in.opml",
+              "<opml version=\"2.0\"><body><outline text=\"Folder\">"
+              "<outline type=\"rss\" text=\"One\" xmlUrl=\"" + server.url("/one.xml").toString().toUtf8() + "\"/>"
+              "<outline type=\"rss\" text=\"One again\" xmlUrl=\"" + server.url("/one.xml/").toString().toUtf8() + "\"/>"
+              "</outline><outline type=\"rss\" text=\"Two\" xmlUrl=\"" + server.url("/two.xml").toString().toUtf8() + "\"/>"
+              "<outline type=\"nostr\" text=\"Author\" nostr=\"npub1abc\"/>"
+              "<outline type=\"rss\" text=\"Bad\" xmlUrl=\"javascript:alert(1)\"/></body></opml>");
+
+        FakePicker picker;
+        Backend backend(&picker);
+        QSignalSpy imported(&backend, &Backend::imported);
+        QSignalSpy refreshed(&backend, &Backend::refreshFinished);
+        picker.openUrl = QUrl::fromLocalFile(dir.path() + "/in.opml");
+        backend.importOpml();
+        QVERIFY(imported.wait(20000));
+        QCOMPARE(backend.feedCount(), 2);
+        QVERIFY2(backend.status().startsWith("Imported 2 feeds (1 already subscribed, 2 not supported yet)"),
+                 qPrintable(backend.status()));
+        // Imported feeds are fetched straight away.
+        QVERIFY(refreshed.wait(20000));
+        QCOMPARE(backend.articles()->count(), 4 + 3);
+
+        picker.openUrl = QUrl::fromLocalFile(dir.path() + "/missing.opml");
+        backend.importOpml();
+        QTRY_VERIFY(backend.statusError());
+        QVERIFY(backend.status().contains("cannot read"));
+        picker.openUrl = QUrl("https://example.com/remote.opml");
+        backend.importOpml();
+        QVERIFY(backend.status().contains("local files"));
+
+        picker.saveUrl = QUrl::fromLocalFile(dir.path() + "/out.opml");
+        backend.exportOpml();
+        QCOMPARE(picker.suggestedName, QString("readstr-subscriptions.opml"));
+        QVERIFY2(!backend.statusError(), qPrintable(backend.status()));
+        QCOMPARE(mode(dir.path() + "/out.opml"), 0600);
+        const QByteArray exported = fixtureAt(dir.path() + "/out.opml");
+        QVERIFY(exported.contains(server.url("/two.xml").toString().toUtf8()));
+        QCOMPARE(Opml::parse(exported).size(), 2);
+        picker.saveUrl = QUrl::fromLocalFile(dir.path() + "/no/such/dir/out.opml");
+        backend.exportOpml();
+        QVERIFY(backend.statusError());
+
+        picker.failure = "The desktop portal is not running";
+        backend.importOpml();
+        QCOMPARE(backend.status(), picker.failure);
+        Backend withoutPicker;
+        withoutPicker.importOpml();
+        QVERIFY(withoutPicker.statusError());
+    }
+
+    void storeMarksReadUpToAnId()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/library.db"));
+        const qint64 feed = store.addFeed("https://a.example/feed", "A");
+        ParsedItem one, two;
+        one.guid = one.title = "1";
+        two.guid = two.title = "2";
+        QCOMPARE(store.saveItems(feed, {one, two}), 2);
+        const LibraryCounts counts = *store.counts();
+        QCOMPARE(counts.total, 2);
+        QCOMPARE(counts.unread, 2);
+        QCOMPARE(store.markRead({}, counts.lastId - 1), 1);
+        QCOMPARE(store.counts()->unread, 1);
+        ArticleFilter starred;
+        starred.starredOnly = true;
+        QCOMPARE(store.markRead(starred, counts.lastId), 0);
+        QVERIFY(!store.article(9999));
+        ArticleFilter light;
+        light.withContent = false;
+        two.content = "<p>body</p>";
+        store.saveItems(feed, {two});
+        QVERIFY(store.articles(light).at(0).content.isEmpty());
+        QCOMPARE(store.article(counts.lastId)->content, QString("<p>body</p>"));
+    }
+
 private:
     // Restores the variables a test changes, so later tests see the original
     // environment even when a comparison fails part way.
@@ -1559,6 +2327,34 @@ private:
     static QByteArray fixture(const char *name)
     {
         return fixtureAt(QFINDTESTDATA(QString("fixtures/") + name));
+    }
+
+    // Two feeds, five articles: "Newest" (with markup to sanitize), "Older",
+    // and "Oldest" in First, "Second A" and "Second B" (read) in Second.
+    static std::pair<qint64, qint64> seedLibrary()
+    {
+        Store store;
+        if (!store.open())
+            qFatal("cannot open the library: %s", qPrintable(store.lastError()));
+        const qint64 first = store.addFeed("https://first.example.com/feed", "First");
+        const qint64 second = store.addFeed("https://second.example.com/feed", "Second");
+        auto item = [](const char *guid, const char *title, int day) {
+            ParsedItem item;
+            item.guid = guid;
+            item.title = title;
+            item.url = QStringLiteral("https://first.example.com/") + guid;
+            if (day)
+                item.published = QDateTime(QDate(2026, 1, day), QTime(12, 0), QTimeZone::UTC);
+            return item;
+        };
+        ParsedItem newest = item("newest", "Newest", 20);
+        newest.content = "<p>The <strong>full</strong> text.</p><script>alert(1)</script>";
+        store.saveItems(first, {newest, item("older", "Older", 10), item("oldest", "Oldest", 1)});
+        store.saveItems(second, {item("second-a", "Second A", 15), item("second-b", "Second B", 5)});
+        for (const Article &article : store.articles({}))
+            if (article.guid == "second-b")
+                store.setRead(article.id, true);
+        return {first, second};
     }
 
     static int mode(const QString &path)

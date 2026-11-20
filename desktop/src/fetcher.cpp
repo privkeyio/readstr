@@ -167,27 +167,58 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
     });
 }
 
-void Fetcher::fetchEach(const QList<FetchRequest> &requests,
-                        const std::function<void(qsizetype, const FetchResult &)> &each) {
-    qsizetype next = 0, pending = requests.size();
-    QEventLoop loop;
+struct Fetcher::Batch {
+    QList<FetchRequest> requests;
+    std::function<void(qsizetype, const FetchResult &)> each;
+    std::function<void()> finished;
+    qsizetype next = 0;
+    qsizetype pending = 0;
+};
+
+void Fetcher::fetchEachLater(const QList<FetchRequest> &requests,
+                             std::function<void(qsizetype, const FetchResult &)> each,
+                             std::function<void()> finished) {
+    auto batch = std::make_shared<Batch>();
+    batch->requests = requests;
+    batch->each = std::move(each);
+    batch->finished = std::move(finished);
+    batch->pending = requests.size();
+    if (requests.isEmpty()) {
+        if (batch->finished)
+            QTimer::singleShot(0, this, batch->finished);
+        return;
+    }
     // Each request is issued only when a slot frees up, so its deadline
     // starts when it is sent rather than while it waits.
-    std::function<void()> issue = [&] {
-        const qsizetype index = next++;
-        fetch(requests.at(index), [&, index](const FetchResult &result) {
-            each(index, result);
-            if (next < requests.size())
-                issue();
-            if (--pending == 0)
-                loop.quit();
-        });
-    };
-    while (next < requests.size() && next < qMax(1, m_limits.maxConcurrent))
-        issue();
-    // Every callback arrives through the event loop, never during fetch(), so
-    // the loop is always running when the last one quits it.
-    if (pending > 0)
+    while (batch->next < requests.size() && batch->next < qMax(1, m_limits.maxConcurrent))
+        issueNext(batch);
+}
+
+void Fetcher::issueNext(const std::shared_ptr<Batch> &batch) {
+    const qsizetype index = batch->next++;
+    fetch(batch->requests.at(index), [this, batch, index](const FetchResult &result) {
+        batch->each(index, result);
+        if (batch->next < batch->requests.size())
+            issueNext(batch);
+        if (--batch->pending == 0 && batch->finished)
+            batch->finished();
+    });
+}
+
+void Fetcher::fetchEach(const QList<FetchRequest> &requests,
+                        const std::function<void(qsizetype, const FetchResult &)> &each) {
+    if (requests.isEmpty())
+        return;
+    QEventLoop loop;
+    bool done = false;
+    fetchEachLater(requests, each, [&] {
+        done = true;
+        loop.quit();
+    });
+    // Every callback arrives through the event loop, never during
+    // fetchEachLater(), so the loop is always running when the last one
+    // quits it.
+    if (!done)
         loop.exec();
 }
 

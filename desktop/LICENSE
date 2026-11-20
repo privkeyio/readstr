@@ -23,9 +23,10 @@ SOFTWARE.
 ---
 
 src/theme.cpp and src/translator.cpp follow the Omarchy app templates from
-Omacut and Monologue, which their source comments credit as
-"(MIT, David Heinemeier Hansson)". Those portions are used under the MIT
-License:
+Omacut and Monologue, and src/filepicker.h and src/portalfilepicker.{h,cpp}
+are adapted from Omacut (https://github.com/omacom-io/omacut), which their
+source comments credit as "(MIT, David Heinemeier Hansson)". Those portions
+are used under the MIT License:
 
 Copyright (c) 2026 David Heinemeier Hansson
 

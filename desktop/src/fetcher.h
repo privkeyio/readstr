@@ -7,6 +7,7 @@
 #include <QString>
 #include <QUrl>
 #include <functional>
+#include <memory>
 
 struct FetchRequest {
     QUrl url;
@@ -63,14 +64,21 @@ public:
     // for all of them in a local event loop, for the headless commands. Each
     // result goes to `each` (with the index of its request) as soon as it
     // arrives, so a caller that consumes it keeps only a few bodies in memory.
-    // The window uses fetch().
     void fetchEach(const QList<FetchRequest> &requests, const std::function<void(qsizetype, const FetchResult &)> &each);
     QList<FetchResult> fetchAll(const QList<FetchRequest> &requests);
+    // fetchEach() without the local event loop: it returns at once, and
+    // `finished` runs on this object's thread after the last `each`. The
+    // window uses this, so nothing waits in a nested loop.
+    void fetchEachLater(const QList<FetchRequest> &requests,
+                        std::function<void(qsizetype, const FetchResult &)> each,
+                        std::function<void()> finished = {});
     FetchResult get(const FetchRequest &request) { return fetchAll({request}).constFirst(); }
 
     static QByteArray userAgent();
 
 private:
+    struct Batch;
+    void issueNext(const std::shared_ptr<Batch> &batch);
     void fetchWithin(const FetchRequest &request, std::function<void(const FetchResult &)> done,
                      const Limits &limits);
 

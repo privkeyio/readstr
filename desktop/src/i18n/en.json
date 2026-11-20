@@ -1,1 +1,30 @@
-{}
+{
+  "%n articles": {
+    "one": "%n article",
+    "other": "%n articles"
+  },
+  "Marked %n articles read": {
+    "one": "Marked %n article read",
+    "other": "Marked %n articles read"
+  },
+  "Subscribed to %1 (%n articles)": {
+    "one": "Subscribed to %1 (%n article)",
+    "other": "Subscribed to %1 (%n articles)"
+  },
+  "%n feeds could not be refreshed, among them %1": {
+    "one": "%n feed could not be refreshed: %1",
+    "other": "%n feeds could not be refreshed, among them %1"
+  },
+  "%n new articles": {
+    "one": "%n new article",
+    "other": "%n new articles"
+  },
+  "Imported %n feeds (%1 already subscribed, %2 not supported yet)": {
+    "one": "Imported %n feed (%1 already subscribed, %2 not supported yet)",
+    "other": "Imported %n feeds (%1 already subscribed, %2 not supported yet)"
+  },
+  "Exported %n feeds to %1": {
+    "one": "Exported %n feed to %1",
+    "other": "Exported %n feeds to %1"
+  }
+}

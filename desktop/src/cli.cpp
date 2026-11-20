@@ -3,14 +3,11 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QSaveFile>
 #include <QSet>
 
 #include "discovery.h"
 #include "fetcher.h"
-#include "feedparser.h"
-#include "opml.h"
-#include "smallfile.h"
+#include "library.h"
 #include "store.h"
 
 namespace {
@@ -146,11 +143,6 @@ QJsonObject articleJson(const Article &article) {
             {"starred", article.starred}};
 }
 
-bool isWebUrl(const QUrl &url) {
-    const QString scheme = url.scheme().toLower();
-    return url.isValid() && (scheme == "http" || scheme == "https") && !url.host().isEmpty();
-}
-
 int feeds(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
     Options options;
     if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
@@ -234,7 +226,7 @@ int subscribe(const QString &command, const QStringList &arguments, QTextStream 
     if (options.positional.size() != 1)
         return fail(command, "needs one URL", err);
     const QUrl url(options.positional.first().trimmed(), QUrl::StrictMode);
-    if (!isWebUrl(url))
+    if (!Library::isWebUrl(url))
         return fail(command, "the URL must start with http:// or https://", err);
 
     Store store;
@@ -245,25 +237,12 @@ int subscribe(const QString &command, const QStringList &arguments, QTextStream 
     if (!found.found)
         return fail(command, found.error, err);
 
-    const QString feedUrl = found.feedUrl.toString(QUrl::FullyEncoded);
-    bool created = false;
-    const qint64 id = store.addFeed(feedUrl, found.feed.title, {}, &created);
-    if (!id)
-        return fail(command, store.lastError(), err);
-    int added = 0;
-    if (created) {
-        added = store.saveItems(id, found.feed.items);
-        if (added < 0 || !store.updateFeedDetails(id, found.feed)
-            || !store.recordFetch(id, found.fetch.etag, found.fetch.lastModified, {})) {
-            // A feed left half saved would read as already subscribed next
-            // time and never get its articles, so it goes and a retry starts
-            // clean.
-            const QString error = store.lastError();
-            store.removeFeed(id);
-            return fail(command, error, err);
-        }
-    }
-    const std::optional<Feed> feed = store.feed(id);
+    const Library::Subscription subscription = Library::subscribe(store, found);
+    if (!subscription.error.isEmpty())
+        return fail(command, subscription.error, err);
+    const bool created = subscription.created;
+    const int added = subscription.added;
+    const std::optional<Feed> feed = store.feed(subscription.id);
     if (!feed)
         return fail(command, store.lastError(), err);
 
@@ -333,45 +312,17 @@ int refresh(const QString &command, const QStringList &arguments, QTextStream &o
 
     // Each response is parsed and saved as it arrives, so only the few in
     // flight hold a body; the rows are printed in feed order at the end.
-    struct Row {
-        QString status, error, title;
-        int added = 0;
-    };
-    QList<Row> rows(targets.size());
+    QList<Library::Refresh> rows(targets.size());
     Fetcher fetcher;
     fetcher.fetchEach(requests, [&](qsizetype i, const FetchResult &fetched) {
-        const Feed &feed = targets.at(i);
-        Row &row = rows[i];
-        row.title = feed.title;
-        if (!fetched.ok()) {
-            row.error = fetched.error;
-        } else if (fetched.notModified) {
-            row.status = QStringLiteral("not-modified");
-            // A 304 may leave out the validators; the stored ones still hold.
-            if (!store.recordFetch(feed.id, fetched.etag.isEmpty() ? feed.etag : fetched.etag,
-                                   fetched.lastModified.isEmpty() ? feed.lastModified : fetched.lastModified, {}))
-                row.error = store.lastError();
-        } else if (const auto parsed = FeedParser::parse(fetched.body, fetched.finalUrl, &row.error)) {
-            row.status = QStringLiteral("updated");
-            row.added = store.saveItems(feed.id, parsed->items);
-            if (row.added < 0 || !store.updateFeedDetails(feed.id, *parsed)
-                || !store.recordFetch(feed.id, fetched.etag, fetched.lastModified, {}))
-                row.error = store.lastError();
-            if (const auto updated = store.feed(feed.id))
-                row.title = updated->title;
-        }
-        if (!row.error.isEmpty()) {
-            row.status = QStringLiteral("error");
-            row.added = 0;
-            store.recordFetch(feed.id, {}, {}, row.error);
-        }
+        rows[i] = Library::apply(store, targets.at(i), fetched);
     });
 
     int code = 0;
     QJsonArray array;
     for (qsizetype i = 0; i < targets.size(); ++i) {
         const Feed &feed = targets.at(i);
-        const Row &row = rows.at(i);
+        const Library::Refresh &row = rows.at(i);
         if (!row.error.isEmpty()) {
             err << "readstr " << command << ": " << printable(row.title) << ": " << printable(row.error) << "\n";
             code = 1;
@@ -426,54 +377,19 @@ int importOpml(const QString &command, const QStringList &arguments, QTextStream
         return 1;
     if (options.positional.size() != 1)
         return fail(command, "needs one OPML file", err);
-    const QString path = options.positional.first();
-    const QByteArray data = readSmallFile(path, Opml::maxBytes);
-    if (data.isNull())
-        return fail(command,
-                    QStringLiteral("cannot read %1 (missing, not a regular file, or larger than %2 MiB)")
-                        .arg(path)
-                        .arg(Opml::maxBytes / (1024 * 1024)),
-                    err);
-    QString error;
-    const QList<Opml::Outline> outlines = Opml::parse(data, &error);
-    if (!error.isEmpty())
-        return fail(command, error, err);
-
-    // Nostr sources arrive in phase 2; until then they are counted, not
-    // dropped silently. They are set aside before de-duplication, so an
-    // unsupported outline cannot shadow a supported one with the same key.
-    QList<Opml::Outline> supported;
-    int unsupported = 0;
-    for (const Opml::Outline &outline : outlines) {
-        if (!outline.npub.isEmpty() || !isWebUrl(QUrl(outline.xmlUrl, QUrl::StrictMode)))
-            ++unsupported;
-        else
-            supported << outline;
-    }
-
     Store store;
     if (!openStore(command, store, err))
         return 1;
-    const QList<Feed> list = store.feeds();
-    if (!store.lastError().isEmpty())
-        return fail(command, store.lastError(), err);
-    QStringList existing;
-    for (const Feed &feed : list)
-        existing << feed.url;
-    const Opml::Plan plan = Opml::plan(supported, existing);
-
-    int added = 0;
-    for (const Opml::Outline &outline : plan.toAdd) {
-        bool created = false;
-        if (!store.addFeed(outline.xmlUrl, outline.title, outline.folder, &created))
-            return fail(command, store.lastError(), err);
-        added += created;
-    }
+    const Library::Import imported = Library::importFile(store, options.positional.first());
+    if (!imported.error.isEmpty())
+        return fail(command, imported.error, err);
 
     if (options.json)
-        printJson(QJsonObject{{"added", added}, {"skipped", plan.skipped}, {"unsupported", unsupported}}, out);
+        printJson(QJsonObject{{"added", imported.added}, {"skipped", imported.skipped}, {"unsupported", imported.unsupported}},
+                  out);
     else
-        out << "Imported " << added << " feeds (" << plan.skipped << " already subscribed, " << unsupported
+        out << "Imported " << imported.added << " feeds (" << imported.skipped << " already subscribed, "
+            << imported.unsupported
             << " unsupported). Run 'readstr refresh' to fetch them.\n";
     return 0;
 }
@@ -487,25 +403,17 @@ int exportOpml(const QString &command, const QStringList &arguments, QTextStream
     Store store;
     if (!openStore(command, store, err))
         return 1;
-    const QList<Feed> list = store.feeds();
-    if (!store.lastError().isEmpty())
-        return fail(command, store.lastError(), err);
-    QList<Opml::ExportFeed> exported;
-    for (const Feed &feed : list)
-        exported << Opml::ExportFeed{QStringLiteral("RSS"), feed.url, feed.title, feed.category, {}};
-    const QByteArray opml = Opml::build(exported);
+    QString error;
+    const QByteArray opml = Library::exportOpml(store, &error);
+    if (!error.isEmpty())
+        return fail(command, error, err);
 
     if (options.positional.isEmpty()) {
         out << QString::fromUtf8(opml);
         return 0;
     }
-    // Written beside the target and renamed over it, so a failure never
-    // leaves half a file where the old one was. The subscription list is
-    // private, so the file is 0600 before anything is written to it.
-    QSaveFile file(options.positional.first());
-    if (!file.open(QIODevice::WriteOnly) || !file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)
-        || file.write(opml) != opml.size() || !file.commit())
-        return fail(command, QStringLiteral("cannot write %1: %2").arg(file.fileName(), file.errorString()), err);
+    if (!Library::writePrivately(options.positional.first(), opml, &error))
+        return fail(command, error, err);
     return 0;
 }
 

@@ -12,6 +12,7 @@
 
 #include "backend.h"
 #include "cli.h"
+#include "portalfilepicker.h"
 #include "theme.h"
 #include "translator.h"
 
@@ -51,7 +52,8 @@ int main(int argc, char *argv[]) {
     app.installTranslator(&translator);
 
     Theme theme;
-    Backend backend;
+    PortalFilePicker picker;
+    Backend backend(&picker);
 
     QQmlApplicationEngine engine;
     QObject::connect(&translator, &Translator::changed, &engine, &QQmlEngine::retranslate);
@@ -61,6 +63,9 @@ int main(int argc, char *argv[]) {
     engine.load(QUrl("qrc:/Main.qml"));
     if (engine.rootObjects().isEmpty())
         return 1;
+
+    // Feeds refresh only while the window is open, as in omafeed.
+    backend.startAutoRefresh();
 
     return app.exec();
 }

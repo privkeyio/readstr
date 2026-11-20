@@ -538,8 +538,6 @@ QDateTime parseDate(const QString &text) {
 }
 
 QString plainText(const QString &html) {
-    static const QRegularExpression entity(QStringLiteral("&(#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z]{2,8});"));
-
     // One pass, each closer searched for once, so hostile markup (thousands
     // of unclosed <script or <!-- openers) stays linear in the input.
     QString text;
@@ -582,6 +580,13 @@ QString plainText(const QString &html) {
         }
     }
 
+    return cleanText(decodeEntities(text));
+}
+
+QString decodeEntities(const QString &text) {
+    static const QRegularExpression entity(QStringLiteral("&(#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z]{2,8});"));
+    if (!text.contains('&'))
+        return text;
     QString decoded;
     decoded.reserve(text.size());
     qsizetype last = 0;
@@ -594,7 +599,7 @@ QString plainText(const QString &html) {
         last = match.capturedEnd();
     }
     decoded += QStringView(text).mid(last);
-    return cleanText(decoded);
+    return decoded;
 }
 
 bool declaresEntities(const QXmlStreamReader &xml) {

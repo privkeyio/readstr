@@ -182,34 +182,66 @@ QList<QUrl> commonFeedUrls(const QUrl &pageUrl) {
     return urls;
 }
 
-Result discover(Fetcher &fetcher, const QUrl &url) {
-    Result result;
-    const FetchResult page = fetcher.get({url, {}, {}});
-    if (!page.ok()) {
-        result.error = QStringLiteral("cannot fetch %1: %2").arg(url.toString(), page.error);
-        return result;
-    }
-    if (auto feed = FeedParser::parse(page.body, page.finalUrl)) {
-        result.found = true;
-        result.feedUrl = url;
-        result.feed = *feed;
-        result.fetch = page;
-        return result;
-    }
+Search::Search(const QUrl &url) : m_url(url), m_urls{url} {}
 
-    QList<QUrl> candidates;
-    for (const Link &link : feedLinks(page.body, page.finalUrl))
-        if (candidates.size() < maxCandidates)
-            candidates << link.url;
-    if (!candidates.isEmpty() && firstFeed(fetcher.fetchAll(requestsFor(candidates)), result)) {
-        result.discovered = true;
-        return result;
+QList<FetchRequest> Search::requests() const { return requestsFor(m_urls); }
+
+void Search::examine(const QList<FetchResult> &results) {
+    switch (m_stage) {
+    case Stage::Page: {
+        const FetchResult page = results.value(0);
+        if (!page.ok()) {
+            m_result.error = QStringLiteral("cannot fetch %1: %2").arg(m_urls.constFirst().toString(), page.error);
+            m_stage = Stage::Done;
+            return;
+        }
+        if (auto feed = FeedParser::parse(page.body, page.finalUrl)) {
+            m_result.found = true;
+            m_result.feedUrl = m_urls.constFirst();
+            m_result.feed = *feed;
+            m_result.fetch = page;
+            m_stage = Stage::Done;
+            return;
+        }
+        m_pageUrl = page.finalUrl;
+        m_urls.clear();
+        for (const Link &link : feedLinks(page.body, page.finalUrl))
+            if (m_urls.size() < maxCandidates)
+                m_urls << link.url;
+        if (m_urls.isEmpty()) {
+            m_urls = commonFeedUrls(m_pageUrl);
+            m_stage = Stage::Common;
+        } else {
+            m_stage = Stage::Advertised;
+        }
+        return;
     }
-    if (firstFeed(fetcher.fetchAll(requestsFor(commonFeedUrls(page.finalUrl))), result)) {
-        result.discovered = true;
-        return result;
+    case Stage::Advertised:
+        if (firstFeed(results, m_result)) {
+            m_result.discovered = true;
+            m_stage = Stage::Done;
+            return;
+        }
+        m_urls = commonFeedUrls(m_pageUrl);
+        m_stage = Stage::Common;
+        return;
+    case Stage::Common:
+        if (firstFeed(results, m_result)) {
+            m_result.discovered = true;
+        } else {
+            m_result.error = QStringLiteral("no RSS, Atom, or JSON feed found at %1").arg(m_url.toString());
+        }
+        m_stage = Stage::Done;
+        return;
+    case Stage::Done:
+        return;
     }
-    result.error = QStringLiteral("no RSS, Atom, or JSON feed found at %1").arg(url.toString());
-    return result;
+}
+
+Result discover(Fetcher &fetcher, const QUrl &url) {
+    Search search(url);
+    while (!search.finished())
+        search.examine(fetcher.fetchAll(search.requests()));
+    return search.result();
 }
 }
