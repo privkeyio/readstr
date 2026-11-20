@@ -6,6 +6,7 @@
 #include <QList>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTimer>
 #include <QUrl>
 #include <functional>
 
@@ -28,6 +29,13 @@ public:
         // Streams this many bytes without a Content-Length, to exercise the
         // size cap.
         qint64 stream = 0;
+        // Leaves the connection open after the streamed bytes, as a server
+        // still sending a longer body would. Closing it instead would cut the
+        // body short, and Qt then fails a request it had queued for the same
+        // host with "Connection closed".
+        bool hold = false;
+        // Answers after this long, to keep requests in flight.
+        int delayMs = 0;
     };
 
     using Handler = std::function<Response(const Request &)>;
@@ -46,6 +54,9 @@ public:
         return QUrl(QStringLiteral("http://127.0.0.1:%1%2").arg(serverPort()).arg(path));
     }
     QList<Request> requests;
+    // Requests received but not yet answered, and the most there have been.
+    int inFlight = 0;
+    int peakInFlight = 0;
 
 protected:
     void incomingConnection(qintptr descriptor) override {
@@ -93,6 +104,16 @@ private:
             handler == m_routes.cend() ? Response{404, {{"Content-Type", "text/plain"}}, "not found"} : (*handler)(request);
         if (response.stall)
             return;
+        peakInFlight = std::max(peakInFlight, ++inFlight);
+        if (response.delayMs > 0) {
+            QTimer::singleShot(response.delayMs, socket, [this, socket, response] { send(socket, response); });
+            return;
+        }
+        send(socket, response);
+    }
+
+    void send(QTcpSocket *socket, const Response &response) {
+        --inFlight;
         QByteArray head = "HTTP/1.1 " + QByteArray::number(response.status) + ' ' + reason(response.status) + "\r\n";
         for (const auto &[name, value] : response.headers)
             head += name + ": " + value + "\r\n";
@@ -100,7 +121,9 @@ private:
         if (response.stream > 0) {
             socket->write(head + "\r\n");
             auto remaining = std::make_shared<qint64>(response.stream);
-            auto more = [socket, remaining] {
+            auto more = [socket, remaining, hold = response.hold] {
+                if (*remaining <= 0 && hold && socket->state() == QAbstractSocket::ConnectedState)
+                    return;
                 if (*remaining <= 0 || socket->state() != QAbstractSocket::ConnectedState) {
                     socket->disconnectFromHost();
                     return;

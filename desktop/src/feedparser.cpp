@@ -12,6 +12,9 @@
 
 namespace {
 const QString atomNamespace = QStringLiteral("http://www.w3.org/2005/Atom");
+// Atom 0.3, whose tagline, issued, and modified elements are still read.
+const QString atom03Namespace = QStringLiteral("http://purl.org/atom/ns#");
+const QString rdfNamespace = QStringLiteral("http://www.w3.org/1999/02/22-rdf-syntax-ns#");
 const QString contentNamespace = QStringLiteral("http://purl.org/rss/1.0/modules/content/");
 const QString dublinCoreNamespace = QStringLiteral("http://purl.org/dc/elements/1.1/");
 const QString xmlNamespace = QStringLiteral("http://www.w3.org/XML/1998/namespace");
@@ -42,8 +45,17 @@ QString webLink(const QUrl &base, const QString &text) {
     return url.toString(QUrl::FullyEncoded);
 }
 
-QString summarize(const QString &html) {
-    QString text = FeedParser::plainText(html);
+// Control characters would make exported OPML invalid XML and garble the
+// terminal, so text fields lose them along with runs of whitespace.
+QString cleanText(QString text) {
+    for (QChar &character : text)
+        if (character.category() == QChar::Other_Control)
+            character = ' ';
+    return text.simplified();
+}
+
+// Takes text that is already plain, so a literal '<' in a text field survives.
+QString summarize(QString text) {
     if (text.size() <= FeedParser::maxSummaryLength)
         return text;
     text.truncate(FeedParser::maxSummaryLength);
@@ -101,7 +113,7 @@ AtomText readAtomText(QXmlStreamReader &xml) {
     const QString text = xml.readElementText(QXmlStreamReader::IncludeChildElements);
     if (type == "html" || type == "text/html")
         return {text, FeedParser::plainText(text)};
-    return {escapeHtml(text), text.simplified()};
+    return {escapeHtml(text), cleanText(text)};
 }
 
 QString readText(QXmlStreamReader &xml) {
@@ -115,8 +127,12 @@ bool isRssElement(const QXmlStreamReader &xml, const char *name) {
                || xml.namespaceUri() == QLatin1String("http://my.netscape.com/rdf/simple/0.9/"));
 }
 
+bool isAtomNamespace(QStringView uri) { return uri == atomNamespace || uri == atom03Namespace; }
+
+// Elements from other namespaces (media:title, a foreign id or link) share
+// Atom's local names, so they must not be read as Atom's own.
 bool isAtom(const QXmlStreamReader &xml, const char *name) {
-    return xml.name() == QLatin1String(name) && xml.namespaceUri() == atomNamespace;
+    return xml.name() == QLatin1String(name) && isAtomNamespace(xml.namespaceUri());
 }
 
 ParsedItem readRssItem(QXmlStreamReader &xml, QUrl base) {
@@ -124,6 +140,7 @@ ParsedItem readRssItem(QXmlStreamReader &xml, QUrl base) {
     ParsedItem item;
     QString description, encoded, atomLink;
     bool guidIsLink = true;
+    QUrl guidBase = base;
     QString date;
     while (xml.readNextStartElement()) {
         const QUrl elementBase = baseOf(base, xml);
@@ -145,6 +162,7 @@ ParsedItem readRssItem(QXmlStreamReader &xml, QUrl base) {
             date = readText(xml);
         } else if (isRssElement(xml, "guid")) {
             guidIsLink = xml.attributes().value("isPermaLink").compare(QLatin1String("false"), Qt::CaseInsensitive);
+            guidBase = elementBase;
             item.guid = readText(xml).trimmed();
         } else if (isAtom(xml, "link")) {
             const auto rel = xml.attributes().value("rel");
@@ -158,9 +176,9 @@ ParsedItem readRssItem(QXmlStreamReader &xml, QUrl base) {
     if (item.url.isEmpty())
         item.url = atomLink;
     if (item.url.isEmpty() && guidIsLink)
-        item.url = webLink(base, item.guid);
+        item.url = webLink(guidBase, item.guid);
     item.content = encoded.isEmpty() ? description : encoded;
-    item.summary = summarize(description.isEmpty() ? encoded : description);
+    item.summary = summarize(FeedParser::plainText(description.isEmpty() ? encoded : description));
     item.published = FeedParser::parseDate(date);
     finishItem(item);
     return item;
@@ -174,7 +192,7 @@ void readRssChannel(QXmlStreamReader &xml, QUrl base, ParsedFeed &feed) {
         } else if (isRssElement(xml, "link")) {
             feed.siteUrl = webLink(baseOf(base, xml), readText(xml));
         } else if (isRssElement(xml, "description")) {
-            feed.description = summarize(readText(xml));
+            feed.description = summarize(FeedParser::plainText(readText(xml)));
         } else if (isRssElement(xml, "item")) {
             if (feed.items.size() < FeedParser::maxItems)
                 feed.items << readRssItem(xml, base);
@@ -186,17 +204,22 @@ void readRssChannel(QXmlStreamReader &xml, QUrl base, ParsedFeed &feed) {
     }
 }
 
-// RSS 2.0 nests items in the channel; RSS 1.0 puts them beside it.
-void readRss(QXmlStreamReader &xml, const QUrl &base, ParsedFeed &feed) {
+// RSS 2.0 nests items in the channel; RSS 1.0 puts them beside it. Returns
+// whether there was a channel.
+bool readRss(QXmlStreamReader &xml, const QUrl &base, ParsedFeed &feed) {
     const QUrl rootBase = baseOf(base, xml);
+    bool sawChannel = false;
     while (xml.readNextStartElement()) {
-        if (isRssElement(xml, "channel"))
+        if (isRssElement(xml, "channel")) {
+            sawChannel = true;
             readRssChannel(xml, rootBase, feed);
-        else if (isRssElement(xml, "item") && feed.items.size() < FeedParser::maxItems)
+        } else if (isRssElement(xml, "item") && feed.items.size() < FeedParser::maxItems) {
             feed.items << readRssItem(xml, rootBase);
-        else
+        } else {
             xml.skipCurrentElement();
+        }
     }
+    return sawChannel;
 }
 
 QString readAtomLink(QXmlStreamReader &xml, const QUrl &base) {
@@ -212,8 +235,8 @@ QString readAtomLink(QXmlStreamReader &xml, const QUrl &base) {
 QString readAtomAuthor(QXmlStreamReader &xml) {
     QString name;
     while (xml.readNextStartElement()) {
-        if (xml.name() == QLatin1String("name"))
-            name = FeedParser::plainText(readText(xml));
+        if (isAtom(xml, "name"))
+            name = cleanText(readText(xml));
         else
             xml.skipCurrentElement();
     }
@@ -226,6 +249,10 @@ ParsedItem readAtomEntry(QXmlStreamReader &xml, QUrl base) {
     AtomText content, summary;
     QString published, updated;
     while (xml.readNextStartElement()) {
+        if (!isAtomNamespace(xml.namespaceUri())) {
+            xml.skipCurrentElement();
+            continue;
+        }
         const auto name = xml.name();
         if (name == QLatin1String("title")) {
             item.title = readAtomText(xml).plain;
@@ -265,6 +292,10 @@ ParsedItem readAtomEntry(QXmlStreamReader &xml, QUrl base) {
 void readAtom(QXmlStreamReader &xml, const QUrl &base, ParsedFeed &feed) {
     const QUrl feedBase = baseOf(base, xml);
     while (xml.readNextStartElement()) {
+        if (!isAtomNamespace(xml.namespaceUri())) {
+            xml.skipCurrentElement();
+            continue;
+        }
         const auto name = xml.name();
         if (name == QLatin1String("title")) {
             feed.title = readAtomText(xml).plain;
@@ -300,15 +331,28 @@ std::optional<ParsedFeed> parseXml(const QByteArray &data, const QUrl &base, QSt
     }
 
     ParsedFeed feed;
-    const auto root = xml.name();
-    if (root == QLatin1String("rss") || root == QLatin1String("RDF")) {
+    const QString root = xml.qualifiedName().toString();
+    const auto name = xml.name();
+    const auto uri = xml.namespaceUri();
+    // An RDF document is only RSS 1.0 when it holds a channel, and <feed> is
+    // only Atom in Atom's namespace.
+    if (name == QLatin1String("rss")) {
         readRss(xml, base, feed);
-    } else if (root == QLatin1String("feed")) {
+    } else if (name == QLatin1String("RDF") && uri == rdfNamespace) {
+        if (!readRss(xml, base, feed) && !xml.hasError()) {
+            fail(error, QStringLiteral("not a feed: RDF without an RSS channel"));
+            return std::nullopt;
+        }
+    } else if (name == QLatin1String("feed") && isAtomNamespace(uri)) {
         readAtom(xml, base, feed);
     } else {
-        fail(error, QStringLiteral("not a feed: unexpected <%1> element").arg(root.toString()));
+        fail(error, QStringLiteral("not a feed: unexpected <%1> element").arg(root));
         return std::nullopt;
     }
+    // Reads to the end, so a second root element is refused while trailing
+    // comments and whitespace are not.
+    while (!xml.atEnd() && !xml.hasError())
+        xml.readNext();
     if (xml.hasError()) {
         fail(error, QStringLiteral("malformed feed: %1 (line %2)").arg(xml.errorString()).arg(xml.lineNumber()));
         return std::nullopt;
@@ -327,7 +371,7 @@ QString jsonString(const QJsonValue &value) {
 QString jsonAuthor(const QJsonObject &object) {
     const QJsonArray authors = object.value("authors").toArray();
     const QJsonObject author = authors.isEmpty() ? object.value("author").toObject() : authors.first().toObject();
-    return FeedParser::plainText(author.value("name").toString());
+    return cleanText(author.value("name").toString());
 }
 
 std::optional<ParsedFeed> parseJson(const QByteArray &data, const QUrl &base, QString *error) {
@@ -341,16 +385,21 @@ std::optional<ParsedFeed> parseJson(const QByteArray &data, const QUrl &base, QS
     }
 
     ParsedFeed feed;
-    feed.title = FeedParser::plainText(object.value("title").toString());
+    // JSON Feed keeps markup to content_html; titles, summaries, and
+    // content_text are plain text.
+    feed.title = cleanText(object.value("title").toString());
     feed.siteUrl = webLink(base, object.value("home_page_url").toString());
-    feed.description = summarize(object.value("description").toString());
+    feed.description = summarize(cleanText(object.value("description").toString()));
     for (const QJsonValue &value : object.value("items").toArray()) {
         if (feed.items.size() >= FeedParser::maxItems)
             break;
+        // Anything but an object is no item, not an untitled one.
+        if (!value.isObject())
+            continue;
         const QJsonObject entry = value.toObject();
         ParsedItem item;
         item.guid = jsonString(entry.value("id")).trimmed();
-        item.title = FeedParser::plainText(entry.value("title").toString());
+        item.title = cleanText(entry.value("title").toString());
         item.url = webLink(base, entry.value("url").toString());
         if (item.url.isEmpty())
             item.url = webLink(base, entry.value("external_url").toString());
@@ -361,7 +410,14 @@ std::optional<ParsedFeed> parseJson(const QByteArray &data, const QUrl &base, QS
         const QString text = entry.value("content_text").toString();
         item.content = html.isEmpty() ? escapeHtml(text) : html;
         const QString summary = entry.value("summary").toString();
-        item.summary = summarize(!summary.isEmpty() ? summary : !html.isEmpty() ? html : escapeHtml(text));
+        QString plainSummary;
+        if (!summary.isEmpty())
+            plainSummary = cleanText(summary);
+        else if (!html.isEmpty())
+            plainSummary = FeedParser::plainText(html);
+        else
+            plainSummary = cleanText(text);
+        item.summary = summarize(plainSummary);
         const QString published = entry.value("date_published").toString();
         item.published = FeedParser::parseDate(published.isEmpty() ? entry.value("date_modified").toString() : published);
         finishItem(item);
@@ -383,8 +439,10 @@ int zoneOffsetSeconds(const QString &zone, bool *ok) {
     static const QRegularExpression numeric(QStringLiteral("^([+-])(\\d{2}):?(\\d{2})$"));
     const auto match = numeric.match(zone);
     if (match.hasMatch()) {
+        // QTimeZone holds offsets up to 16 hours; past that it would quietly
+        // read as UTC.
         const int seconds = match.captured(2).toInt() * 3600 + match.captured(3).toInt() * 60;
-        if (seconds > 18 * 3600)
+        if (seconds > 16 * 3600)
             *ok = false;
         return match.captured(1) == "-" ? -seconds : seconds;
     }
@@ -429,6 +487,10 @@ QDateTime parseIso(QString text) {
     if (parsed.timeSpec() == Qt::LocalTime)
         parsed = QDateTime(parsed.date(), parsed.time(), QTimeZone::UTC);
     return parsed.toUTC();
+}
+
+bool isAsciiLetter(QChar character) {
+    return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z');
 }
 
 QString decodeEntity(const QString &name) {
@@ -476,15 +538,49 @@ QDateTime parseDate(const QString &text) {
 }
 
 QString plainText(const QString &html) {
-    static const QRegularExpression hidden(QStringLiteral("<!--.*?-->|<(script|style)\\b.*?</\\1\\s*>"),
-                                           QRegularExpression::CaseInsensitiveOption
-                                               | QRegularExpression::DotMatchesEverythingOption);
-    static const QRegularExpression tag(QStringLiteral("<[A-Za-z/!?][^>]*>"));
     static const QRegularExpression entity(QStringLiteral("&(#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z]{2,8});"));
 
-    QString text = html;
-    text.replace(hidden, QStringLiteral(" "));
-    text.replace(tag, QStringLiteral(" "));
+    // One pass, each closer searched for once, so hostile markup (thousands
+    // of unclosed <script or <!-- openers) stays linear in the input.
+    QString text;
+    text.reserve(html.size());
+    const qsizetype size = html.size();
+    bool noMoreTagEnds = false;
+    for (qsizetype i = 0; i < size;) {
+        const QChar character = html.at(i);
+        const QChar next = i + 1 < size ? html.at(i + 1) : QChar();
+        if (character != '<' || noMoreTagEnds || !(isAsciiLetter(next) || next == '/' || next == '!' || next == '?')) {
+            text += character;
+            ++i;
+            continue;
+        }
+        if (QStringView(html).mid(i, 4) == QLatin1String("<!--")) {
+            const qsizetype end = html.indexOf(QLatin1String("-->"), i + 4);
+            text += ' ';
+            i = end < 0 ? size : end + 3;
+            continue;
+        }
+        const qsizetype end = html.indexOf('>', i);
+        if (end < 0) {
+            // No '>' anywhere further on, so no later '<' starts a tag either.
+            noMoreTagEnds = true;
+            continue;
+        }
+        text += ' ';
+        const qsizetype tagStart = i;
+        i = end + 1;
+        // A script or style runs to its closing tag, or to the end when it
+        // has none, and none of it is text.
+        for (const QLatin1String name : {QLatin1String("script"), QLatin1String("style")}) {
+            const qsizetype after = tagStart + 1 + name.size();
+            if (QStringView(html).mid(tagStart + 1, name.size()).compare(name, Qt::CaseInsensitive) == 0
+                && after < size && !html.at(after).isLetterOrNumber()) {
+                const qsizetype closer = html.indexOf(QLatin1String("</") + name, i, Qt::CaseInsensitive);
+                const qsizetype closerEnd = closer < 0 ? -1 : html.indexOf('>', closer);
+                i = closerEnd < 0 ? size : closerEnd + 1;
+            }
+        }
+    }
 
     QString decoded;
     decoded.reserve(text.size());
@@ -498,13 +594,7 @@ QString plainText(const QString &html) {
         last = match.capturedEnd();
     }
     decoded += QStringView(text).mid(last);
-
-    // Control characters would make exported OPML invalid XML and garble the
-    // terminal, so they go along with the markup.
-    for (QChar &character : decoded)
-        if (character.category() == QChar::Other_Control)
-            character = ' ';
-    return decoded.simplified();
+    return cleanText(decoded);
 }
 
 bool declaresEntities(const QXmlStreamReader &xml) {

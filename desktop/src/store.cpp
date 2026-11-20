@@ -1,10 +1,12 @@
 #include "store.h"
 
+#include <QDeadlineTimer>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QThread>
 #include <QTimeZone>
 #include <QUrl>
 #include <QUrlQuery>
@@ -20,14 +22,16 @@
 
 namespace {
 // Each entry moves the schema up one version (PRAGMA user_version), inside a
-// transaction. Append new ones; never edit a shipped one.
+// transaction. Append new ones; never edit a shipped one. Feed and item ids
+// are AUTOINCREMENT so a deleted row's id never comes back: the headless
+// commands act on ids a user read from an earlier listing.
 const QList<QStringList> migrations = {
     {
         "CREATE TABLE categories ("
         " id INTEGER PRIMARY KEY,"
         " name TEXT NOT NULL UNIQUE)",
         "CREATE TABLE feeds ("
-        " id INTEGER PRIMARY KEY,"
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
         " url TEXT NOT NULL,"
         " url_key TEXT NOT NULL UNIQUE,"
         " title TEXT NOT NULL DEFAULT '',"
@@ -40,7 +44,7 @@ const QList<QStringList> migrations = {
         " last_error TEXT,"
         " created_at INTEGER NOT NULL)",
         "CREATE TABLE items ("
-        " id INTEGER PRIMARY KEY,"
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
         " feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,"
         " guid TEXT NOT NULL,"
         " title TEXT NOT NULL DEFAULT '',"
@@ -110,25 +114,55 @@ bool Store::fail(const QString &message) {
 bool Store::open() {
     const QString path = Paths::databaseFile();
     if (path.isEmpty())
-        return fail(QStringLiteral("no data directory: set XDG_DATA_HOME or an absolute READSTR_HOME"));
+        return fail(QStringLiteral("no data directory: READSTR_HOME must be an absolute path, or unset it and set "
+                                   "XDG_DATA_HOME"));
     return open(path);
 }
 
 bool Store::open(const QString &path) {
     // The library lists what the user reads, so only they may read it: the
     // directory is 0700 and the database 0600 (SQLite gives its -wal and -shm
-    // files the database's mode).
+    // files the database's mode). Neither may be a symlink or belong to
+    // someone else, so nobody can point the library, or the chmod, elsewhere.
     const QString directory = QFileInfo(path).absolutePath();
     if (!QDir().mkpath(directory))
         return fail(QStringLiteral("cannot create %1").arg(directory));
-    const QByteArray encodedDirectory = QFile::encodeName(directory);
-    if (::chmod(encodedDirectory.constData(), 0700) != 0)
-        return fail(QStringLiteral("cannot restrict %1: %2").arg(directory, QString::fromLocal8Bit(std::strerror(errno))));
-    const int fd = ::open(QFile::encodeName(path).constData(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (fd < 0)
-        return fail(QStringLiteral("cannot open %1: %2").arg(path, QString::fromLocal8Bit(std::strerror(errno))));
-    const bool restricted = ::fchmod(fd, 0600) == 0;
+    const auto failErrno = [this](const QString &what, const QString &where) {
+        return fail(QStringLiteral("%1 %2: %3").arg(what, where, QString::fromLocal8Bit(std::strerror(errno))));
+    };
+    const int directoryFd =
+        ::open(QFile::encodeName(directory).constData(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directoryFd < 0)
+        return failErrno(QStringLiteral("cannot open"), directory);
+    struct stat info;
+    if (::fstat(directoryFd, &info) != 0 || info.st_uid != ::getuid()) {
+        ::close(directoryFd);
+        return fail(QStringLiteral("%1 is not a directory owned by this user").arg(directory));
+    }
+    if (::fchmod(directoryFd, 0700) != 0) {
+        ::close(directoryFd);
+        return fail(QStringLiteral("cannot restrict %1").arg(directory));
+    }
+    // SQLite opens the file again by path below, so these checks hold only
+    // while nobody else can swap the path's directories: true under the
+    // default XDG location, which the user owns all the way down, and the
+    // reason a READSTR_HOME should not sit in a directory others can write.
+    // O_NOFOLLOW refuses a symlink even where O_CREAT would create the file,
+    // which is what O_EXCL would guard against, while an existing library
+    // still opens.
+    const int fd = ::openat(directoryFd, QFile::encodeName(QFileInfo(path).fileName()).constData(),
+                            O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    const int openErrno = errno;
+    ::close(directoryFd);
+    if (fd < 0) {
+        errno = openErrno;
+        return failErrno(QStringLiteral("cannot open"), path);
+    }
+    const bool fileOk = ::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_uid == ::getuid();
+    const bool restricted = fileOk && ::fchmod(fd, 0600) == 0;
     ::close(fd);
+    if (!fileOk)
+        return fail(QStringLiteral("%1 is not a regular file owned by this user").arg(path));
     if (!restricted)
         return fail(QStringLiteral("cannot restrict %1").arg(path));
 
@@ -145,10 +179,31 @@ bool Store::open(const QString &path) {
     // The window and the headless commands may use the database at the same
     // time; WAL lets one read while the other writes, and the busy timeout
     // waits out a short write instead of failing.
-    if (!query.exec(QStringLiteral("PRAGMA journal_mode = WAL")) || !query.next()
-        || query.value(0).toString() != QLatin1String("wal"))
-        return fail(QStringLiteral("cannot switch %1 to WAL mode").arg(path));
-    for (const char *pragma : {"PRAGMA foreign_keys = ON", "PRAGMA busy_timeout = 5000", "PRAGMA synchronous = NORMAL"})
+    if (!query.exec(QStringLiteral("PRAGMA busy_timeout = 5000")))
+        return fail(query.lastError().text());
+    // Switching a fresh file to WAL needs it to itself, and SQLite answers
+    // with the old mode rather than waiting when another connection is
+    // opening it too, so the switch is retried for as long as a busy write.
+    // Any other error (a read-only file, a disk error) fails at once.
+    const QDeadlineTimer walDeadline(5000);
+    for (;;) {
+        QString problem;
+        if (!query.exec(QStringLiteral("PRAGMA journal_mode = WAL"))) {
+            problem = query.lastError().text();
+            if (query.lastError().nativeErrorCode() != QLatin1String("5"))
+                return fail(QStringLiteral("cannot switch %1 to WAL mode: %2").arg(path, problem));
+        } else if (query.next() && query.value(0).toString() == QLatin1String("wal")) {
+            break;
+        } else {
+            problem = QStringLiteral("SQLite kept the %1 journal mode").arg(query.value(0).toString());
+        }
+        query.finish();
+        if (walDeadline.hasExpired())
+            return fail(QStringLiteral("cannot switch %1 to WAL mode: %2").arg(path, problem));
+        QThread::msleep(20);
+    }
+    query.finish();
+    for (const char *pragma : {"PRAGMA foreign_keys = ON", "PRAGMA synchronous = NORMAL"})
         if (!query.exec(QString::fromLatin1(pragma)))
             return fail(query.lastError().text());
     return migrate();
@@ -159,31 +214,61 @@ int Store::schemaVersion() {
     return query.exec(QStringLiteral("PRAGMA user_version")) && query.next() ? query.value(0).toInt() : -1;
 }
 
+bool Store::begin() {
+    // IMMEDIATE takes the write lock up front, so what a transaction reads
+    // cannot go stale before it writes (SQLITE_BUSY_SNAPSHOT under WAL); a
+    // writer in another process is waited out by the busy timeout.
+    QSqlQuery query(m_db);
+    return query.exec(QStringLiteral("BEGIN IMMEDIATE")) || fail(query.lastError().text());
+}
+
+bool Store::commit() {
+    QSqlQuery query(m_db);
+    if (query.exec(QStringLiteral("COMMIT")))
+        return true;
+    const QString message = query.lastError().text();
+    rollback();
+    return fail(message);
+}
+
+void Store::rollback() { QSqlQuery(m_db).exec(QStringLiteral("ROLLBACK")); }
+
 bool Store::migrate() {
-    const int current = schemaVersion();
-    if (current < 0)
+    // The common case, an up-to-date library, takes no write lock.
+    int current = schemaVersion();
+    if (current == migrations.size())
+        return true;
+    // Another process may be migrating the same file, so the version that
+    // decides what to run is read again under the write lock.
+    if (!begin())
+        return false;
+    current = schemaVersion();
+    if (current < 0) {
+        rollback();
         return fail(QStringLiteral("cannot read the schema version"));
-    if (current > migrations.size())
+    }
+    if (current > migrations.size()) {
+        rollback();
         return fail(QStringLiteral("the library was written by a newer readstr (schema %1, this one knows %2)")
                         .arg(current)
                         .arg(migrations.size()));
+    }
+    QSqlQuery query(m_db);
     for (int version = current; version < migrations.size(); ++version) {
-        if (!m_db.transaction())
-            return fail(m_db.lastError().text());
-        QSqlQuery query(m_db);
         for (const QString &statement : migrations.at(version)) {
             if (!query.exec(statement)) {
                 const QString message = query.lastError().text();
-                m_db.rollback();
+                rollback();
                 return fail(QStringLiteral("migration %1 failed: %2").arg(version + 1).arg(message));
             }
         }
-        if (!query.exec(QStringLiteral("PRAGMA user_version = %1").arg(version + 1)) || !m_db.commit()) {
-            m_db.rollback();
-            return fail(QStringLiteral("migration %1 failed to commit").arg(version + 1));
-        }
     }
-    return true;
+    if (!query.exec(QStringLiteral("PRAGMA user_version = %1").arg(migrations.size()))) {
+        rollback();
+        return fail(QStringLiteral("cannot record the schema version: %1").arg(query.lastError().text()));
+    }
+    query.finish();
+    return commit();
 }
 
 QString Store::urlKey(const QString &url) {
@@ -200,6 +285,10 @@ QString Store::urlKey(const QString &url) {
     // The web app drops the port; this keeps it, so feeds served from
     // different ports on one host stay distinct.
     QString key = parsed.host().toLower();
+    // An IPv6 host is bracketed, as in the URL, so its last group cannot be
+    // read as the port.
+    if (key.contains(':'))
+        key = '[' + key + ']';
     if (parsed.port() != -1)
         key += ':' + QString::number(parsed.port());
     key += path;
@@ -225,6 +314,10 @@ QList<Feed> Store::feeds() {
     }
     while (query.next())
         result << feedFrom(query);
+    if (query.lastError().isValid()) {
+        fail(query.lastError().text());
+        return {};
+    }
     return result;
 }
 
@@ -326,8 +419,8 @@ bool Store::recordFetch(qint64 id, const QString &etag, const QString &lastModif
 }
 
 int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
-    if (!m_db.transaction())
-        return fail(m_db.lastError().text()), -1;
+    if (!begin())
+        return -1;
     QSqlQuery exists(m_db), upsert(m_db);
     exists.prepare(QStringLiteral("SELECT 1 FROM items WHERE feed_id = ? AND guid = ?"));
     upsert.prepare(QStringLiteral(
@@ -342,8 +435,9 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         exists.addBindValue(feedId);
         exists.addBindValue(item.guid);
         if (!exists.exec()) {
-            m_db.rollback();
-            return fail(exists.lastError().text()), -1;
+            const QString message = exists.lastError().text();
+            rollback();
+            return fail(message), -1;
         }
         const bool isNew = !exists.next();
         exists.finish();
@@ -358,16 +452,14 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         upsert.addBindValue(now);
         if (!upsert.exec()) {
             const QString message = upsert.lastError().text();
-            m_db.rollback();
+            rollback();
             return fail(message), -1;
         }
         added += isNew;
     }
-    if (!m_db.commit()) {
-        m_db.rollback();
-        return fail(m_db.lastError().text()), -1;
-    }
-    return added;
+    exists.finish();
+    upsert.finish();
+    return commit() ? added : -1;
 }
 
 QList<Article> Store::articles(const ArticleFilter &filter) {
@@ -412,6 +504,10 @@ QList<Article> Store::articles(const ArticleFilter &filter) {
         article.read = query.value(10).toBool();
         article.starred = query.value(11).toBool();
         result << article;
+    }
+    if (query.lastError().isValid()) {
+        fail(query.lastError().text());
+        return {};
     }
     return result;
 }

@@ -1,6 +1,5 @@
 #include "discovery.h"
 
-#include <QRegularExpression>
 #include <QSet>
 
 namespace {
@@ -11,25 +10,101 @@ constexpr int maxCandidates = 5;
 
 const QStringList feedTypes{"application/rss+xml", "application/atom+xml", "application/feed+json"};
 
-QHash<QString, QString> attributesOf(const QString &tag) {
-    static const QRegularExpression attribute(
-        QStringLiteral("([^\\s=/>\"']+)\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>\"']+))"));
+struct Tag {
+    QString name;
     QHash<QString, QString> attributes;
-    auto matches = attribute.globalMatch(tag);
-    while (matches.hasNext()) {
-        const auto match = matches.next();
-        const QString name = match.captured(1).toLower();
-        if (attributes.contains(name))
+};
+
+bool isSpace(QChar character) {
+    return character == ' ' || character == '\t' || character == '\n' || character == '\r' || character == '\f';
+}
+
+// The <link> and <base> tags of a page, read the way an HTML tokenizer reads
+// them, as far as feed links need: comments are skipped, a quoted attribute
+// value may hold '>', and unquoted values end at whitespace or '>'. Every
+// other tag is stepped over the same way, so a '<link' inside another tag's
+// attribute is not mistaken for one. Each character is looked at a bounded
+// number of times, so a hostile page cannot make this slow.
+QList<Tag> linkTags(const QString &text) {
+    QList<Tag> tags;
+    const qsizetype size = text.size();
+    qsizetype i = 0;
+    while ((i = text.indexOf('<', i)) >= 0) {
+        if (QStringView(text).mid(i, 4) == QLatin1String("<!--")) {
+            const qsizetype end = text.indexOf(QLatin1String("-->"), i + 4);
+            if (end < 0)
+                break;
+            i = end + 3;
             continue;
-        QString value = match.captured(2);
-        if (match.capturedStart(3) >= 0)
-            value = match.captured(3);
-        else if (match.capturedStart(4) >= 0)
-            value = match.captured(4);
-        // Decodes &amp; and friends; URLs and titles never need markup.
-        attributes.insert(name, FeedParser::plainText(value));
+        }
+        const bool endTag = i + 1 < size && text.at(i + 1) == '/';
+        qsizetype j = endTag ? i + 2 : i + 1;
+        const qsizetype nameStart = j;
+        while (j < size && (text.at(j).isLetterOrNumber() || text.at(j) == '-'))
+            ++j;
+        if (j == nameStart || !text.at(nameStart).isLetter()) {
+            i = nameStart;
+            continue;
+        }
+        Tag tag{text.mid(nameStart, j - nameStart).toLower(), {}};
+        const bool wanted = !endTag && (tag.name == QLatin1String("link") || tag.name == QLatin1String("base"));
+        bool closed = false;
+        while (j < size) {
+            while (j < size && (isSpace(text.at(j)) || text.at(j) == '/'))
+                ++j;
+            if (j >= size)
+                break;
+            if (text.at(j) == '>') {
+                ++j;
+                closed = true;
+                break;
+            }
+            const qsizetype attributeStart = j;
+            while (j < size && !isSpace(text.at(j)) && text.at(j) != '=' && text.at(j) != '>' && text.at(j) != '/')
+                ++j;
+            if (j == attributeStart)
+                ++j;
+            const QString name = text.mid(attributeStart, j - attributeStart).toLower();
+            while (j < size && isSpace(text.at(j)))
+                ++j;
+            QString value;
+            if (j < size && text.at(j) == '=') {
+                ++j;
+                while (j < size && isSpace(text.at(j)))
+                    ++j;
+                if (j < size && (text.at(j) == '"' || text.at(j) == '\'')) {
+                    const qsizetype end = text.indexOf(text.at(j), j + 1);
+                    if (end < 0) {
+                        j = size;
+                        break;
+                    }
+                    value = text.mid(j + 1, end - j - 1);
+                    j = end + 1;
+                } else {
+                    const qsizetype valueStart = j;
+                    while (j < size && !isSpace(text.at(j)) && text.at(j) != '>')
+                        ++j;
+                    value = text.mid(valueStart, j - valueStart);
+                }
+            }
+            // Decodes &amp; and friends; URLs and titles never need markup.
+            if (wanted && !tag.attributes.contains(name))
+                tag.attributes.insert(name, FeedParser::plainText(value));
+        }
+        // A tag still open at the end of the text swallows the rest of it.
+        if (!closed)
+            break;
+        if (wanted)
+            tags << tag;
+        i = j;
+        // Scripts and styles are raw text, where '<' and quotes mean nothing.
+        if (!endTag && (tag.name == QLatin1String("script") || tag.name == QLatin1String("style"))) {
+            i = text.indexOf(QLatin1String("</") + tag.name, i, Qt::CaseInsensitive);
+            if (i < 0)
+                break;
+        }
     }
-    return attributes;
+    return tags;
 }
 
 QUrl resolveWeb(const QUrl &base, const QString &href) {
@@ -64,22 +139,15 @@ QList<FetchRequest> requestsFor(const QList<QUrl> &urls) {
 
 namespace Discovery {
 QList<Link> feedLinks(const QByteArray &html, const QUrl &pageUrl) {
-    static const QRegularExpression comment(QStringLiteral("<!--.*?-->"),
-                                            QRegularExpression::DotMatchesEverythingOption);
-    static const QRegularExpression tag(QStringLiteral("<(link|base)\\b([^>]*)>"),
-                                        QRegularExpression::CaseInsensitiveOption);
-    QString text = QString::fromUtf8(html.left(scanBytes));
-    text.remove(comment);
+    const QString text = QString::fromUtf8(html.left(scanBytes));
 
     QUrl base = pageUrl;
     bool sawBase = false;
     QList<Link> links;
     QSet<QUrl> seen;
-    auto matches = tag.globalMatch(text);
-    while (matches.hasNext()) {
-        const auto match = matches.next();
-        const auto attributes = attributesOf(match.captured(2));
-        if (match.captured(1).compare("base", Qt::CaseInsensitive) == 0) {
+    for (const Tag &tag : linkTags(text)) {
+        const auto &attributes = tag.attributes;
+        if (tag.name == QLatin1String("base")) {
             const QUrl href = resolveWeb(pageUrl, attributes.value("href"));
             if (!sawBase && href.isValid()) {
                 base = href;

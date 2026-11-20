@@ -34,8 +34,10 @@ void walk(QXmlStreamReader &xml, const QString &folder, int depth, Walk &state) 
         return;
     }
     while (xml.readNextStartElement()) {
+        // Only the <body> directly under <opml> holds outlines; one nested in
+        // it is skipped like any other element, so nesting stays bounded.
         if (depth == 0 && xml.name() == QLatin1String("body")) {
-            walk(xml, folder, 0, state);
+            walk(xml, folder, 1, state);
             continue;
         }
         if (state.capped || xml.name() != QLatin1String("outline")) {

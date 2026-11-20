@@ -90,6 +90,9 @@ public:
 
 private:
     bool migrate();
+    bool begin();
+    bool commit();
+    void rollback();
     bool fail(const QString &message);
     bool setFlag(const char *column, qint64 articleId, bool value);
     qint64 categoryId(const QString &name);

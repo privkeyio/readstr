@@ -84,8 +84,27 @@ bool openStore(const QString &command, Store &store, QTextStream &err) {
     return false;
 }
 
+// Feed and OPML text reaches the terminal in text mode, so control characters
+// (escape sequences) become spaces and bidirectional formatting characters,
+// which can make a line read differently than it is, are dropped.
+QString printable(const QString &text) {
+    QString safe;
+    safe.reserve(text.size());
+    for (const QChar character : text) {
+        const char16_t code = character.unicode();
+        if (code < 0x20 || (code >= 0x7F && code <= 0x9F))
+            safe += ' ';
+        else if (code == 0x061C || code == 0x200E || code == 0x200F || (code >= 0x202A && code <= 0x202E)
+                 || (code >= 0x2066 && code <= 0x2069))
+            continue;
+        else
+            safe += character;
+    }
+    return safe;
+}
+
 int fail(const QString &command, const QString &message, QTextStream &err) {
-    err << "readstr " << command << ": " << message << "\n";
+    err << "readstr " << command << ": " << printable(message) << "\n";
     return 1;
 }
 
@@ -153,11 +172,12 @@ int feeds(const QString &command, const QStringList &arguments, QTextStream &out
         return 0;
     }
     for (const Feed &feed : list) {
-        out << feed.id << "  " << feed.unread << "/" << feed.total << "  " << feed.title << "  " << feed.url;
+        out << feed.id << "  " << feed.unread << "/" << feed.total << "  " << printable(feed.title) << "  "
+            << printable(feed.url);
         if (!feed.category.isEmpty())
-            out << "  [" << feed.category << "]";
+            out << "  [" << printable(feed.category) << "]";
         if (!feed.lastError.isEmpty())
-            out << "  (error: " << feed.lastError << ")";
+            out << "  (error: " << printable(feed.lastError) << ")";
         out << "\n";
     }
     return 0;
@@ -199,10 +219,10 @@ int articles(const QString &command, const QStringList &arguments, QTextStream &
     }
     for (const Article &article : list) {
         out << article.id << "  " << (article.published.isValid() ? article.published.toString("yyyy-MM-dd") : "----------")
-            << "  " << (article.read ? ' ' : 'N') << (article.starred ? '*' : ' ') << "  " << article.title << "  ("
-            << article.feedTitle << ")\n";
+            << "  " << (article.read ? ' ' : 'N') << (article.starred ? '*' : ' ') << "  " << printable(article.title)
+            << "  (" << printable(article.feedTitle) << ")\n";
         if (!article.url.isEmpty())
-            out << "    " << article.url << "\n";
+            out << "    " << printable(article.url) << "\n";
     }
     return 0;
 }
@@ -234,8 +254,14 @@ int subscribe(const QString &command, const QStringList &arguments, QTextStream 
     if (created) {
         added = store.saveItems(id, found.feed.items);
         if (added < 0 || !store.updateFeedDetails(id, found.feed)
-            || !store.recordFetch(id, found.fetch.etag, found.fetch.lastModified, {}))
-            return fail(command, store.lastError(), err);
+            || !store.recordFetch(id, found.fetch.etag, found.fetch.lastModified, {})) {
+            // A feed left half saved would read as already subscribed next
+            // time and never get its articles, so it goes and a retry starts
+            // clean.
+            const QString error = store.lastError();
+            store.removeFeed(id);
+            return fail(command, error, err);
+        }
     }
     const std::optional<Feed> feed = store.feed(id);
     if (!feed)
@@ -250,9 +276,9 @@ int subscribe(const QString &command, const QStringList &arguments, QTextStream 
                               {"articles", added}},
                   out);
     } else if (created) {
-        out << "Subscribed to " << feed->title << " (id " << feed->id << ", " << added << " articles)\n";
+        out << "Subscribed to " << printable(feed->title) << " (id " << feed->id << ", " << added << " articles)\n";
     } else {
-        out << "Already subscribed to " << feed->title << " (id " << feed->id << ")\n";
+        out << "Already subscribed to " << printable(feed->title) << " (id " << feed->id << ")\n";
     }
     return 0;
 }
@@ -272,7 +298,7 @@ int unsubscribe(const QString &command, const QStringList &arguments, QTextStrea
     const std::optional<Feed> feed = store.feed(id);
     if (!feed || !store.removeFeed(id))
         return fail(command, store.lastError(), err);
-    out << "Unsubscribed from " << feed->title << "\n";
+    out << "Unsubscribed from " << printable(feed->title) << "\n";
     return 0;
 }
 
@@ -304,49 +330,61 @@ int refresh(const QString &command, const QStringList &arguments, QTextStream &o
     QList<FetchRequest> requests;
     for (const Feed &feed : targets)
         requests << FetchRequest{QUrl(feed.url), feed.etag, feed.lastModified};
+
+    // Each response is parsed and saved as it arrives, so only the few in
+    // flight hold a body; the rows are printed in feed order at the end.
+    struct Row {
+        QString status, error, title;
+        int added = 0;
+    };
+    QList<Row> rows(targets.size());
     Fetcher fetcher;
-    const QList<FetchResult> results = fetcher.fetchAll(requests);
+    fetcher.fetchEach(requests, [&](qsizetype i, const FetchResult &fetched) {
+        const Feed &feed = targets.at(i);
+        Row &row = rows[i];
+        row.title = feed.title;
+        if (!fetched.ok()) {
+            row.error = fetched.error;
+        } else if (fetched.notModified) {
+            row.status = QStringLiteral("not-modified");
+            // A 304 may leave out the validators; the stored ones still hold.
+            if (!store.recordFetch(feed.id, fetched.etag.isEmpty() ? feed.etag : fetched.etag,
+                                   fetched.lastModified.isEmpty() ? feed.lastModified : fetched.lastModified, {}))
+                row.error = store.lastError();
+        } else if (const auto parsed = FeedParser::parse(fetched.body, fetched.finalUrl, &row.error)) {
+            row.status = QStringLiteral("updated");
+            row.added = store.saveItems(feed.id, parsed->items);
+            if (row.added < 0 || !store.updateFeedDetails(feed.id, *parsed)
+                || !store.recordFetch(feed.id, fetched.etag, fetched.lastModified, {}))
+                row.error = store.lastError();
+            if (const auto updated = store.feed(feed.id))
+                row.title = updated->title;
+        }
+        if (!row.error.isEmpty()) {
+            row.status = QStringLiteral("error");
+            row.added = 0;
+            store.recordFetch(feed.id, {}, {}, row.error);
+        }
+    });
 
     int code = 0;
     QJsonArray array;
     for (qsizetype i = 0; i < targets.size(); ++i) {
         const Feed &feed = targets.at(i);
-        const FetchResult &fetched = results.at(i);
-        QString status, error, title = feed.title;
-        int added = 0;
-        if (!fetched.ok()) {
-            error = fetched.error;
-        } else if (fetched.notModified) {
-            status = QStringLiteral("not-modified");
-            // A 304 may leave out the validators; the stored ones still hold.
-            if (!store.recordFetch(feed.id, fetched.etag.isEmpty() ? feed.etag : fetched.etag,
-                                   fetched.lastModified.isEmpty() ? feed.lastModified : fetched.lastModified, {}))
-                error = store.lastError();
-        } else if (const auto parsed = FeedParser::parse(fetched.body, fetched.finalUrl, &error)) {
-            status = QStringLiteral("updated");
-            added = store.saveItems(feed.id, parsed->items);
-            if (added < 0 || !store.updateFeedDetails(feed.id, *parsed)
-                || !store.recordFetch(feed.id, fetched.etag, fetched.lastModified, {}))
-                error = store.lastError();
-            if (const auto updated = store.feed(feed.id))
-                title = updated->title;
-        }
-        if (!error.isEmpty()) {
-            status = QStringLiteral("error");
-            added = 0;
-            store.recordFetch(feed.id, {}, {}, error);
-            err << "readstr " << command << ": " << title << ": " << error << "\n";
+        const Row &row = rows.at(i);
+        if (!row.error.isEmpty()) {
+            err << "readstr " << command << ": " << printable(row.title) << ": " << printable(row.error) << "\n";
             code = 1;
         }
         if (options.json) {
-            array << QJsonObject{{"id", feed.id},       {"url", feed.url},  {"title", title},
-                                 {"status", status},   {"new", added},     {"error", nullable(error)}};
-        } else if (status == QLatin1String("updated")) {
-            out << feed.id << "  " << title << ": " << added << " new\n";
-        } else if (status == QLatin1String("not-modified")) {
-            out << feed.id << "  " << title << ": not modified\n";
+            array << QJsonObject{{"id", feed.id},         {"url", feed.url},      {"title", row.title},
+                                 {"status", row.status},  {"new", row.added},     {"error", nullable(row.error)}};
+        } else if (row.status == QLatin1String("updated")) {
+            out << feed.id << "  " << printable(row.title) << ": " << row.added << " new\n";
+        } else if (row.status == QLatin1String("not-modified")) {
+            out << feed.id << "  " << printable(row.title) << ": not modified\n";
         } else {
-            out << feed.id << "  " << title << ": failed\n";
+            out << feed.id << "  " << printable(row.title) << ": failed\n";
         }
     }
     if (options.json)
@@ -401,21 +439,31 @@ int importOpml(const QString &command, const QStringList &arguments, QTextStream
     if (!error.isEmpty())
         return fail(command, error, err);
 
+    // Nostr sources arrive in phase 2; until then they are counted, not
+    // dropped silently. They are set aside before de-duplication, so an
+    // unsupported outline cannot shadow a supported one with the same key.
+    QList<Opml::Outline> supported;
+    int unsupported = 0;
+    for (const Opml::Outline &outline : outlines) {
+        if (!outline.npub.isEmpty() || !isWebUrl(QUrl(outline.xmlUrl, QUrl::StrictMode)))
+            ++unsupported;
+        else
+            supported << outline;
+    }
+
     Store store;
     if (!openStore(command, store, err))
         return 1;
+    const QList<Feed> list = store.feeds();
+    if (!store.lastError().isEmpty())
+        return fail(command, store.lastError(), err);
     QStringList existing;
-    for (const Feed &feed : store.feeds())
+    for (const Feed &feed : list)
         existing << feed.url;
-    const Opml::Plan plan = Opml::plan(outlines, existing);
+    const Opml::Plan plan = Opml::plan(supported, existing);
 
-    int added = 0, unsupported = 0;
+    int added = 0;
     for (const Opml::Outline &outline : plan.toAdd) {
-        // Nostr sources arrive in phase 2; until then they are counted, not dropped silently.
-        if (!outline.npub.isEmpty() || !isWebUrl(QUrl(outline.xmlUrl, QUrl::StrictMode))) {
-            ++unsupported;
-            continue;
-        }
         bool created = false;
         if (!store.addFeed(outline.xmlUrl, outline.title, outline.folder, &created))
             return fail(command, store.lastError(), err);
@@ -452,9 +500,11 @@ int exportOpml(const QString &command, const QStringList &arguments, QTextStream
         return 0;
     }
     // Written beside the target and renamed over it, so a failure never
-    // leaves half a file where the old one was.
+    // leaves half a file where the old one was. The subscription list is
+    // private, so the file is 0600 before anything is written to it.
     QSaveFile file(options.positional.first());
-    if (!file.open(QIODevice::WriteOnly) || file.write(opml) != opml.size() || !file.commit())
+    if (!file.open(QIODevice::WriteOnly) || !file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)
+        || file.write(opml) != opml.size() || !file.commit())
         return fail(command, QStringLiteral("cannot write %1: %2").arg(file.fileName(), file.errorString()), err);
     return 0;
 }
