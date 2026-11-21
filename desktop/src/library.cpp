@@ -1,5 +1,6 @@
 #include "library.h"
 
+#include <QHash>
 #include <QSaveFile>
 
 #include "nostrsource.h"
@@ -58,7 +59,7 @@ NostrQuery authorQuery(const QString &pubkey) {
 // articles, and the profile when one came.
 bool saveNostr(Store &store, qint64 feedId, const QString &pubkey, const NostrResult &found, int *added) {
     const auto profile = NostrSource::profile(found.events, pubkey);
-    if (profile && !store.updateProfile(feedId, profile->feed, profile->revision))
+    if (profile && !store.updateProfile(feedId, profile->feed, profile->revision, profile->eventId))
         return false;
     const auto feed = store.feed(feedId);
     if (!feed)
@@ -192,8 +193,11 @@ Import importOutlines(Store &store, const QList<Opml::Outline> &outlines) {
     Import result;
     // Unsupported outlines are set aside before de-duplication, so one
     // cannot shadow a supported one with the same key. An nprofile or a
-    // "nostr:" link is stored as the plain npub.
+    // "nostr:" link is stored as the plain npub, and an nprofile's relay
+    // hints are kept for the feed, from the first outline of each author as
+    // the plan keeps that one.
     QList<Opml::Outline> supported;
+    QHash<QString, QStringList> hints;
     for (Opml::Outline outline : outlines) {
         if (!outline.npub.isEmpty()) {
             const auto author = Nip19::decodeProfile(outline.npub);
@@ -203,6 +207,8 @@ Import importOutlines(Store &store, const QList<Opml::Outline> &outlines) {
             }
             outline.npub = Nip19::npub(author->pubkey);
             outline.xmlUrl = outline.npub;
+            if (!hints.contains(outline.npub))
+                hints.insert(outline.npub, author->relays);
             supported << outline;
         } else if (isWebUrl(QUrl(outline.xmlUrl, QUrl::StrictMode))) {
             supported << outline;
@@ -225,7 +231,11 @@ Import importOutlines(Store &store, const QList<Opml::Outline> &outlines) {
         result.skipped = plan.skipped;
         for (const Opml::Outline &outline : plan.toAdd) {
             bool created = false;
-            if (!store.addFeed(outline.xmlUrl, outline.title, outline.folder, &created))
+            const qint64 id = store.addFeed(outline.xmlUrl, outline.title, outline.folder, &created);
+            if (!id)
+                return false;
+            const QStringList relays = hints.value(outline.npub);
+            if (created && !relays.isEmpty() && !store.setRelayHints(id, relays))
                 return false;
             result.added += created;
         }

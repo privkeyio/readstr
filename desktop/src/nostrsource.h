@@ -20,8 +20,9 @@ inline constexpr int maxProfileBytes = 64 * 1024;
 struct Profile {
     // Its title, site, and description.
     ParsedFeed feed;
-    // The kind 0 event's created_at.
+    // The kind 0 event's created_at, and its id, which breaks a tie.
     qint64 revision = 0;
+    QString eventId;
 };
 // The feed's details from the newest kind 0 event among `events`, or null
 // when there is none that reads as a profile.

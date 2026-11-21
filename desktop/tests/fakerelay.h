@@ -33,6 +33,8 @@ public:
     QString closeWith;
     // Closes the connection after answering this many REQs on it, once.
     int dropAfter = 0;
+    // Closes the connection after the events of a REQ, before its EOSE.
+    bool dropBeforeEose = false;
     QList<QJsonObject> filters;
     QStringList closed;
     int connections = 0;
@@ -57,6 +59,10 @@ private:
         }
         for (const QJsonValue &event : std::as_const(events))
             send(socket, {"EVENT", id, event});
+        if (dropBeforeEose) {
+            socket->close();
+            return;
+        }
         send(socket, {"EOSE", id});
         if (dropAfter && ++m_answered == dropAfter) {
             dropAfter = 0;

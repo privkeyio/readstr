@@ -40,12 +40,14 @@ struct NostrResult {
     QString error;
     // The events were cut off at the query's count or size cap.
     bool truncated = false;
+    // A relay hint was not asked, past the batch's connection cap.
+    bool deferred = false;
     // When the query went out.
     QDateTime startedAt;
     bool ok() const { return error.isEmpty(); }
-    // Every relay asked answered and nothing was cut off at a cap, so
-    // nothing they hold was missed.
-    bool complete() const { return ok() && answered == relays && !truncated; }
+    // Every relay asked answered, nothing was cut off at a cap, and no hint
+    // was left out, so nothing they hold was missed.
+    bool complete() const { return ok() && answered == relays && !truncated && !deferred; }
 };
 
 // Asks Nostr relays over WebSockets for the events of a list of queries.

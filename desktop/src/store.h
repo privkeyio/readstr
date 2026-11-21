@@ -99,7 +99,7 @@ public:
     bool updateFeedDetails(qint64 id, const ParsedFeed &parsed);
     // A Nostr author's profile as the feed's details, when `revision` (its
     // created_at) is newer than the profile they came from.
-    bool updateProfile(qint64 id, const ParsedFeed &profile, qint64 revision);
+    bool updateProfile(qint64 id, const ParsedFeed &profile, qint64 revision, const QString &eventId);
     bool setRelayHints(qint64 id, const QStringList &relays);
     // Every relay answered a refresh that started at `time`.
     bool recordComplete(qint64 id, const QDateTime &time);

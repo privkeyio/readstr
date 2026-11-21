@@ -2566,6 +2566,26 @@ private slots:
         QCOMPARE(Library::importOutlines(store, {outlines.at(0), outlines.at(2)}).added, 2);
     }
 
+    void importKeepsAnNprofilesRelayHints()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/library.db"));
+        const QString nprofile =
+            "nprofile1qqsrhuxx8l9ex335q7he0f09aej04zpazpl0ne2cgukyawd24mayt8gpp4mhxue69uhhytnc9e3k7mgpz4mhxue69uhkg6nzv9e"
+            "juumpv34kytnrdaksjlyr9p";
+        const QString npub = Nip19::npub(Nip19::decodeProfile(nprofile)->pubkey);
+        const QString other = Nip19::npub(QString(64, 'e'));
+        const Library::Import result = Library::importOutlines(
+            store, {{"Hinted", {}, nprofile, {}, {}}, {"Again", {}, npub, {}, {}}, {"Plain", {}, other, {}, {}}});
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        QCOMPARE(result.added, 2);
+        QCOMPARE(result.skipped, 1);
+        for (const Feed &feed : store.feeds())
+            QCOMPARE(feed.relayHints, feed.url == npub ? QStringList({"wss://r.x.com", "wss://djbas.sadkb.com"})
+                                                       : QStringList());
+    }
+
     void cliRefusesABadImportBeforeCreatingTheLibrary()
     {
         QTemporaryDir dir;
@@ -3449,6 +3469,12 @@ private slots:
         changed = *event;
         changed.pubkey = signedEvent(1, "", {}, 1, 2).value("pubkey").toString();
         QVERIFY(!changed.verify());
+        changed = *event;
+        ++changed.createdAt;
+        QVERIFY(!changed.verify());
+        changed = *event;
+        changed.tags[0][1] = "other";
+        QVERIFY(!changed.verify());
 
         QJsonObject broken = json;
         broken.insert("created_at", 1.5);
@@ -3498,7 +3524,17 @@ private slots:
         QCOMPARE(profile->feed.title, QString("Ada L."));
         QCOMPARE(profile->feed.description, QString("Writes."));
         QCOMPARE(profile->feed.siteUrl, "https://njump.me/" + Nip19::npub(pubkey));
+        QCOMPARE(profile->eventId, events.last().id);
         QVERIFY(!NostrSource::profile(events, QString(64, 'a')));
+
+        // An empty object clears the details; what is not an object is no profile.
+        events << *NostrEvent::fromJson(signedEvent(0, "{}", {}, 1700000400));
+        const auto cleared = NostrSource::profile(events, pubkey);
+        QVERIFY(cleared);
+        QVERIFY(cleared->feed.title.isEmpty());
+        QVERIFY(cleared->feed.description.isEmpty());
+        events << *NostrEvent::fromJson(signedEvent(0, "[]", {}, 1700000500));
+        QVERIFY(!NostrSource::profile(events, pubkey));
     }
 
     void storeKeepsTheNewestVersionOfAReplaceableArticle()
@@ -3547,13 +3583,30 @@ private slots:
         ParsedFeed profile;
         profile.title = "Ada";
         profile.siteUrl = "https://ada.example/";
-        QVERIFY(store.updateProfile(feed, profile, 200));
+        QVERIFY(store.updateProfile(feed, profile, 200, "b-profile"));
         ParsedFeed old = profile;
         old.title = "Old Ada";
         old.siteUrl = "https://expired.example/";
-        QVERIFY(store.updateProfile(feed, old, 100));
+        QVERIFY(store.updateProfile(feed, old, 100, "a-profile"));
         QCOMPARE(store.feed(feed)->siteUrl, QString("https://ada.example/"));
         QCOMPARE(store.feed(feed)->title, QString("Ada"));
+        // Same second: the lower id wins, whichever comes first.
+        ParsedFeed tied = profile;
+        tied.title = "Tied Ada";
+        QVERIFY(store.updateProfile(feed, tied, 200, "c-profile"));
+        QCOMPARE(store.feed(feed)->title, QString("Ada"));
+        QVERIFY(store.updateProfile(feed, tied, 200, "a-profile"));
+        QCOMPARE(store.feed(feed)->title, QString("Tied Ada"));
+        // A newer profile renames what an earlier one named, but not a title
+        // from OPML.
+        ParsedFeed renamed = profile;
+        renamed.title = "Ada L.";
+        QVERIFY(store.updateProfile(feed, renamed, 300, "d-profile"));
+        QCOMPARE(store.feed(feed)->title, QString("Ada L."));
+        const QString otherNpub = Nip19::npub(QString(64, 'd'));
+        const qint64 named = store.addFeed(otherNpub, "My Ada");
+        QVERIFY(store.updateProfile(named, renamed, 300, "d-profile"));
+        QCOMPARE(store.feed(named)->title, QString("My Ada"));
 
         // Same second: the lower id wins, whichever comes first.
         ParsedItem item;
@@ -3733,6 +3786,10 @@ private slots:
                                 "wss://[::1]", "wss://[fd00::1]", "wss://[::ffff:127.0.0.1]",
                                 "wss://u:p@relay.example.com"})
             QVERIFY2(!RelayPool::isPublicRelay(QUrl(url)), url);
+        for (const char *url : {"wss://localhost.", "wss://relay.local.", "wss://router."})
+            QVERIFY2(!RelayPool::isPublicRelay(QUrl(url)), url);
+        QVERIFY(RelayPool::isPublicRelay(QUrl("wss://[2606:4700:4700::1111]")));
+        QVERIFY(RelayPool::isPublicRelay(QUrl("wss://1.1.1.1")));
         QVERIFY(RelayPool::isUsableRelay(QUrl("ws://127.0.0.1:7000")));
         QVERIFY(!RelayPool::isUsableRelay(QUrl("ws://relay.example.com")));
 
@@ -3745,8 +3802,61 @@ private slots:
         query.kinds = {30023};
         query.extraRelays = {"ws://127.0.0.1:1"};
         QCOMPARE(pool.query(query).error, QString("no usable relays"));
+        // Set but empty is still a list, of none.
+        qputenv("READSTR_RELAYS", " ");
+        QVERIFY(RelayPool::configuredRelays().isEmpty());
+        QCOMPARE(pool.query(query).error, QString("no usable relays"));
         qunsetenv("READSTR_RELAYS");
         QCOMPARE(RelayPool::configuredRelays(), RelayPool::defaultRelays());
+    }
+
+    void relayPoolTellsRelayPathsApartAndDefersHintsPastItsCap()
+    {
+        FakeRelay relay;
+        relay.events = {signedEvent(30023, "body", {{"d", "a"}}, 1700000000)};
+        RelayPool pool;
+        NostrQuery query;
+        query.author = relay.events.first().toObject().value("pubkey").toString();
+        query.kinds = {30023};
+        pool.setRelays({relay.url() + "/", relay.url()});
+        NostrResult result = pool.query(query);
+        QCOMPARE(result.relays, 1);
+        QVERIFY(result.complete());
+        pool.setRelays({relay.url() + "/nostr/", relay.url() + "/nostr"});
+        QCOMPARE(pool.query(query).relays, 2);
+
+        RelayPool::Limits limits;
+        limits.maxConnections = 1;
+        pool.setLimits(limits);
+        pool.setRelays({relay.url()});
+        query.extraRelays = {"wss://relay.example.com"};
+        result = pool.query(query);
+        QVERIFY(result.ok());
+        QCOMPARE(result.relays, 1);
+        QVERIFY(result.deferred);
+        QVERIFY(!result.complete());
+    }
+
+    void relayPoolSurvivesBeingDeletedWhenItFinishes()
+    {
+        FakeRelay relay;
+        relay.events = {signedEvent(30023, "body", {{"d", "a"}}, 1700000000)};
+        relay.dropBeforeEose = true;
+        auto *pool = new RelayPool;
+        pool->setRelays({relay.url()});
+        NostrQuery query;
+        query.author = relay.events.first().toObject().value("pubkey").toString();
+        query.kinds = {30023};
+        bool finished = false;
+        pool->queryEachHeld(
+            {query}, [](qsizetype, const NostrResult &, const RelayPool::Release &release) { release(); },
+            [&] {
+                finished = true;
+                delete pool;
+            });
+        QTRY_VERIFY(finished);
+        QTest::qWait(100);
+        QCOMPARE(relay.connections, 1);
     }
 
     void nostrEventSerializesLikeJsonStringify()

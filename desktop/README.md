@@ -61,7 +61,8 @@ Markdown rendering arrives, an article shows as its Markdown text.
 
 Readstr asks relay.damus.io, relay.primal.net, nos.lol, and relay.snort.social
 (plus an nprofile's own relay hints when you subscribe), only over `wss://`.
-`READSTR_RELAYS` (URLs separated by commas or spaces) replaces that list.
+`READSTR_RELAYS` (URLs separated by commas or spaces) replaces that list, even
+when it is empty.
 Relays are untrusted: an event is kept only when it is by the author you
 asked for, of the kind you asked for, and its id and signature check out
 (BIP-340, through libsecp256k1). When an author edits an article, the newer
@@ -150,7 +151,8 @@ up to 8 MiB, 5000 outlines, and 64 levels of folders.
 Relays get 6 seconds to connect and 15 seconds to answer each request, and
 messages are cut off past 4 MiB. Each author's refresh keeps at most 200
 events and 16 MiB of text, asks for at most 100, and only for what is newer
-than a week before the last successful refresh. A relay that fails or stays
+than a day before the last complete refresh (one that every relay answered
+and no cap cut off). A relay that fails or stays
 silent is skipped, and a refresh fails only when none answers.
 
 ## Files

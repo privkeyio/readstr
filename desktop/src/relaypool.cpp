@@ -40,13 +40,17 @@ QString replaceableKey(const NostrEvent &event) {
 // machine and the local network, which have no business being reached
 // because a pasted string said so.
 bool isLocalHost(const QString &host) {
-    const QString name = host.toLower();
-    if (name == QLatin1String("localhost") || name.endsWith(QLatin1String(".localhost"))
-        || name.endsWith(QLatin1String(".local")) || name.endsWith(QLatin1String(".internal")) || !name.contains('.'))
-        return true;
+    QString name = host.toLower();
+    // A trailing dot names the same host, so "localhost." is localhost.
+    if (name.endsWith('.'))
+        name.chop(1);
+    // A literal address first, since an IPv6 one has no dot; the name rules
+    // are for names.
     QHostAddress address;
     if (!address.setAddress(name))
-        return false;
+        return name == QLatin1String("localhost") || name.endsWith(QLatin1String(".localhost"))
+            || name.endsWith(QLatin1String(".local")) || name.endsWith(QLatin1String(".internal"))
+            || !name.contains('.');
     if (address.protocol() == QAbstractSocket::IPv6Protocol) {
         bool mapped = false;
         const QHostAddress v4(address.toIPv4Address(&mapped));
@@ -72,6 +76,8 @@ struct RelayPool::Batch {
         QHash<QString, NostrEvent> events;
         qint64 bytes = 0;
         bool truncated = false;
+        // A relay hint was left out at the connection cap.
+        bool deferred = false;
         bool delivered = false;
         QPointer<QTimer> grace;
         QDateTime startedAt;
@@ -118,6 +124,15 @@ public:
     }
 
     ~Connection() override { detach(); }
+
+    // Lets go of the pool for good. Deleted from the event loop rather than
+    // with the pool, since a callback may delete the pool from inside one of
+    // this connection's own signals.
+    void retire() {
+        detach();
+        setParent(nullptr);
+        deleteLater();
+    }
 
     // Stops every callback into the pool, which may be going away, and
     // closes the socket after what is queued on it (the CLOSEs) has gone.
@@ -336,13 +351,9 @@ RelayPool::~RelayPool() {
     // signal, so the connections outlive it a little, detached.
     for (const auto &batch : std::as_const(m_batches)) {
         batch->over = true;
-        for (const QPointer<Connection> &connection : std::as_const(batch->connections)) {
-            if (!connection)
-                continue;
-            connection->detach();
-            connection->setParent(nullptr);
-            connection->deleteLater();
-        }
+        for (const QPointer<Connection> &connection : std::as_const(batch->connections))
+            if (connection)
+                connection->retire();
     }
 }
 
@@ -355,12 +366,12 @@ QStringList RelayPool::defaultRelays() {
 }
 
 QStringList RelayPool::configuredRelays() {
-    const QString configured = qEnvironmentVariable("READSTR_RELAYS").trimmed();
-    if (configured.isEmpty())
+    if (!qEnvironmentVariableIsSet("READSTR_RELAYS"))
         return defaultRelays();
-    // A list that names no usable relay is a mistake, and falling back to
-    // the public relays would send every followed author to them; it is
-    // used as it is, so queries fail and say why.
+    // A list that is empty or names no usable relay is a mistake, and
+    // falling back to the public relays would send every followed author to
+    // them; it is used as it is, so queries fail and say why.
+    const QString configured = qEnvironmentVariable("READSTR_RELAYS");
     QStringList relays;
     static const QRegularExpression separator(QStringLiteral("[\\s,]+"));
     for (const QString &entry : configured.split(separator, Qt::SkipEmptyParts))
@@ -439,14 +450,22 @@ void RelayPool::pump(const std::shared_ptr<Batch> &batch) {
         // Connections this query would add, which exist only after the loop.
         int opening = 0;
         auto add = [&](const QString &candidate, bool trusted) {
-            const QUrl url(candidate.trimmed(), QUrl::StrictMode);
-            const QString key = url.toString(QUrl::FullyEncoded | QUrl::StripTrailingSlash);
+            QUrl url(candidate.trimmed(), QUrl::StrictMode);
+            // "wss://host/" and "wss://host" are the same endpoint, but
+            // "/nostr/" and "/nostr" need not be.
+            if (url.path() == QLatin1String("/"))
+                url.setPath({});
+            const QString key = url.toString(QUrl::FullyEncoded);
             if (!(trusted ? isUsableRelay(url) : isPublicRelay(url)) || state.relays.contains(key)
                 || state.relays.size() >= m_limits.maxRelays)
                 return;
             const bool known = batch->connections.contains(key);
-            if (!trusted && !known && batch->connections.size() + opening >= m_limits.maxConnections)
+            if (!trusted && !known && batch->connections.size() + opening >= m_limits.maxConnections) {
+                // It may hold what the others lack, so the result cannot
+                // count as complete.
+                state.deferred = true;
                 return;
+            }
             opening += !known;
             state.relays << key;
         };
@@ -540,6 +559,7 @@ void RelayPool::deliver(const std::shared_ptr<Batch> &batch, int queryIndex, con
     result.relays = int(state.relays.size());
     result.answered = state.answered;
     result.truncated = state.truncated;
+    result.deferred = state.deferred;
     if (!error.isEmpty())
         result.error = error;
     else if (!state.answered)
@@ -558,9 +578,11 @@ void RelayPool::deliver(const std::shared_ptr<Batch> &batch, int queryIndex, con
         }
         batch->over = true;
         self->m_batches.removeOne(batch);
+        // Detached before `finished`, which may delete the pool and would
+        // otherwise take the connections, perhaps one still running, with it.
         for (const QPointer<Connection> &connection : std::as_const(batch->connections))
             if (connection)
-                connection->deleteLater();
+                connection->retire();
         if (batch->finished)
             batch->finished();
     };

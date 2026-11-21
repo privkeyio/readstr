@@ -70,11 +70,15 @@ const QList<QStringList> migrations = {
         "ALTER TABLE items ADD COLUMN address TEXT",
         "ALTER TABLE items ADD COLUMN revision INTEGER",
         "CREATE INDEX items_by_address ON items(feed_id, address) WHERE address IS NOT NULL",
-        // A Nostr author's relay hints (a JSON array), the created_at of the
-        // profile the feed's details came from, and when every relay last
-        // answered a refresh.
+        // A Nostr author's relay hints (a JSON array), the created_at and id
+        // of the profile the feed's details came from (the id breaks a tie
+        // between two from the same second), the title that profile gave the
+        // feed (which a newer profile may replace, where a title from OPML
+        // stays), and when every relay last answered a refresh.
         "ALTER TABLE feeds ADD COLUMN relay_hints TEXT",
         "ALTER TABLE feeds ADD COLUMN profile_revision INTEGER",
+        "ALTER TABLE feeds ADD COLUMN profile_event_id TEXT",
+        "ALTER TABLE feeds ADD COLUMN profile_title TEXT",
         "ALTER TABLE feeds ADD COLUMN complete_at INTEGER",
     },
 };
@@ -438,21 +442,31 @@ bool Store::updateFeedDetails(qint64 id, const ParsedFeed &parsed) {
     return query.exec() || fail(query.lastError().text());
 }
 
-bool Store::updateProfile(qint64 id, const ParsedFeed &profile, qint64 revision) {
+bool Store::updateProfile(qint64 id, const ParsedFeed &profile, qint64 revision, const QString &eventId) {
     // Only a newer profile than the one the details came from, so a relay
-    // sending an old one cannot bring back what the author has changed.
+    // sending an old one cannot bring back what the author has changed. Of
+    // two from the same second the lower id wins, as NIP-01 says. The title
+    // is replaced when it is a placeholder or an earlier profile's name,
+    // never when the user brought it along from OPML.
     QSqlQuery query(m_db);
     query.prepare(QStringLiteral(
-        "UPDATE feeds SET title = CASE WHEN (title = '' OR title = url) AND ? <> '' THEN ? ELSE title END,"
-        " site_url = ?, description = ?, profile_revision = ?"
-        " WHERE id = ? AND (profile_revision IS NULL OR profile_revision < ?)"));
-    query.addBindValue(profile.title);
-    query.addBindValue(profile.title);
+        "UPDATE feeds SET"
+        " title = CASE WHEN (title = '' OR title = url OR title = profile_title) AND ? <> '' THEN ? ELSE title END,"
+        " profile_title = CASE WHEN (title = '' OR title = url OR title = profile_title) AND ? <> ''"
+        " THEN ? ELSE profile_title END,"
+        " site_url = ?, description = ?, profile_revision = ?, profile_event_id = ?"
+        " WHERE id = ? AND (profile_revision IS NULL OR profile_revision < ?"
+        " OR (profile_revision = ? AND (profile_event_id IS NULL OR profile_event_id > ?)))"));
+    for (int i = 0; i < 4; ++i)
+        query.addBindValue(profile.title);
     query.addBindValue(profile.siteUrl);
     query.addBindValue(profile.description);
     query.addBindValue(revision);
+    query.addBindValue(eventId);
     query.addBindValue(id);
     query.addBindValue(revision);
+    query.addBindValue(revision);
+    query.addBindValue(eventId);
     return query.exec() || fail(query.lastError().text());
 }
 

@@ -31,9 +31,11 @@ std::optional<Profile> profile(const QList<NostrEvent> &events, const QString &p
             latest = &event;
     if (!latest || latest->content.size() > maxProfileBytes)
         return std::nullopt;
-    const QJsonObject object = QJsonDocument::fromJson(latest->content.toUtf8()).object();
-    if (object.isEmpty())
+    // An empty object still counts: it is the author clearing their details.
+    const QJsonDocument document = QJsonDocument::fromJson(latest->content.toUtf8());
+    if (!document.isObject())
         return std::nullopt;
+    const QJsonObject object = document.object();
     ParsedFeed feed;
     feed.title = textField(object, "display_name", 200);
     if (feed.title.isEmpty())
@@ -42,7 +44,7 @@ std::optional<Profile> profile(const QList<NostrEvent> &events, const QString &p
     feed.siteUrl = webLink(object.value("website").toString().trimmed());
     if (feed.siteUrl.isEmpty())
         feed.siteUrl = QStringLiteral("https://njump.me/") + Nip19::npub(pubkey);
-    return Profile{feed, latest->createdAt};
+    return Profile{feed, latest->createdAt, latest->id};
 }
 
 QList<ParsedItem> longForm(const QList<NostrEvent> &events, const QString &author) {
