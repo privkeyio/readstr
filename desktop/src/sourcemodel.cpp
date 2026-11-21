@@ -6,6 +6,8 @@
 #include <limits>
 
 #include "feedparser.h"
+#include "library.h"
+#include "nip19.h"
 
 SourceModel::SourceModel(QObject *parent) : QAbstractListModel(parent) {
     setLibrary({}, {});
@@ -16,7 +18,8 @@ int SourceModel::rowCount(const QModelIndex &parent) const { return parent.isVal
 QHash<int, QByteArray> SourceModel::roleNames() const {
     return {{KindRole, "kind"},         {FeedIdRole, "feedId"}, {TitleRole, "title"},
             {UrlRole, "url"},           {CategoryRole, "category"}, {CountRole, "unread"},
-            {LastErrorRole, "lastError"}, {SelectableRole, "selectable"}};
+            {LastErrorRole, "lastError"}, {SelectableRole, "selectable"}, {NostrRole, "nostr"},
+            {IncompleteRole, "incomplete"}};
 }
 
 QVariant SourceModel::data(const QModelIndex &index, int role) const {
@@ -40,6 +43,8 @@ QVariant SourceModel::data(const QModelIndex &index, int role) const {
     case CountRole: return row.count;
     case LastErrorRole: return row.lastError;
     case SelectableRole: return row.kind != Kind::Category;
+    case NostrRole: return row.nostr;
+    case IncompleteRole: return row.incomplete;
     default: return {};
     }
 }
@@ -68,13 +73,24 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
     // for display here like a feed's own text: no line breaks, and no
     // bidirectional overrides that would show them reversed.
     // A title that cleans away to nothing still needs a name in the list:
-    // its address, without the credentials that only disguise it.
+    // its address, without the credentials that only disguise it. A Nostr
+    // author's npub, their title until the profile names them, shows
+    // shortened. A refresh error says more than a note that the refresh
+    // missed something, so it takes the note's place.
     auto add = [&rows](const Feed &feed) {
         QString title = FeedParser::cleanText(feed.title);
         if (title.isEmpty())
             title = FeedParser::cleanText(QUrl(feed.url).adjusted(QUrl::RemoveUserInfo).toString());
-        rows << Row{Kind::Feed, feed.id, title, feed.url, FeedParser::cleanText(feed.category), feed.lastError,
-                    feed.unread};
+        const bool nostr = Library::isNostrFeed(feed);
+        rows << Row{Kind::Feed,
+                    feed.id,
+                    Nip19::shortNpub(title, feed.url),
+                    feed.url,
+                    FeedParser::cleanText(feed.category),
+                    feed.lastError,
+                    feed.unread,
+                    nostr,
+                    nostr && feed.incomplete && feed.lastError.isEmpty()};
     };
     if (!uncategorized.isEmpty()) {
         rows << Row{Kind::Category, 0, {}, {}, {}, {}, 0};
@@ -104,7 +120,8 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
     for (qsizetype i = 0; i < rows.size(); ++i) {
         const Row &before = m_rows.at(i), &after = rows.at(i);
         if (before.title != after.title || before.url != after.url || before.count != after.count
-            || before.lastError != after.lastError) {
+            || before.lastError != after.lastError || before.nostr != after.nostr
+            || before.incomplete != after.incomplete) {
             m_rows[i] = after;
             emit dataChanged(index(int(i)), index(int(i)));
         }

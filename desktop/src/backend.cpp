@@ -54,6 +54,7 @@ Backend::Backend(FilePicker *picker, QObject *parent)
     : QObject(parent), m_fetcher(std::make_unique<Fetcher>()), m_relays(std::make_unique<RelayPool>()),
       m_thumbnails(std::make_unique<Thumbnails>()), m_picker(picker) {
     m_openUrl = [](const QUrl &url) { return QDesktopServices::openUrl(url); };
+    m_writeClipboard = [](const QString &text) { QGuiApplication::clipboard()->setText(text, QClipboard::Clipboard); };
     m_launch = &Backend::launchDetached;
 
     m_worker = new LibraryWorker;
@@ -645,7 +646,8 @@ void Backend::subscribeFinished(const Library::Subscription &subscription) {
         return;
     }
     reloadLibrary();
-    const QString title = m_store.feed(subscription.id).value_or(Feed{}).title;
+    const Feed feed = m_store.feed(subscription.id).value_or(Feed{});
+    const QString title = Nip19::shortNpub(feed.title, feed.url);
     if (subscription.created)
         setStatus(tr("Subscribed to %1 (%n articles)", nullptr, subscription.added).arg(title));
     else
@@ -674,7 +676,7 @@ bool Backend::unsubscribe(qint64 feedId) {
     reloadLibrary();
     const QString failure = tr("Cannot unsubscribe: %1");
     writeOnWorker([feedId](Store &store) { return store.removeFeed(feedId) ? 1 : -1; }, failure,
-                  [this, feedId, title = feed->title, failure](const WriteResult &result) {
+                  [this, feedId, title = Nip19::shortNpub(feed->title, feed->url), failure](const WriteResult &result) {
                       m_removing.remove(feedId);
                       if (!result.error.isEmpty()) {
                           // Still subscribed, so its refresh errors count again.
@@ -784,8 +786,8 @@ void Backend::refreshApplied(const Feed &feed, const Library::Refresh &outcome) 
     if (!outcome.error.isEmpty() && !m_unsubscribed.contains(feed.id)) {
         ++m_refreshFailed;
         if (m_firstFailure.isEmpty())
-            m_firstFailure = QStringLiteral("%1: %2").arg(outcome.title.isEmpty() ? feed.url : outcome.title,
-                                                           outcome.error);
+            m_firstFailure = QStringLiteral("%1: %2").arg(
+                Nip19::shortNpub(outcome.title.isEmpty() ? feed.url : outcome.title, feed.url), outcome.error);
     } else {
         m_refreshAdded += outcome.added;
     }
@@ -874,6 +876,29 @@ void Backend::copyText(const QString &text) {
     clipboard->setText(plain, QClipboard::Clipboard);
     if (clipboard->supportsSelection())
         clipboard->setText(plain, QClipboard::Selection);
+}
+
+QString Backend::npubOf(qint64 feedId) const {
+    const SourceModel::Row row = m_sources.row(m_sources.rowOf(SourceModel::Kind::Feed, feedId));
+    if (!row.nostr)
+        return {};
+    // Encoded again from the key, so only a well-formed npub goes out.
+    const auto author = Nip19::decodeProfile(row.url);
+    return author ? Nip19::npub(author->pubkey) : QString();
+}
+
+void Backend::openProfile(qint64 feedId) {
+    const QString npub = npubOf(feedId);
+    if (!npub.isEmpty())
+        openLink(QStringLiteral("https://njump.me/") + npub);
+}
+
+void Backend::copyNpub(qint64 feedId) {
+    const QString npub = npubOf(feedId);
+    if (npub.isEmpty())
+        return;
+    m_writeClipboard(npub);
+    setStatus(tr("Copied %1 to the clipboard").arg(Nip19::shortNpub(npub, npub)));
 }
 
 QString Backend::localPath(const QUrl &url) {

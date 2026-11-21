@@ -110,5 +110,12 @@
   "Playing %1 in mpv": "Afspiller %1 i mpv",
   "Cannot play the video: mpv is not installed": "Kan ikke afspille videoen: mpv er ikke installeret",
   "Cannot play the video: mpv did not start": "Kan ikke afspille videoen: mpv startede ikke",
-  "Cannot play the video: it is on this machine or the local network": "Kan ikke afspille videoen: den ligger på denne maskine eller det lokale netværk"
+  "Cannot play the video: it is on this machine or the local network": "Kan ikke afspille videoen: den ligger på denne maskine eller det lokale netværk",
+  "Nostr": "Nostr",
+  "A Nostr author's articles and videos": "En Nostr-forfatters artikler og videoer",
+  "Some relays didn't answer": "Nogle relæer svarede ikke",
+  "The last refresh did not hear from every relay, or stopped at a limit, so some articles may be missing. The next refresh asks for them again.": "Den seneste opdatering hørte ikke fra alle relæer eller stoppede ved en grænse, så nogle artikler kan mangle. Den næste opdatering beder om dem igen.",
+  "Open profile": "Åbn profil",
+  "Copy npub": "Kopiér npub",
+  "Copied %1 to the clipboard": "Kopierede %1 til udklipsholderen"
 }

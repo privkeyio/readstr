@@ -15,6 +15,7 @@
 #include "feedparser.h"
 #include "fetcher.h"
 #include "library.h"
+#include "nip19.h"
 #include "relaypool.h"
 #include "sourcemodel.h"
 #include "store.h"
@@ -97,7 +98,7 @@ public:
     bool hasArticle() const { return m_article.id != 0; }
     qint64 articleId() const { return m_article.id; }
     QString articleTitle() const { return m_article.title; }
-    QString articleFeed() const { return FeedParser::cleanText(m_article.feedTitle); }
+    QString articleFeed() const { return Nip19::shortNpub(FeedParser::cleanText(m_article.feedTitle), m_article.feedUrl); }
     QString articleAuthor() const { return m_article.author; }
     QString articleUrl() const;
     QVariant articlePublished() const;
@@ -143,6 +144,10 @@ public:
     // selection), as plain text without the zero-width spaces the
     // sanitizer adds to break long words.
     Q_INVOKABLE void copyText(const QString &text);
+    // A Nostr author's profile on njump.me, and their npub on the
+    // clipboard; both do nothing for a web feed.
+    Q_INVOKABLE void openProfile(qint64 feedId);
+    Q_INVOKABLE void copyNpub(qint64 feedId);
     // `text` as a TextEdit showing rich text gives it (paragraph and line
     // separators, frame markers), as plain text without zero-width spaces;
     // ones the feed had itself go too.
@@ -159,6 +164,8 @@ public:
 
     // How links leave the app; tests replace it.
     void setUrlOpener(std::function<bool(const QUrl &)> opener) { m_openUrl = std::move(opener); }
+    // How copyNpub() reaches the clipboard; tests replace it.
+    void setClipboardWriter(std::function<void(const QString &)> writer) { m_writeClipboard = std::move(writer); }
     enum class Launch { Started, Missing, Failed };
     using Launcher = std::function<Launch(const QString &program, const QStringList &arguments)>;
     // How a video reaches its player; tests replace it.
@@ -231,6 +238,8 @@ private:
     // (another host's file: URL included).
     static QString localPath(const QUrl &url);
     void hideRemoving(QList<Feed> &feeds) const;
+    // The npub of the Nostr feed `feedId` in the sources, or empty.
+    QString npubOf(qint64 feedId) const;
     void refresh(const QList<Feed> &targets);
     void refreshApplied(const Feed &feed, const Library::Refresh &outcome);
     void searchRound(const std::shared_ptr<Discovery::Search> &search);
@@ -246,6 +255,7 @@ private:
     LibraryWorker *m_worker = nullptr;
     FilePicker *m_picker = nullptr;
     std::function<bool(const QUrl &)> m_openUrl;
+    std::function<void(const QString &)> m_writeClipboard;
     Launcher m_launch;
     bool m_closing = false;
     QList<std::shared_ptr<UserWrite>> m_userWrites;

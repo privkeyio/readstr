@@ -124,5 +124,12 @@
   "Playing %1 in mpv": "Воспроизводится %1 в mpv",
   "Cannot play the video: mpv is not installed": "Не удаётся воспроизвести видео: mpv не установлен",
   "Cannot play the video: mpv did not start": "Не удаётся воспроизвести видео: mpv не запустился",
-  "Cannot play the video: it is on this machine or the local network": "Не удаётся воспроизвести видео: оно находится на этом компьютере или в локальной сети"
+  "Cannot play the video: it is on this machine or the local network": "Не удаётся воспроизвести видео: оно находится на этом компьютере или в локальной сети",
+  "Nostr": "Nostr",
+  "A Nostr author's articles and videos": "Статьи и видео автора из Nostr",
+  "Some relays didn't answer": "Не все релеи ответили",
+  "The last refresh did not hear from every relay, or stopped at a limit, so some articles may be missing. The next refresh asks for them again.": "Последнее обновление получило ответ не от всех релеев или остановилось на ограничении, поэтому некоторых статей может не хватать. Следующее обновление запросит их снова.",
+  "Open profile": "Открыть профиль",
+  "Copy npub": "Копировать npub",
+  "Copied %1 to the clipboard": "%1 скопирован в буфер обмена"
 }

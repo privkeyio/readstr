@@ -74,8 +74,12 @@ bool saveNostr(Store &store, qint64 feedId, const QString &pubkey, const NostrRe
         return false;
     // A refresh that some relay missed, for either query, asks again from
     // the last one they all answered, so what only that relay holds is not
-    // skipped for good. The earlier start covers both.
-    if (!articles.complete() || !videos.complete())
+    // skipped for good, and the window says it missed something. The
+    // earlier start covers both.
+    const bool complete = articles.complete() && videos.complete();
+    if (!store.setIncomplete(feedId, !complete))
+        return false;
+    if (!complete)
         return true;
     return store.recordComplete(feedId, qMin(articles.startedAt, videos.startedAt));
 }

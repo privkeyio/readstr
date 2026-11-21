@@ -92,6 +92,13 @@ const QList<QStringList> migrations = {
         // videos older than the last complete refresh would never come.
         "UPDATE feeds SET complete_at = NULL WHERE url LIKE 'npub1%'",
     },
+    {
+        // Whether a Nostr author's last saved refresh missed something, so
+        // the window can say so. complete_at cannot tell: it keeps the time
+        // of the last complete refresh, however many incomplete ones came
+        // after it.
+        "ALTER TABLE feeds ADD COLUMN incomplete INTEGER NOT NULL DEFAULT 0",
+    },
 };
 
 std::atomic<int> connectionCounter{0};
@@ -100,7 +107,7 @@ const char feedColumns[] =
     "SELECT f.id, f.url, f.title, f.site_url, f.description, c.name, f.etag, f.last_modified, f.last_error,"
     " f.last_fetched_at, f.relay_hints, f.complete_at,"
     " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id AND i.is_read = 0),"
-    " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id)"
+    " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id), f.incomplete"
     " FROM feeds f LEFT JOIN categories c ON c.id = f.category_id";
 
 Feed feedFrom(const QSqlQuery &query) {
@@ -121,6 +128,7 @@ Feed feedFrom(const QSqlQuery &query) {
         feed.completeAt = QDateTime::fromSecsSinceEpoch(query.value(11).toLongLong(), QTimeZone::UTC);
     feed.unread = query.value(12).toInt();
     feed.total = query.value(13).toInt();
+    feed.incomplete = query.value(14).toBool();
     return feed;
 }
 
@@ -506,6 +514,14 @@ bool Store::recordComplete(qint64 id, const QDateTime &time) {
     return query.exec() || fail(query.lastError().text());
 }
 
+bool Store::setIncomplete(qint64 id, bool incomplete) {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("UPDATE feeds SET incomplete = ? WHERE id = ?"));
+    query.addBindValue(incomplete ? 1 : 0);
+    query.addBindValue(id);
+    return query.exec() || fail(query.lastError().text());
+}
+
 bool Store::recordFetch(qint64 id, const QString &etag, const QString &lastModified, const QString &error) {
     QSqlQuery query(m_db);
     if (error.isEmpty()) {
@@ -614,7 +630,7 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
 namespace {
 const char articleColumns[] =
     "SELECT i.id, i.feed_id, f.title, i.guid, i.title, i.url, i.author, i.summary, %1,"
-    " i.published_at, i.is_read, i.is_starred, i.address, i.media_url, i.thumbnail_url, i.duration"
+    " i.published_at, i.is_read, i.is_starred, i.address, i.media_url, i.thumbnail_url, i.duration, f.url"
     " FROM items i JOIN feeds f ON f.id = i.feed_id";
 
 Article articleFrom(const QSqlQuery &query) {
@@ -637,6 +653,7 @@ Article articleFrom(const QSqlQuery &query) {
     article.thumbnailUrl = query.value(14).toString();
     if (!query.value(15).isNull())
         article.duration = query.value(15).toDouble();
+    article.feedUrl = query.value(16).toString();
     return article;
 }
 

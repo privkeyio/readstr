@@ -45,5 +45,12 @@
   "The file chooser closed without a file.": "O seletor de arquivos fechou sem um arquivo.",
   "Feed, site, or npub": "Feed, site ou npub",
   "Playing %1 in mpv": "Reproduzindo %1 no mpv",
-  "Cannot play the video: mpv did not start": "Não é possível reproduzir o vídeo: o mpv não iniciou"
+  "Cannot play the video: mpv did not start": "Não é possível reproduzir o vídeo: o mpv não iniciou",
+  "Nostr": "Nostr",
+  "A Nostr author's articles and videos": "Os artigos e vídeos de um autor do Nostr",
+  "Some relays didn't answer": "Alguns relays não responderam",
+  "The last refresh did not hear from every relay, or stopped at a limit, so some articles may be missing. The next refresh asks for them again.": "A última atualização não teve resposta de todos os relays, ou parou em um limite, então alguns artigos podem estar faltando. A próxima atualização pede por eles de novo.",
+  "Open profile": "Abrir perfil",
+  "Copy npub": "Copiar npub",
+  "Copied %1 to the clipboard": "%1 copiado para a área de transferência"
 }

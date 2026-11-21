@@ -376,12 +376,12 @@ private slots:
         {
             Store store;
             QVERIFY2(store.open(path), qPrintable(store.lastError()));
-            QCOMPARE(store.schemaVersion(), 3);
+            QCOMPARE(store.schemaVersion(), 4);
             QVERIFY(store.addFeed("https://a.example.com/feed", "A"));
         }
         Store again;
         QVERIFY2(again.open(path), qPrintable(again.lastError()));
-        QCOMPARE(again.schemaVersion(), 3);
+        QCOMPARE(again.schemaVersion(), 4);
         QCOMPARE(again.feeds().size(), 1);
 
         QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "raw");
@@ -551,7 +551,7 @@ private slots:
             for (int i = 0; i < 8; ++i)
                 threads << QThread::create([&failures, path] {
                     Store store;
-                    if (!store.open(path) || store.schemaVersion() != 3) {
+                    if (!store.open(path) || store.schemaVersion() != 4) {
                         qWarning("%s", qPrintable(store.lastError()));
                         ++failures;
                     }
@@ -606,7 +606,7 @@ private slots:
 
         Store writer;
         QVERIFY2(writer.open(path), qPrintable(writer.lastError()));
-        QCOMPARE(writer.schemaVersion(), 3);
+        QCOMPARE(writer.schemaVersion(), 4);
         QCOMPARE(writer.articles({0, false, false, 0}).size(), workers * perRound);
 
         // A reader in the middle of a transaction neither blocks a writer
@@ -4508,7 +4508,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 3);
+        QCOMPARE(store.schemaVersion(), 4);
         QList<Article> articles = store.articles({});
         QCOMPARE(articles.size(), 1);
         QCOMPARE(articles.first().title, QString("Old"));
@@ -4571,7 +4571,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 3);
+        QCOMPARE(store.schemaVersion(), 4);
         const QList<Feed> feeds = store.feeds();
         QCOMPARE(feeds.size(), 2);
         for (const Feed &feed : feeds) {
@@ -4657,6 +4657,242 @@ private slots:
         QCOMPARE(backend.articleDuration(), 3725.0);
         QCOMPARE(backend.articleHtml(), QString("<p>Watch this</p>"));
         QVERIFY(backend.articleUrl().startsWith("https://njump.me/nevent1"));
+    }
+
+    // A Nostr author goes by a shortened npub wherever a title shows, until
+    // their profile names them; the stored title stays the whole npub, so
+    // the profile's name still replaces it, and a name from OPML stays.
+    void nostrTitlesShowShortenedUntilTheProfileNamesThem()
+    {
+        const QString npub = Nip19::npub(QString(64, 'a'));
+        const QString shortened = npub.left(9) + QChar(0x2026) + npub.right(4);
+        QCOMPARE(Nip19::shortNpub(npub, npub), shortened);
+        const QString badChecksum = npub.chopped(1) + (npub.endsWith('q') ? "p" : "q");
+        // Anything but the feed's own whole, valid npub stays as it is.
+        for (const QString &text : {QString("Ada"), QString(), badChecksum, "nostr:" + npub, npub + " ", npub.toUpper(),
+                                    npub.left(20)})
+            QCOMPARE(Nip19::shortNpub(text, text), text);
+        // A profile that names itself after another author's npub shows that
+        // npub whole, not as the other author's placeholder.
+        const QString someoneElse = Nip19::npub(QString(64, 'c'));
+        QCOMPARE(Nip19::shortNpub(someoneElse, npub), someoneElse);
+
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString other = Nip19::npub(QString(64, 'b'));
+        qint64 placeholder = 0, named = 0, web = 0;
+        {
+            Store store;
+            QVERIFY(store.open());
+            placeholder = store.addFeed(npub, npub);
+            named = store.addFeed(other, "From OPML");
+            web = store.addFeed("https://w.example.com/feed", "Web");
+            ParsedItem item;
+            item.guid = "a";
+            item.title = "Hello";
+            QCOMPARE(store.saveItems(placeholder, {item}), 1);
+        }
+        {
+            Backend backend;
+            SourceModel *sources = backend.sources();
+            auto data = [sources](qint64 id, int role) {
+                return sources->data(sources->index(sources->rowOf(SourceModel::Kind::Feed, id)), role);
+            };
+            QCOMPARE(data(placeholder, SourceModel::TitleRole).toString(), shortened);
+            QCOMPARE(data(placeholder, SourceModel::UrlRole).toString(), npub);
+            QCOMPARE(data(named, SourceModel::TitleRole).toString(), QString("From OPML"));
+            QVERIFY(data(placeholder, SourceModel::NostrRole).toBool());
+            QVERIFY(data(named, SourceModel::NostrRole).toBool());
+            QVERIFY(!data(web, SourceModel::NostrRole).toBool());
+            QVERIFY(!data(placeholder, SourceModel::IncompleteRole).toBool());
+            QVERIFY(!sources->data(sources->index(0), SourceModel::NostrRole).toBool());
+
+            // The article list's source label, the reader's header, and the
+            // unsubscribe dialog (given the selected source's title).
+            backend.selectSource(sources->rowOf(SourceModel::Kind::Feed, placeholder));
+            QCOMPARE(backend.sourceTitle(), shortened);
+            QCOMPARE(backend.articles()->count(), 1);
+            QCOMPARE(backend.articles()->data(backend.articles()->index(0), ArticleModel::FeedTitleRole).toString(),
+                     shortened);
+            backend.selectArticle(0);
+            QCOMPARE(backend.articleFeed(), shortened);
+        }
+
+        Store store;
+        QVERIFY(store.open());
+        QCOMPARE(store.feed(placeholder)->title, npub);
+        ParsedFeed ada;
+        ada.title = "Ada";
+        QVERIFY(store.updateProfile(placeholder, ada, 1, QString(64, '1')));
+        QVERIFY(store.updateProfile(named, ada, 1, QString(64, '1')));
+        SourceModel model;
+        model.setLibrary(store.feeds(), {});
+        auto title = [&model](qint64 id) {
+            return model.data(model.index(model.rowOf(SourceModel::Kind::Feed, id)), SourceModel::TitleRole).toString();
+        };
+        QCOMPARE(title(placeholder), QString("Ada"));
+        QCOMPARE(title(named), QString("From OPML"));
+    }
+
+    // A refresh that a relay was silent on, or that a cap cut short, leaves
+    // a note on the author's row; a complete one clears it, and an error
+    // shows in its place.
+    void nostrRefreshNotesWhatItMissed()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeRelay good, silent;
+        good.honourFilters = true;
+        silent.silent = true;
+        good.events = {signedEvent(0, R"({"name":"ada"})", {}, now),
+                       signedEvent(30023, "# Hi", {{"d", "a"}, {"title", "Hello"}}, now + 100)};
+        const QString npub = Nip19::npub(good.events.first().toObject().value("pubkey").toString());
+
+        Backend backend;
+        RelayPool::Limits limits;
+        limits.connectTimeoutMs = 2000;
+        limits.subscriptionTimeoutMs = 300;
+        limits.graceMs = 200;
+        backend.setRelayLimits(limits);
+        backend.setRelays({good.url()});
+        QSignalSpy subscribed(&backend, &Backend::subscribed);
+        backend.addFeed(npub);
+        QVERIFY(subscribed.wait(5000));
+        const qint64 id = subscribed.first().first().toLongLong();
+        SourceModel *sources = backend.sources();
+        auto data = [sources, id](int role) {
+            return sources->data(sources->index(sources->rowOf(SourceModel::Kind::Feed, id)), role);
+        };
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(data(SourceModel::NostrRole).toBool());
+        QVERIFY(!data(SourceModel::IncompleteRole).toBool());
+        QVERIFY(!store.feed(id)->incomplete);
+
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        auto refresh = [&](const QStringList &relays) {
+            backend.setRelays(relays);
+            finished.clear();
+            backend.refreshAll();
+            return finished.wait(10000);
+        };
+
+        QVERIFY(refresh({good.url(), silent.url()}));
+        QVERIFY(data(SourceModel::IncompleteRole).toBool());
+        QVERIFY(data(SourceModel::LastErrorRole).toString().isEmpty());
+        QVERIFY(!backend.statusError());
+        QVERIFY(store.feed(id)->incomplete);
+
+        // No relay answers: the error shows, not the note.
+        QVERIFY(refresh({silent.url()}));
+        QVERIFY(!data(SourceModel::LastErrorRole).toString().isEmpty());
+        QVERIFY(!data(SourceModel::IncompleteRole).toBool());
+
+        QVERIFY(refresh({good.url()}));
+        QVERIFY(data(SourceModel::LastErrorRole).toString().isEmpty());
+        QVERIFY(!data(SourceModel::IncompleteRole).toBool());
+        QVERIFY(!store.feed(id)->incomplete);
+
+        // Every relay answers, but the profile and the article are more
+        // than the cap keeps.
+        limits.maxEventsPerQuery = 1;
+        backend.setRelayLimits(limits);
+        QVERIFY(refresh({good.url()}));
+        QVERIFY(data(SourceModel::IncompleteRole).toBool());
+        QVERIFY(store.feed(id)->incomplete);
+    }
+
+    void backendOpensAndCopiesANostrAuthorsProfile()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString npub = Nip19::npub(QString(64, 'a'));
+        qint64 author = 0, web = 0;
+        {
+            Store store;
+            QVERIFY(store.open());
+            author = store.addFeed(npub, "Ada");
+            web = store.addFeed("https://w.example.com/feed", "Web");
+        }
+        const QString clipboardBefore = QGuiApplication::clipboard()->text();
+        Backend backend;
+        QList<QUrl> opened;
+        QStringList copied;
+        backend.setUrlOpener([&opened](const QUrl &url) {
+            opened << url;
+            return true;
+        });
+        backend.setClipboardWriter([&copied](const QString &text) { copied << text; });
+
+        backend.openProfile(author);
+        QCOMPARE(opened, QList<QUrl>{QUrl("https://njump.me/" + npub)});
+        backend.copyNpub(author);
+        QCOMPARE(copied, QStringList{npub});
+        QVERIFY(!backend.statusError());
+        QVERIFY2(backend.status().contains(Nip19::shortNpub(npub, npub)), qPrintable(backend.status()));
+
+        // Nothing for a web feed or a feed that is not there.
+        for (const qint64 id : {web, qint64(9999)}) {
+            backend.openProfile(id);
+            backend.copyNpub(id);
+        }
+        QCOMPARE(opened.size(), 1);
+        QCOMPARE(copied.size(), 1);
+        QCOMPARE(QGuiApplication::clipboard()->text(), clipboardBefore);
+    }
+
+    void storeMigrationFourStartsNostrFeedsComplete()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        const QString npub = Nip19::npub(QString(64, 'a'));
+        {
+            // A library as the video release wrote it, schema version 3.
+            QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "v3");
+            raw.setDatabaseName(path);
+            QVERIFY(raw.open());
+            QSqlQuery query(raw);
+            QStringList statements = versionOneSchema();
+            statements << "ALTER TABLE items ADD COLUMN address TEXT"
+                       << "ALTER TABLE items ADD COLUMN revision INTEGER"
+                       << "CREATE INDEX items_by_address ON items(feed_id, address) WHERE address IS NOT NULL"
+                       << "ALTER TABLE feeds ADD COLUMN relay_hints TEXT"
+                       << "ALTER TABLE feeds ADD COLUMN profile_revision INTEGER"
+                       << "ALTER TABLE feeds ADD COLUMN profile_event_id TEXT"
+                       << "ALTER TABLE feeds ADD COLUMN profile_title TEXT"
+                       << "ALTER TABLE feeds ADD COLUMN complete_at INTEGER"
+                       << "ALTER TABLE items ADD COLUMN media_url TEXT"
+                       << "ALTER TABLE items ADD COLUMN thumbnail_url TEXT"
+                       << "ALTER TABLE items ADD COLUMN duration REAL"
+                       << "INSERT INTO feeds (url, url_key, title, created_at) VALUES ('" + npub
+                              + "', 'nostr-a', 'Ada', 1)"
+                       << "PRAGMA user_version = 3";
+            for (const QString &statement : statements)
+                QVERIFY2(query.exec(statement), qPrintable(query.lastError().text()));
+            query = QSqlQuery();
+            raw.close();
+            raw = QSqlDatabase();
+            QSqlDatabase::removeDatabase("v3");
+        }
+        {
+            Store store;
+            QVERIFY2(store.open(path), qPrintable(store.lastError()));
+            QCOMPARE(store.schemaVersion(), 4);
+            const QList<Feed> feeds = store.feeds();
+            QCOMPARE(feeds.size(), 1);
+            QCOMPARE(feeds.first().title, QString("Ada"));
+            QVERIFY(!feeds.first().incomplete);
+            QVERIFY(store.setIncomplete(feeds.first().id, true));
+        }
+        Store again;
+        QVERIFY2(again.open(path), qPrintable(again.lastError()));
+        QVERIFY(again.feeds().first().incomplete);
+        QVERIFY(again.setIncomplete(again.feeds().first().id, false));
+        QVERIFY(!again.feeds().first().incomplete);
     }
 
     void nostrShortsLeaveRoomForArticlesAndTheProfile()

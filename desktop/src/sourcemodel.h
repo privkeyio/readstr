@@ -23,6 +23,10 @@ public:
         QString category;
         QString lastError;
         int count = 0;
+        // A Nostr author's feed, whose url is the npub.
+        bool nostr = false;
+        // Its last refresh missed something, and no error since says more.
+        bool incomplete = false;
         // Same place in the list: a reload that keeps every row's identity
         // updates rows in place instead of resetting the view.
         bool sameSource(const Row &other) const {
@@ -39,6 +43,8 @@ public:
         CountRole,
         LastErrorRole,
         SelectableRole,
+        NostrRole,
+        IncompleteRole,
     };
 
     explicit SourceModel(QObject *parent = nullptr);
