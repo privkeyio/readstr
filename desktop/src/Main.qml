@@ -26,7 +26,8 @@ ApplicationWindow {
     readonly property color errorColor: Material.color(Material.Red, Material.theme === Material.Light ? Material.Shade700 : Material.Shade300)
     // Single keys must not fire while a dialog or menu has the keyboard, or
     // typing an address would star articles.
-    readonly property bool dialogsClosed: !addDialog.visible && !unsubscribeDialog.visible && !sourcePane.menuOpen
+    readonly property bool dialogsClosed: !addDialog.visible && !unsubscribeDialog.visible && !syncDialog.visible
+                                          && !sourcePane.menuOpen
     // Nor behind the shortcuts overlay, which only ? and Esc close.
     readonly property bool keysFree: dialogsClosed && !helpVisible
 
@@ -115,6 +116,7 @@ ApplicationWindow {
                     onAddRequested: addDialog.open()
                     onUnsubscribeRequested: (feedId, feedTitle) => win.askUnsubscribe(feedId, feedTitle)
                     onHelpRequested: win.helpVisible = true
+                    onSyncRequested: syncDialog.open()
                 }
 
                 Rectangle { Layout.fillHeight: true; Layout.preferredWidth: 1; color: Qt.alpha(theme.foreground, 0.1) }
@@ -194,4 +196,5 @@ ApplicationWindow {
 
     AddFeedDialog { id: addDialog }
     UnsubscribeDialog { id: unsubscribeDialog }
+    SyncDialog { id: syncDialog }
 }

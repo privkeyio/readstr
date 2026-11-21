@@ -10,7 +10,9 @@ It reads RSS, Atom, and JSON Feed, and Nostr long-form articles (NIP-23)
 and videos (NIP-71) by the authors you follow. The window has three panes
 (sources, articles, reader) driven from the keyboard, and the same engine
 (SQLite library, fetcher, feed parser, discovery, OPML, Nostr relays) runs
-headless from the command line. Sync comes in a later phase.
+headless from the command line. It pulls your subscriptions, read articles,
+and saved views from the Readstr web app over Nostr (read-only for now;
+publishing comes in a later phase).
 
 ## Build, test, install
 
@@ -35,7 +37,7 @@ the articles of the selected source in the middle, newest first, and the
 article itself on the right. Selecting an article marks it read. Right-click
 a feed to refresh it or unsubscribe (and, for a Nostr author, to open their
 profile on njump.me or copy their npub); the `⋮` menu has refresh, mark the
-view read, and OPML import and export.
+view read, OPML import and export, and Sync with Nostr.
 
 Feeds refresh when the window opens and then about every 30 minutes (give or
 take 10%, so many readers don't all ask at once) for as long as it stays open;
@@ -93,6 +95,47 @@ asked for, of the kind you asked for, and its id and signature check out
 (BIP-340, through libsecp256k1). When an author edits an article, the newer
 version replaces the older one in place, keeping its read and starred marks.
 
+## Sync with the web app
+
+Give Readstr your npub (or an nprofile, whose relay hints are asked too)
+with "Sync with Nostr…" in the `⋮` menu or `readstr sync login npub1…`, and
+it pulls what the Readstr web app publishes for it: the subscription list
+(kind 30404), the read articles (kind 30405, once the web app publishes it;
+it does not yet), and the saved views (kind 30406). Only the public key is kept; nothing is ever signed or published,
+which is why no signer is needed: the web app publishes these events in
+cleartext, so anyone can read them. The window pulls right after you log in
+and after every refresh of all feeds, so read marks find the articles it
+brought; `readstr sync` pulls now. A pull that fails says so in the status
+bar (and on stderr), or on stderr with exit code 1 from the command line.
+
+Merging is close to the web app's and never removes anything here:
+
+- Subscriptions are only added, never removed, and the list's `deleted`
+  entries are ignored, as the web app ignores them. Unlike the web app,
+  Readstr adds them without asking first. Only http(s) feed URLs and valid
+  npubs are taken, as for OPML import, except that a feed on this machine or
+  the local network (localhost, a private address, a name without a dot) is
+  left out and counted as unsupported, since whoever holds the npub's key
+  picks these; OPML import still takes them. A category becomes the feed's
+  category. New feeds are fetched by the next refresh (the window fetches
+  them at once).
+- Read GUIDs mark the matching articles read in every feed, and are kept for
+  articles that arrive later, which come in read. An article is never
+  marked unread by a sync.
+- Saved views are imported and stored for a later phase to show. A view's
+  mute words (`keywords.exclude`) never come from a relay, which never
+  carries them, and stay as they are here.
+
+Each event applies only when it is newer than the last one applied of its
+kind (in the same second, when its id is lower, as NIP-01 has relays keep),
+so an old or replayed one never rolls anything back, and unsubscribing here
+is not undone by pulling the same list again. Readstr does not publish
+yet, though, so a feed unsubscribed here comes back with the next newer
+subscription list the web app publishes, which still has it. (Like the web app, an empty library
+takes the subscription list whatever its age.) `readstr sync logout` or
+"Stop syncing" forgets the npub and what was pulled for it; your
+subscriptions, read marks, and saved views stay.
+
 ## Command line
 
 Anything other than `open` runs headless, with no display needed. Every
@@ -110,6 +153,9 @@ those that take `--json` print one line of JSON whose shape is stable (below).
 | `readstr star ID...`, `unstar ID...` | Star or unstar articles |
 | `readstr import FILE.opml [--json]` | Add the feeds in an OPML file; folders become categories |
 | `readstr export [FILE]` | Write the subscriptions as OPML to FILE, or to stdout |
+| `readstr sync login NPUB` | Sync with an npub or nprofile from now on (public key only) |
+| `readstr sync logout` | Stop syncing and forget what was pulled for the npub |
+| `readstr sync [--json]` | Pull and merge the web app's sync events now; exits 1 if anything failed or was refused |
 | `readstr version [--json]`, `readstr --version` | Print the version |
 
 ```sh
@@ -155,6 +201,15 @@ ISO 8601 (`2026-11-19T20:57:14Z`), and anything unknown is `null`.
 // an http(s) feed nor a valid npub)
 {"added": 12, "skipped": 2, "unsupported": 1}
 
+// readstr sync --json ("added", "skipped", and "unsupported" count the remote
+// subscriptions added, already here, and left out (neither an http(s) feed nor a
+// valid npub, or a feed on this machine or the local network);
+// "markedRead" the articles marked read, "pendingRead" the read GUIDs no article
+// has yet, "views" the saved views now stored; "errors" says what failed or was
+// refused, empty on success)
+{"npub": "npub1…", "added": 2, "skipped": 40, "unsupported": 0, "markedRead": 12,
+ "pendingRead": 300, "views": 3, "syncedAt": "2026-11-19T21:30:00Z", "errors": []}
+
 // readstr version --json
 {"name": "readstr", "version": "0.1.0", "qt": "6.12.0"}
 ```
@@ -192,6 +247,19 @@ crowd the articles out. Each keeps at most 200 events and 16 MiB of text,
 asks for at most 100, and only for what is newer than a day before the last
 complete refresh (one where every relay answered both and no cap cut off). A relay that fails or stays
 silent is skipped, and a refresh fails only when none answers.
+
+Sync events are taken only from the npub you gave, of their own kind with
+their own d tag, and with a valid id and signature, like an author's; one
+dated more than a day ahead is ignored. Their content must fit the web app's
+format and caps (8 Mi characters, 5000 subscriptions, 100,000 read GUIDs of
+at most 256 characters, URLs of at most 2048, 100 saved views, of which the
+first 50 are kept), or that event is refused whole and the pull says so. As
+on the web app, the merged views are cut to 50 with the remote ones first,
+so 50 remote views leave no room for views only here. A newer event past the
+size cap is passed over for the newest one that fits, or refused when none
+does, and relay messages may be up to about 24 MiB for these. A pull cut
+short by the pool's size cap, or with an event refused, says so and is not
+recorded as the last sync; the events that fit still apply.
 
 ## Files
 

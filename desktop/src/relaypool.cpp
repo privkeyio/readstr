@@ -15,14 +15,25 @@
 #include "feedparser.h"
 #include "fetcher.h"
 
-QJsonObject NostrQuery::filter() const {
+QList<QJsonObject> NostrQuery::filters() const {
     QJsonArray kindArray;
     for (int kind : kinds)
         kindArray << kind;
     QJsonObject object{{"authors", QJsonArray{author}}, {"kinds", kindArray}, {"limit", limit}};
     if (since > 0)
         object.insert("since", since);
-    return object;
+    if (dTags.isEmpty())
+        return {object};
+    // One filter per pair, each with its own limit, so the old versions a
+    // relay keeps of one pair cannot use up the limit of another.
+    QList<QJsonObject> perPair;
+    for (const auto &[kind, dTag] : dTags) {
+        QJsonObject pair = object;
+        pair.insert("kinds", QJsonArray{kind});
+        pair.insert("#d", QJsonArray{dTag});
+        perPair << pair;
+    }
+    return perPair;
 }
 
 namespace {
@@ -48,6 +59,9 @@ struct RelayPool::Batch {
         // By id, or for a replaceable event by its address, holding only
         // the newest version.
         QHash<QString, NostrEvent> events;
+        // By address, the newest verified event passed over for being past
+        // the query's maxContentLength, without its content.
+        QHash<QString, NostrEvent> oversized;
         qint64 bytes = 0;
         bool truncated = false;
         // A relay hint was left out at the connection cap.
@@ -191,7 +205,10 @@ private:
         });
         timer->start(m_limits.subscriptionTimeoutMs);
         m_subscriptions.insert(id, {query, timer});
-        send(QJsonArray{"REQ", id, m_batch->queries.at(query).query.filter()});
+        QJsonArray request{"REQ", id};
+        for (const QJsonObject &filter : m_batch->queries.at(query).query.filters())
+            request << filter;
+        send(request);
     }
 
     void send(const QJsonArray &message) {
@@ -468,9 +485,34 @@ bool RelayPool::accept(const std::shared_ptr<Batch> &batch, int queryIndex, cons
     // Dropped before anything costly.
     if (state.delivered || event.pubkey != state.query.author || !state.query.kinds.contains(event.kind)
         || event.createdAt < state.query.since
-        || event.createdAt > QDateTime::currentSecsSinceEpoch() + maxClockSkew)
+        || event.createdAt > QDateTime::currentSecsSinceEpoch() + maxClockSkew
+        || (!state.query.dTags.isEmpty()
+            && !state.query.dTags.contains(std::pair(event.kind, event.tag(QStringLiteral("d"))))))
         return true;
     const QString address = replaceableKey(event);
+    if (state.query.maxContentLength > 0 && event.content.size() > state.query.maxContentLength) {
+        // Noted so the result can say it was refused, should no version of
+        // its address that fits come. Only the newest one per address is
+        // kept, since the sync judges it against its watermark, and only a
+        // version newer than the one held is verified, which keeps a relay
+        // from claiming a refusal with a forged event without hashing every
+        // oversized copy.
+        if (address.isEmpty() || state.events.contains(address))
+            return true;
+        const auto held = state.oversized.constFind(address);
+        if (held != state.oversized.cend() && (held->id == event.id || !event.isNewerThan(*held)))
+            return true;
+        if (!event.verify())
+            return false;
+        NostrEvent stripped;
+        stripped.id = event.id;
+        stripped.pubkey = event.pubkey;
+        stripped.createdAt = event.createdAt;
+        stripped.kind = event.kind;
+        stripped.tags = {{QStringLiteral("d"), event.tag(QStringLiteral("d"))}};
+        state.oversized.insert(address, stripped);
+        return true;
+    }
     const QString key = address.isEmpty() ? event.id : address;
     const auto existing = state.events.constFind(key);
     if (existing != state.events.cend() && (existing->id == event.id || !event.isNewerThan(*existing)))
@@ -534,6 +576,9 @@ void RelayPool::deliver(const std::shared_ptr<Batch> &batch, int queryIndex, con
     result.answered = state.answered;
     result.truncated = state.truncated;
     result.deferred = state.deferred;
+    for (auto it = state.oversized.cbegin(); it != state.oversized.cend(); ++it)
+        if (!state.events.contains(it.key()))
+            result.oversized << it.value();
     if (!error.isEmpty())
         result.error = error;
     else if (!state.answered)

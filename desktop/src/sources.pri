@@ -31,6 +31,7 @@ HEADERS += \
     $$PWD/smallfile.h \
     $$PWD/sourcemodel.h \
     $$PWD/store.h \
+    $$PWD/sync.h \
     $$PWD/theme.h \
     $$PWD/thumbnails.h \
     $$PWD/translator.h
@@ -55,6 +56,7 @@ SOURCES += \
     $$PWD/sanitizer.cpp \
     $$PWD/sourcemodel.cpp \
     $$PWD/store.cpp \
+    $$PWD/sync.cpp \
     $$PWD/theme.cpp \
     $$PWD/thumbnails.cpp \
     $$PWD/translator.cpp

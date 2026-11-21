@@ -117,5 +117,27 @@
   "The last refresh did not hear from every relay, or stopped at a limit, so some articles may be missing. The next refresh asks for them again.": "Den seneste opdatering hørte ikke fra alle relæer eller stoppede ved en grænse, så nogle artikler kan mangle. Den næste opdatering beder om dem igen.",
   "Open profile": "Åbn profil",
   "Copy npub": "Kopiér npub",
-  "Copied %1 to the clipboard": "Kopierede %1 til udklipsholderen"
+  "Copied %1 to the clipboard": "Kopierede %1 til udklipsholderen",
+  "Sync with Nostr…": "Synkronisér med Nostr…",
+  "Sync with Nostr": "Synkronisér med Nostr",
+  "After every refresh, Readstr reads the subscriptions and saved views the Readstr web app publishes for this npub, and its read articles once it publishes them. It never signs or publishes anything.": "Efter hver opdatering læser Readstr de abonnementer og gemte visninger, som Readstr-webappen offentliggør for denne npub, og dens læste artikler, når den offentliggør dem. Den signerer og offentliggør aldrig noget.",
+  "npub or nprofile": "npub eller nprofile",
+  "Last synced %1": "Sidst synkroniseret %1",
+  "That is not an npub or nprofile": "Det er ikke en npub eller nprofile",
+  "Stop syncing": "Stop synkronisering",
+  "Sync": "Synkronisér",
+  "Cannot sync with %1: %2": "Kan ikke synkronisere med %1: %2",
+  "Cannot stop syncing: %1": "Kan ikke stoppe synkroniseringen: %1",
+  "Stopped syncing with %1": "Synkroniserer ikke længere med %1",
+  "Syncing with Nostr…": "Synkroniserer med Nostr…",
+  "Cannot sync with Nostr: %1": "Kan ikke synkronisere med Nostr: %1",
+  "Synced with Nostr: %n feeds added, %1 articles marked read": {
+    "one": "Synkroniseret med Nostr: %n feed tilføjet, %1 artikler markeret som læst",
+    "other": "Synkroniseret med Nostr: %n feeds tilføjet, %1 artikler markeret som læst"
+  },
+  "the npub changed during the pull": "npub'en blev ændret under hentningen",
+  "the subscription list does not fit the web app's format": "abonnementslisten passer ikke til webappens format",
+  "the read status does not fit the web app's format": "læsestatussen passer ikke til webappens format",
+  "the saved views do not fit the web app's format": "de gemte visninger passer ikke til webappens format",
+  "the relays sent more than fits, so some sync events may be missing": "relæerne sendte mere, end der er plads til, så nogle synkroniseringshændelser kan mangle"
 }

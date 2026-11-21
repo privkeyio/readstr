@@ -10,6 +10,7 @@
 #include "fetcher.h"
 #include "library.h"
 #include "store.h"
+#include "sync.h"
 
 namespace {
 using Handler = int (*)(const QString &, const QStringList &, QTextStream &, QTextStream &);
@@ -29,6 +30,9 @@ void usage(QTextStream &stream) {
               "       readstr read|unread|star|unstar ID...\n"
               "       readstr import FILE.opml [--json]\n"
               "       readstr export [FILE]\n"
+              "       readstr sync [--json]\n"
+              "       readstr sync login NPUB\n"
+              "       readstr sync logout\n"
               "       readstr version [--json]\n"
               "       readstr --version\n";
 }
@@ -454,6 +458,83 @@ int exportOpml(const QString &command, const QStringList &arguments, QTextStream
     return 0;
 }
 
+int sync(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
+    Options options;
+    if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
+        return 1;
+    const QString action = options.positional.value(0);
+    if (action == QLatin1String("login")) {
+        if (options.json || options.positional.size() != 2)
+            return fail(command, "login needs one npub or nprofile", err);
+        const auto account = Sync::account(options.positional.at(1));
+        if (!account)
+            return fail(command, "give an npub or nprofile", err);
+        Store store;
+        if (!openStore(command, store, err))
+            return 1;
+        if (!store.setSyncAccount(account->npub, account->pubkey, account->relays))
+            return fail(command, store.lastError(), err);
+        out << "Syncing with " << account->npub << ". Run 'readstr sync' to pull now.\n";
+        return 0;
+    }
+    if (action == QLatin1String("logout")) {
+        if (options.json || options.positional.size() != 1)
+            return fail(command, "logout takes no arguments", err);
+        Store store;
+        if (!openStore(command, store, err))
+            return 1;
+        const SyncAccount account = store.syncAccount();
+        if (!store.lastError().isEmpty() || !store.clearSyncAccount())
+            return fail(command, store.lastError(), err);
+        if (account.npub.isEmpty())
+            out << "Not syncing with any npub\n";
+        else
+            out << "Stopped syncing with " << account.npub << "\n";
+        return 0;
+    }
+    if (!options.positional.isEmpty())
+        return fail(command, "unknown action '" + action + "' (login, logout, or none to pull)", err);
+
+    Store store;
+    if (!openStore(command, store, err))
+        return 1;
+    const SyncAccount account = store.syncAccount();
+    if (!store.lastError().isEmpty())
+        return fail(command, store.lastError(), err);
+    if (account.pubkey.isEmpty())
+        return fail(command, "not syncing with any npub; run 'readstr sync login NPUB' first", err);
+    RelayPool relays;
+    relays.setLimits(Sync::limits());
+    const Sync::Outcome outcome = Sync::apply(store, account, relays.query(Sync::query(account)));
+    QStringList errors = outcome.problems;
+    if (!outcome.error.isEmpty())
+        errors.prepend(outcome.error);
+    for (const QString &error : std::as_const(errors))
+        err << "readstr " << command << ": " << printable(error) << "\n";
+
+    if (options.json) {
+        const SyncAccount after = store.syncAccount();
+        printJson(QJsonObject{{"npub", account.npub},
+                              {"added", outcome.added},
+                              {"skipped", outcome.skipped},
+                              {"unsupported", outcome.unsupported},
+                              {"markedRead", outcome.markedRead},
+                              {"pendingRead", outcome.pendingRead},
+                              {"views", outcome.views},
+                              {"syncedAt", nullable(after.syncedAt)},
+                              {"errors", QJsonArray::fromStringList(errors)}},
+                  out);
+    } else if (outcome.error.isEmpty()) {
+        out << "Synced with " << account.npub << ": " << outcome.added << " feeds added (" << outcome.skipped
+            << " already subscribed, " << outcome.unsupported << " unsupported), " << outcome.markedRead
+            << " articles marked read, " << outcome.pendingRead << " read GUIDs waiting for their articles, "
+            << outcome.views << " saved views\n";
+        if (outcome.added > 0)
+            out << "Run 'readstr refresh' to fetch the new feeds.\n";
+    }
+    return errors.isEmpty() ? 0 : 1;
+}
+
 int version(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
     Options options;
     if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
@@ -487,6 +568,7 @@ constexpr Command commands[] = {
     {"unstar", setFlag},
     {"import", importOpml},
     {"export", exportOpml},
+    {"sync", sync},
     {"version", version},
     {"--version", version},
     {"help", help},

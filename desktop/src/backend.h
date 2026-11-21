@@ -10,6 +10,8 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <utility>
 
 #include "articlemodel.h"
 #include "feedparser.h"
@@ -19,6 +21,7 @@
 #include "relaypool.h"
 #include "sourcemodel.h"
 #include "store.h"
+#include "sync.h"
 #include "thumbnails.h"
 
 class FilePicker;
@@ -73,6 +76,12 @@ class Backend : public QObject {
     Q_PROPERTY(bool adding READ adding NOTIFY addChanged)
     Q_PROPERTY(QString addError READ addError NOTIFY addChanged)
 
+    // The npub whose Nostr sync events are pulled after each refresh, empty
+    // for none, and when a pull last succeeded (null until one has).
+    Q_PROPERTY(QString syncNpub READ syncNpub NOTIFY syncChanged)
+    Q_PROPERTY(QVariant syncedAt READ syncedAt NOTIFY syncChanged)
+    Q_PROPERTY(bool syncing READ syncing NOTIFY syncChanged)
+
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool statusError READ statusError NOTIFY statusChanged)
 
@@ -116,6 +125,10 @@ public:
     bool adding() const { return m_adding; }
     QString addError() const { return m_addError; }
 
+    QString syncNpub() const { return m_syncAccount.npub; }
+    QVariant syncedAt() const;
+    bool syncing() const { return m_syncing; }
+
     QString status() const { return m_status; }
     bool statusError() const { return m_statusError; }
 
@@ -138,6 +151,10 @@ public:
     Q_INVOKABLE bool unsubscribe(qint64 feedId);
     Q_INVOKABLE void refreshAll();
     Q_INVOKABLE void refreshFeed(qint64 feedId);
+    // Syncs with the npub or nprofile `text` from now on and pulls at once;
+    // false, changing nothing, when it is neither.
+    Q_INVOKABLE bool setSyncNpub(const QString &text);
+    Q_INVOKABLE void stopSync();
     Q_INVOKABLE void importOpml();
     Q_INVOKABLE void exportOpml();
     // Puts text selected in the reader on the clipboard (and the primary
@@ -176,7 +193,10 @@ public:
     void setThumbnailLimits(const Thumbnails::Limits &limits) { m_thumbnails->setLimits(limits); }
     void setFetchLimits(const Fetcher::Limits &limits) { m_fetcher->setLimits(limits); }
     void setRelayLimits(const RelayPool::Limits &limits) { m_relays->setLimits(limits); }
-    void setRelays(const QStringList &relays) { m_relays->setRelays(relays); }
+    void setRelays(const QStringList &relays) {
+        m_relays->setRelays(relays);
+        m_syncRelays->setRelays(relays);
+    }
 
 signals:
     void libraryChanged();
@@ -188,6 +208,8 @@ signals:
     void addChanged();
     void subscribed(qint64 feedId);
     void imported();
+    void syncChanged();
+    void syncFinished();
     void statusChanged();
 
 private:
@@ -242,14 +264,24 @@ private:
     QString npubOf(qint64 feedId) const;
     void refresh(const QList<Feed> &targets);
     void refreshApplied(const Feed &feed, const Library::Refresh &outcome);
+    // Refreshes the feeds never fetched yet; false when there are none.
+    bool refreshUnfetched();
     void searchRound(const std::shared_ptr<Discovery::Search> &search);
     void subscribeFinished(const Library::Subscription &subscription);
     void scheduleAutoRefresh();
+    void reloadSyncAccount();
+    // Pulls the sync events, when there is an account and no pull is out.
+    void sync();
+    // `pubkey` is the account the pull was for.
+    void syncApplied(const Sync::Outcome &outcome, const QString &pubkey);
 
     Store m_store;
     bool m_storeOpen = false;
     std::unique_ptr<Fetcher> m_fetcher;
     std::unique_ptr<RelayPool> m_relays;
+    // Its own pool, as the sync events are allowed to be far larger than
+    // an author's.
+    std::unique_ptr<RelayPool> m_syncRelays;
     std::unique_ptr<Thumbnails> m_thumbnails;
     QThread m_thread;
     LibraryWorker *m_worker = nullptr;
@@ -288,6 +320,23 @@ private:
     // Feeds whose delete the worker has not done yet, hidden meanwhile.
     QSet<qint64> m_removing;
     bool m_fetchNewFeeds = false;
+    // A refresh of every feed pulls the sync events once it is done, so
+    // their read GUIDs find the articles it brought.
+    bool m_syncAfterRefresh = false;
+    // What that refresh said, kept when the sync after it changes nothing.
+    std::optional<std::pair<QString, bool>> m_refreshStatus;
+    SyncAccount m_syncAccount;
+    bool m_syncing = false;
+    // A pull asked for while one was out, which the relays may already have
+    // answered without what changed since, so one more runs after it.
+    bool m_syncAgain = false;
+    // What the pulls a follow-up replaced changed, said with its own.
+    int m_syncAddedBefore = 0;
+    int m_syncMarkedBefore = 0;
+    // Some pull added feeds that have not been fetched yet. Kept apart from
+    // the counts above, which a switch of account resets, so the feeds an
+    // earlier account's pull added are still fetched.
+    bool m_syncFeedsAdded = false;
     bool m_autoRefreshOn = false;
     QTimer m_autoRefresh;
 

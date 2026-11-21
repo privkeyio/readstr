@@ -5,6 +5,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QList>
+#include <QPointer>
+#include <QSet>
+#include <QTimer>
 #include <QWebSocket>
 #include <QWebSocketServer>
 #include <algorithm>
@@ -33,14 +36,19 @@ public:
     QList<QJsonValue> events;
     bool silent = false;
     QString closeWith;
-    // Answers as an honest relay does instead: only the events of the
-    // filter's kinds, newest first, and no more than its limit.
+    // Answers as an honest relay does instead: for each filter, only the
+    // events of its kinds (and d tags, when it names them), newest first,
+    // and no more than its limit.
     bool honourFilters = false;
+    // Answers each REQ after this long, to keep a query out.
+    int delayMs = 0;
     // Closes the connection after answering this many REQs on it, once.
     int dropAfter = 0;
     // Closes the connection after the events of a REQ, before its EOSE.
     bool dropBeforeEose = false;
+    // The first filter of each REQ, and every filter of each.
     QList<QJsonObject> filters;
+    QList<QJsonArray> requests;
     QStringList closed;
     int connections = 0;
 
@@ -56,13 +64,40 @@ private:
         if (type != QLatin1String("REQ"))
             return;
         filters << message.at(2).toObject();
+        requests << QJsonArray(message);
+        requests.last().removeFirst();
+        requests.last().removeFirst();
         if (silent)
             return;
+        if (delayMs > 0) {
+            QTimer::singleShot(delayMs, this, [this, socket = QPointer<QWebSocket>(socket), message] {
+                if (socket)
+                    respond(socket, message);
+            });
+            return;
+        }
+        respond(socket, message);
+    }
+
+    void respond(QWebSocket *socket, const QJsonArray &message) {
+        const QString id = message.at(1).toString();
         if (!closeWith.isEmpty()) {
             send(socket, {"CLOSED", id, closeWith});
             return;
         }
-        for (const QJsonValue &event : answer(message.at(2).toObject()))
+        QList<QJsonValue> answered;
+        if (!honourFilters) {
+            answered = events;
+        } else {
+            QSet<QString> sent;
+            for (qsizetype i = 2; i < message.size(); ++i)
+                for (const QJsonValue &event : answer(message.at(i).toObject()))
+                    if (!sent.contains(event.toObject().value(QStringLiteral("id")).toString())) {
+                        sent.insert(event.toObject().value(QStringLiteral("id")).toString());
+                        answered << event;
+                    }
+        }
+        for (const QJsonValue &event : std::as_const(answered))
             send(socket, {"EVENT", id, event});
         if (dropBeforeEose) {
             socket->close();
@@ -76,8 +111,6 @@ private:
     }
 
     QList<QJsonValue> answer(const QJsonObject &filter) const {
-        if (!honourFilters)
-            return events;
         QList<QJsonValue> matching;
         const QJsonArray kinds = filter.value(QStringLiteral("kinds")).toArray();
         // Authors and since as NIP-01 has them, before the limit, so an event
@@ -85,11 +118,15 @@ private:
         const bool anyAuthor = !filter.contains(QStringLiteral("authors"));
         const QJsonArray authors = filter.value(QStringLiteral("authors")).toArray();
         const qint64 since = filter.value(QStringLiteral("since")).toInteger(0);
+        const bool anyD = !filter.contains(QStringLiteral("#d"));
+        const QJsonArray dTags = filter.value(QStringLiteral("#d")).toArray();
         for (const QJsonValue &event : events) {
             const QJsonObject object = event.toObject();
             if (!anyAuthor && !authors.contains(object.value(QStringLiteral("pubkey"))))
                 continue;
             if (object.value(QStringLiteral("created_at")).toInteger() < since)
+                continue;
+            if (!anyD && !dTags.contains(dTag(object)))
                 continue;
             for (const QJsonValue &kind : kinds)
                 if (kind.toInt() == object.value(QStringLiteral("kind")).toInt(-1)) {
@@ -105,6 +142,13 @@ private:
         if (limit >= 0 && matching.size() > limit)
             matching.resize(limit);
         return matching;
+    }
+
+    static QJsonValue dTag(const QJsonObject &event) {
+        for (const QJsonValue &tag : event.value(QStringLiteral("tags")).toArray())
+            if (tag.toArray().at(0).toString() == QLatin1String("d"))
+                return tag.toArray().at(1);
+        return QString();
     }
 
     static void send(QWebSocket *socket, const QJsonArray &message) {
