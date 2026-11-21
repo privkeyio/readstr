@@ -38,13 +38,18 @@ struct SearchStep {
 };
 
 QString richText(const Article &article) {
-    return article.content.isEmpty() ? Sanitizer::plainToRichText(article.summary)
-                                     : Sanitizer::toRichText(article.content, QUrl(article.url));
+    if (article.content.isEmpty())
+        return Sanitizer::plainToRichText(article.summary);
+    // Nostr long-form is Markdown, shown as its text until it is rendered.
+    if (!article.address.isEmpty())
+        return Sanitizer::linesToRichText(article.content);
+    return Sanitizer::toRichText(article.content, QUrl(article.url));
 }
 }
 
 Backend::Backend(FilePicker *picker, QObject *parent)
-    : QObject(parent), m_fetcher(std::make_unique<Fetcher>()), m_picker(picker) {
+    : QObject(parent), m_fetcher(std::make_unique<Fetcher>()), m_relays(std::make_unique<RelayPool>()),
+      m_picker(picker) {
     m_openUrl = [](const QUrl &url) { return QDesktopServices::openUrl(url); };
 
     m_worker = new LibraryWorker;
@@ -93,6 +98,7 @@ Backend::~Backend() {
     m_closing = true;
     m_autoRefresh.stop();
     m_fetcher.reset();
+    m_relays.reset();
     m_thread.quit();
     m_thread.wait();
     // The user's own changes still queued behind a refresh are not lost
@@ -462,12 +468,13 @@ void Backend::addFeed(const QString &address) {
     if (m_adding)
         return;
     QString text = address.trimmed();
+    const auto author = Library::nostrAuthor(text);
     // A bare host is what people paste most; the web means https now.
-    if (!text.isEmpty() && !text.contains(QLatin1String("://")))
+    if (!author && !text.isEmpty() && !text.contains(QLatin1String("://")))
         text.prepend(QLatin1String("https://"));
     const QUrl url(text, QUrl::StrictMode);
-    if (!Library::isWebUrl(url)) {
-        m_addError = tr("Enter a web address, like https://example.com/feed.xml");
+    if (!author && !Library::isWebUrl(url)) {
+        m_addError = tr("Enter a web address, like https://example.com/feed.xml, or an npub");
         emit addChanged();
         return;
     }
@@ -479,7 +486,23 @@ void Backend::addFeed(const QString &address) {
     m_adding = true;
     m_addError.clear();
     emit addChanged();
-    searchRound(std::make_shared<Discovery::Search>(url));
+    if (!author) {
+        searchRound(std::make_shared<Discovery::Search>(url));
+        return;
+    }
+    const Nip19::Profile profile = *author;
+    m_relays->queryEachHeld(
+        {Library::nostrQuery(profile)},
+        [this, profile](qsizetype, const NostrResult &found, const RelayPool::Release &release) {
+            if (m_closing)
+                return;
+            onWorker<Library::Subscription>(
+                [profile, found](Store &store) { return Library::subscribeNostr(store, profile, found); },
+                [this, release](const Library::Subscription &subscription) {
+                    release();
+                    subscribeFinished(subscription);
+                });
+        });
 }
 
 void Backend::clearAddError() {
@@ -608,19 +631,41 @@ void Backend::refresh(const QList<Feed> &targets) {
     m_firstFailure.clear();
     emit refreshChanged();
 
+    QList<Feed> web, nostr;
     QList<FetchRequest> requests;
-    for (const Feed &feed : targets)
-        requests << FetchRequest{QUrl(feed.url), feed.etag, feed.lastModified};
+    QList<NostrQuery> queries;
+    for (const Feed &feed : targets) {
+        if (Library::isNostrFeed(feed)) {
+            nostr << feed;
+            queries << Library::nostrQuery(feed);
+        } else {
+            web << feed;
+            requests << FetchRequest{QUrl(feed.url), feed.etag, feed.lastModified};
+        }
+    }
     // Each response goes to the worker as it arrives and keeps its fetch
     // slot until the worker has saved it, so at most maxConcurrent bodies
-    // are held at once, in flight or waiting there, however many feeds.
+    // are held at once, in flight or waiting there, however many feeds. The
+    // relays' answers are held the same way.
     m_fetcher->fetchEachHeld(
-        requests, [this, targets](qsizetype index, const FetchResult &fetched, const Fetcher::Release &release) {
+        requests, [this, web](qsizetype index, const FetchResult &fetched, const Fetcher::Release &release) {
             if (m_closing)
                 return;
-            const Feed feed = targets.at(index);
+            const Feed feed = web.at(index);
             onWorker<Library::Refresh>(
                 [feed, fetched](Store &store) { return Library::apply(store, feed, fetched); },
+                [this, feed, release](const Library::Refresh &outcome) {
+                    release();
+                    refreshApplied(feed, outcome);
+                });
+        });
+    m_relays->queryEachHeld(
+        queries, [this, nostr](qsizetype index, const NostrResult &found, const RelayPool::Release &release) {
+            if (m_closing)
+                return;
+            const Feed feed = nostr.at(index);
+            onWorker<Library::Refresh>(
+                [feed, found](Store &store) { return Library::applyNostr(store, feed, found); },
                 [this, feed, release](const Library::Refresh &outcome) {
                     release();
                     refreshApplied(feed, outcome);

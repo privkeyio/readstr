@@ -6,15 +6,17 @@ as an Arch package so it shows up in the app launcher. It is built with C++
 and Qt Quick, following the Omarchy app conventions. See
 [`docs/OMARCHY_APP_PLAN.md`](../docs/OMARCHY_APP_PLAN.md) for the plan.
 
-This is phase 1: a local RSS reader. The window has three panes (sources,
-articles, reader) driven from the keyboard, and the same feed engine (SQLite
-library, fetcher, RSS, Atom, and JSON Feed parser, discovery, OPML) runs
-headless from the command line. Nostr and sync come in later phases.
+It reads RSS, Atom, and JSON Feed, and Nostr long-form articles (NIP-23)
+by the authors you follow. The window has three panes (sources, articles,
+reader) driven from the keyboard, and the same engine (SQLite library,
+fetcher, feed parser, discovery, OPML, Nostr relays) runs headless from the
+command line. Markdown rendering, video, and sync come in later phases.
 
 ## Build, test, install
 
 Everything needed comes with Omarchy (`qmake6`, `make`, a C++ compiler, and
-Qt's base, declarative, SVG, and Wayland modules). The open and save dialogs
+Qt's base, declarative, SVG, and Wayland modules) except two packages for
+Nostr: `sudo pacman -S qt6-websockets libsecp256k1`. The open and save dialogs
 are the desktop's own, through `xdg-desktop-portal` over D-Bus.
 
 ```sh
@@ -50,6 +52,22 @@ with any other address, or none, is dropped along with its description. An
 image inside a link becomes that text inside the link, which opens the
 link's address rather than the image's. `O` opens the whole article there.
 
+## Nostr
+
+Add an author by their `npub` or `nprofile` (`Ctrl+N` in the window, or
+`readstr subscribe npub1…`) to follow their long-form articles. Each is
+listed under the author's profile name and opens on njump.me with `O`. Until
+Markdown rendering arrives, an article shows as its Markdown text.
+
+Readstr asks relay.damus.io, relay.primal.net, nos.lol, and relay.snort.social
+(plus an nprofile's own relay hints when you subscribe), only over `wss://`.
+`READSTR_RELAYS` (URLs separated by commas or spaces) replaces that list, even
+when it is empty.
+Relays are untrusted: an event is kept only when it is by the author you
+asked for, of the kind you asked for, and its id and signature check out
+(BIP-340, through libsecp256k1). When an author edits an article, the newer
+version replaces the older one in place, keeping its read and starred marks.
+
 ## Command line
 
 Anything other than `open` runs headless, with no display needed. Every
@@ -60,7 +78,7 @@ those that take `--json` print one line of JSON whose shape is stable (below).
 |---|---|
 | `readstr feeds [--json]` | List subscriptions with unread and total counts |
 | `readstr articles [--feed ID] [--unread] [--starred] [--limit N] [--json]` | List articles, newest first (50 unless `--limit`; `--limit 0` for all) |
-| `readstr subscribe URL [--json]` | Subscribe to a feed URL, or find the feed behind a page URL |
+| `readstr subscribe URL\|NPUB [--json]` | Subscribe to a feed URL, find the feed behind a page URL, or follow a Nostr author (npub or nprofile) |
 | `readstr unsubscribe ID` | Remove a feed and its articles |
 | `readstr refresh [--feed ID] [--json]` | Fetch every feed (or one) now; exits 1 if any failed |
 | `readstr read ID...`, `unread ID...` | Mark articles read or unread |
@@ -108,7 +126,8 @@ ISO 8601 (`2026-11-19T20:57:14Z`), and anything unknown is `null`.
 // readstr refresh --json ("status" is "updated", "not-modified", or "error")
 [{"id": 1, "url": "…", "title": "…", "status": "updated", "new": 3, "error": null}]
 
-// readstr import FILE.opml --json ("unsupported" counts Nostr and non-http(s) entries)
+// readstr import FILE.opml --json ("unsupported" counts entries that are neither
+// an http(s) feed nor a valid npub)
 {"added": 12, "skipped": 2, "unsupported": 1}
 
 // readstr version --json
@@ -128,6 +147,13 @@ identifies you, use conditional GETs (ETag and Last-Modified), follow at most
 30 seconds or 10 MiB. Feeds are parsed up to 1000 items, and XML that declares
 entities (billion laughs, external entities) is refused. OPML files are read
 up to 8 MiB, 5000 outlines, and 64 levels of folders.
+
+Relays get 6 seconds to connect and 15 seconds to answer each request, and
+messages are cut off past 4 MiB. Each author's refresh keeps at most 200
+events and 16 MiB of text, asks for at most 100, and only for what is newer
+than a day before the last complete refresh (one that every relay answered
+and no cap cut off). A relay that fails or stays
+silent is skipped, and a refresh fails only when none answers.
 
 ## Files
 
@@ -152,7 +178,7 @@ carries over. Single keys do nothing while you type in a dialog.
 | `S` | Star or unstar |
 | `O` | Open the original in the browser |
 | `Ctrl+R` | Refresh all feeds |
-| `Ctrl+N` | Add a feed (its address, or a site's) |
+| `Ctrl+N` | Add a feed (its address, a site's, or a Nostr npub) |
 | `Ctrl+Shift+A` | Mark everything in the view read |
 | `Ctrl+O` | Import OPML |
 | `Ctrl+Shift+E` | Export OPML |

@@ -4,6 +4,7 @@
 #include <QList>
 #include <QSqlDatabase>
 #include <QString>
+#include <QStringList>
 #include <functional>
 #include <optional>
 
@@ -20,6 +21,10 @@ struct Feed {
     QString lastModified;
     QString lastError;
     QDateTime lastFetchedAt;
+    // A Nostr author's: relays their nprofile named, and when every relay
+    // asked last answered a refresh (invalid until one has).
+    QStringList relayHints;
+    QDateTime completeAt;
     int unread = 0;
     int total = 0;
 };
@@ -38,6 +43,8 @@ struct Article {
     QDateTime published;
     bool read = false;
     bool starred = false;
+    // A Nostr long-form article's address; its content is Markdown.
+    QString address;
 };
 
 struct ArticleFilter {
@@ -90,6 +97,12 @@ public:
     qint64 addFeed(const QString &url, const QString &title, const QString &category = {}, bool *created = nullptr);
     bool removeFeed(qint64 id);
     bool updateFeedDetails(qint64 id, const ParsedFeed &parsed);
+    // A Nostr author's profile as the feed's details, when `revision` (its
+    // created_at) is newer than the profile they came from.
+    bool updateProfile(qint64 id, const ParsedFeed &profile, qint64 revision, const QString &eventId);
+    bool setRelayHints(qint64 id, const QStringList &relays);
+    // Every relay answered a refresh that started at `time`.
+    bool recordComplete(qint64 id, const QDateTime &time);
     // Records a fetch attempt: validators on success, the reason on failure.
     bool recordFetch(qint64 id, const QString &etag, const QString &lastModified, const QString &error);
     // Adds new items and refreshes existing ones (same guid in the same feed)

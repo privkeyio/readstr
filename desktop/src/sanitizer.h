@@ -29,8 +29,12 @@ inline constexpr qsizetype maxOutputLength = 1024 * 1024;
 inline constexpr int maxDepth = 64;
 
 QString toRichText(const QString &html, const QUrl &base);
-// Plain text (a summary) as rich text: escaped, in one paragraph.
+// Plain text (a summary) as rich text: escaped, in one paragraph, without
+// the direction overrides and embeddings.
 QString plainToRichText(const QString &text);
+// Plain text with line breaks as rich text: the same, a paragraph per run
+// of text between blank lines and its single line breaks kept.
+QString linesToRichText(const QString &text);
 // The URL `href` points at, made absolute against `base`, if it is http(s)
 // with a host; an empty URL otherwise.
 QUrl webUrl(const QString &href, const QUrl &base);

@@ -10,7 +10,7 @@
   "Pick an article to read it": "Vælg en artikel for at læse den",
   "Add a feed with Ctrl+N or import your subscriptions with Ctrl+O. Press ? to see the keyboard shortcuts.": "Tilføj et feed med Ctrl+N, eller importér dine abonnementer med Ctrl+O. Tryk på ? for at se tastaturgenvejene.",
   "Add a feed": "Tilføj et feed",
-  "Feed or site address": "Adresse på feed eller websted",
+  "Feed, site, or npub": "Feed, websted eller npub",
   "Looking for the feed…": "Leder efter feedet…",
   "Cancel": "Annuller",
   "Add": "Tilføj",
@@ -60,7 +60,7 @@
     "one": "%n artikel er markeret som læst",
     "other": "%n artikler er markeret som læst"
   },
-  "Enter a web address, like https://example.com/feed.xml": "Skriv en webadresse, f.eks. https://example.com/feed.xml",
+  "Enter a web address, like https://example.com/feed.xml, or an npub": "Skriv en webadresse, f.eks. https://example.com/feed.xml, eller en npub",
   "Subscribed to %1 (%n articles)": {
     "one": "Du abonnerer nu på %1 (%n artikel)",
     "other": "Du abonnerer nu på %1 (%n artikler)"

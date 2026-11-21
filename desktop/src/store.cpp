@@ -4,6 +4,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QThread>
@@ -62,13 +64,30 @@ const QList<QStringList> migrations = {
         "CREATE INDEX items_starred ON items(is_starred) WHERE is_starred = 1",
         "CREATE INDEX feeds_by_category ON feeds(category_id)",
     },
+    {
+        // Nostr long-form articles are replaceable: one address, many
+        // versions, of which the latest (by revision) is kept.
+        "ALTER TABLE items ADD COLUMN address TEXT",
+        "ALTER TABLE items ADD COLUMN revision INTEGER",
+        "CREATE INDEX items_by_address ON items(feed_id, address) WHERE address IS NOT NULL",
+        // A Nostr author's relay hints (a JSON array), the created_at and id
+        // of the profile the feed's details came from (the id breaks a tie
+        // between two from the same second), the title that profile gave the
+        // feed (which a newer profile may replace, where a title from OPML
+        // stays), and when every relay last answered a refresh.
+        "ALTER TABLE feeds ADD COLUMN relay_hints TEXT",
+        "ALTER TABLE feeds ADD COLUMN profile_revision INTEGER",
+        "ALTER TABLE feeds ADD COLUMN profile_event_id TEXT",
+        "ALTER TABLE feeds ADD COLUMN profile_title TEXT",
+        "ALTER TABLE feeds ADD COLUMN complete_at INTEGER",
+    },
 };
 
 std::atomic<int> connectionCounter{0};
 
 const char feedColumns[] =
     "SELECT f.id, f.url, f.title, f.site_url, f.description, c.name, f.etag, f.last_modified, f.last_error,"
-    " f.last_fetched_at,"
+    " f.last_fetched_at, f.relay_hints, f.complete_at,"
     " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id AND i.is_read = 0),"
     " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id)"
     " FROM feeds f LEFT JOIN categories c ON c.id = f.category_id";
@@ -86,8 +105,11 @@ Feed feedFrom(const QSqlQuery &query) {
     feed.lastError = query.value(8).toString();
     if (!query.value(9).isNull())
         feed.lastFetchedAt = QDateTime::fromSecsSinceEpoch(query.value(9).toLongLong(), QTimeZone::UTC);
-    feed.unread = query.value(10).toInt();
-    feed.total = query.value(11).toInt();
+    feed.relayHints = QJsonDocument::fromJson(query.value(10).toString().toUtf8()).toVariant().toStringList();
+    if (!query.value(11).isNull())
+        feed.completeAt = QDateTime::fromSecsSinceEpoch(query.value(11).toLongLong(), QTimeZone::UTC);
+    feed.unread = query.value(12).toInt();
+    feed.total = query.value(13).toInt();
     return feed;
 }
 
@@ -420,6 +442,54 @@ bool Store::updateFeedDetails(qint64 id, const ParsedFeed &parsed) {
     return query.exec() || fail(query.lastError().text());
 }
 
+bool Store::updateProfile(qint64 id, const ParsedFeed &profile, qint64 revision, const QString &eventId) {
+    // Only a newer profile than the one the details came from, so a relay
+    // sending an old one cannot bring back what the author has changed. Of
+    // two from the same second the lower id wins, as NIP-01 says. The title
+    // is replaced when it is a placeholder or an earlier profile's name,
+    // never when the user brought it along from OPML.
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral(
+        "UPDATE feeds SET"
+        " title = CASE WHEN (title = '' OR title = url OR title = profile_title) AND ? <> '' THEN ? ELSE title END,"
+        " profile_title = CASE WHEN (title = '' OR title = url OR title = profile_title) AND ? <> ''"
+        " THEN ? ELSE profile_title END,"
+        " site_url = ?, description = ?, profile_revision = ?, profile_event_id = ?"
+        " WHERE id = ? AND (profile_revision IS NULL OR profile_revision < ?"
+        " OR (profile_revision = ? AND (profile_event_id IS NULL OR profile_event_id > ?)))"));
+    for (int i = 0; i < 4; ++i)
+        query.addBindValue(profile.title);
+    query.addBindValue(profile.siteUrl);
+    query.addBindValue(profile.description);
+    query.addBindValue(revision);
+    query.addBindValue(eventId);
+    query.addBindValue(id);
+    query.addBindValue(revision);
+    query.addBindValue(revision);
+    query.addBindValue(eventId);
+    return query.exec() || fail(query.lastError().text());
+}
+
+bool Store::setRelayHints(qint64 id, const QStringList &relays) {
+    QSqlQuery query(m_db);
+    // NULL for none, otherwise a JSON array.
+    QVariant hints(QMetaType::fromType<QString>());
+    if (!relays.isEmpty())
+        hints = QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(relays)).toJson(QJsonDocument::Compact));
+    query.prepare(QStringLiteral("UPDATE feeds SET relay_hints = ? WHERE id = ?"));
+    query.addBindValue(hints);
+    query.addBindValue(id);
+    return query.exec() || fail(query.lastError().text());
+}
+
+bool Store::recordComplete(qint64 id, const QDateTime &time) {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("UPDATE feeds SET complete_at = ? WHERE id = ?"));
+    query.addBindValue(time.toSecsSinceEpoch());
+    query.addBindValue(id);
+    return query.exec() || fail(query.lastError().text());
+}
+
 bool Store::recordFetch(qint64 id, const QString &etag, const QString &lastModified, const QString &error) {
     QSqlQuery query(m_db);
     if (error.isEmpty()) {
@@ -439,24 +509,64 @@ bool Store::recordFetch(qint64 id, const QString &etag, const QString &lastModif
 int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
     if (!begin())
         return -1;
-    QSqlQuery exists(m_db), upsert(m_db);
+    QSqlQuery exists(m_db), upsert(m_db), version(m_db), replace(m_db);
     exists.prepare(QStringLiteral("SELECT 1 FROM items WHERE feed_id = ? AND guid = ?"));
     upsert.prepare(QStringLiteral(
-        "INSERT INTO items (feed_id, guid, title, url, author, summary, content, published_at, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO items (feed_id, guid, title, url, author, summary, content, published_at, created_at, address,"
+        " revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(feed_id, guid) DO UPDATE SET title = excluded.title, url = excluded.url,"
         " author = excluded.author, summary = excluded.summary, content = excluded.content,"
         " published_at = COALESCE(excluded.published_at, items.published_at)"));
+    version.prepare(QStringLiteral(
+        "SELECT id, revision, guid FROM items WHERE feed_id = ? AND address = ? ORDER BY revision DESC LIMIT 1"));
+    // A newer version takes the older one's row, so the article keeps its
+    // place and its read and starred flags.
+    replace.prepare(QStringLiteral(
+        "UPDATE items SET guid = ?, title = ?, url = ?, author = ?, summary = ?, content = ?,"
+        " published_at = COALESCE(?, published_at), revision = ? WHERE id = ?"));
+    auto failed = [this](QSqlQuery &query) {
+        const QString message = query.lastError().text();
+        rollback();
+        fail(message);
+        return -1;
+    };
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     int added = 0;
     for (const ParsedItem &item : items) {
+        if (!item.address.isEmpty()) {
+            version.addBindValue(feedId);
+            version.addBindValue(item.address);
+            if (!version.exec())
+                return failed(version);
+            if (version.next()) {
+                const qint64 rowId = version.value(0).toLongLong();
+                const qint64 revision = version.value(1).toLongLong();
+                const QString guid = version.value(2).toString();
+                version.finish();
+                // An older or the same version, perhaps from a slower relay.
+                // Of two from the same second the lower id wins, as NIP-01
+                // says, so every reader settles on the same one.
+                if (revision > item.revision || (revision == item.revision && guid <= item.guid))
+                    continue;
+                replace.addBindValue(item.guid);
+                replace.addBindValue(item.title);
+                replace.addBindValue(item.url);
+                replace.addBindValue(item.author);
+                replace.addBindValue(item.summary);
+                replace.addBindValue(item.content);
+                replace.addBindValue(timestamp(item.published));
+                replace.addBindValue(item.revision);
+                replace.addBindValue(rowId);
+                if (!replace.exec())
+                    return failed(replace);
+                continue;
+            }
+            version.finish();
+        }
         exists.addBindValue(feedId);
         exists.addBindValue(item.guid);
-        if (!exists.exec()) {
-            const QString message = exists.lastError().text();
-            rollback();
-            return fail(message), -1;
-        }
+        if (!exists.exec())
+            return failed(exists);
         const bool isNew = !exists.next();
         exists.finish();
         upsert.addBindValue(feedId);
@@ -468,22 +578,23 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         upsert.addBindValue(item.content);
         upsert.addBindValue(timestamp(item.published));
         upsert.addBindValue(now);
-        if (!upsert.exec()) {
-            const QString message = upsert.lastError().text();
-            rollback();
-            return fail(message), -1;
-        }
+        upsert.addBindValue(item.address.isEmpty() ? QVariant(QMetaType::fromType<QString>()) : QVariant(item.address));
+        upsert.addBindValue(item.address.isEmpty() ? QVariant(QMetaType::fromType<qint64>()) : QVariant(item.revision));
+        if (!upsert.exec())
+            return failed(upsert);
         added += isNew;
     }
     exists.finish();
     upsert.finish();
+    version.finish();
+    replace.finish();
     return commit() ? added : -1;
 }
 
 namespace {
 const char articleColumns[] =
     "SELECT i.id, i.feed_id, f.title, i.guid, i.title, i.url, i.author, i.summary, %1,"
-    " i.published_at, i.is_read, i.is_starred FROM items i JOIN feeds f ON f.id = i.feed_id";
+    " i.published_at, i.is_read, i.is_starred, i.address FROM items i JOIN feeds f ON f.id = i.feed_id";
 
 Article articleFrom(const QSqlQuery &query) {
     Article article;
@@ -500,6 +611,7 @@ Article articleFrom(const QSqlQuery &query) {
         article.published = QDateTime::fromSecsSinceEpoch(query.value(9).toLongLong(), QTimeZone::UTC);
     article.read = query.value(10).toBool();
     article.starred = query.value(11).toBool();
+    article.address = query.value(12).toString();
     return article;
 }
 
