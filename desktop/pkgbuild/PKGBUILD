@@ -7,9 +7,11 @@ arch=('x86_64' 'aarch64')
 url='https://github.com/privkeyio/readstr'
 license=('MIT')
 # qt6-base also provides QtNetwork, QtSql with its SQLite driver, and QtDBus,
-# which reaches xdg-desktop-portal for the OPML open and save dialogs. Phase 2
-# adds qt6-websockets (relays) and libsecp256k1 (event signatures).
-depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-wayland' 'xdg-desktop-portal')
+# which reaches xdg-desktop-portal for the OPML open and save dialogs.
+# qt6-websockets talks to Nostr relays and libsecp256k1 checks the signatures
+# on their events.
+depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-wayland' 'qt6-websockets' 'libsecp256k1'
+         'xdg-desktop-portal')
 makedepends=('gcc' 'make')
 options=('!debug')
 source=()

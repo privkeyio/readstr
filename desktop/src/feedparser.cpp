@@ -46,17 +46,7 @@ QString webLink(const QUrl &base, const QString &text) {
 }
 
 using FeedParser::cleanText;
-
-// Takes text that is already plain, so a literal '<' in a text field survives.
-QString summarize(QString text) {
-    if (text.size() <= FeedParser::maxSummaryLength)
-        return text;
-    text.truncate(FeedParser::maxSummaryLength);
-    const qsizetype space = text.lastIndexOf(' ');
-    if (space > FeedParser::maxSummaryLength / 2)
-        text.truncate(space);
-    return text + QChar(0x2026);
-}
+using FeedParser::summarize;
 
 // Items need a stable key for de-duplication. Feeds without guid, id, or link
 // are keyed by their title and content instead.
@@ -609,6 +599,16 @@ bool isBidiFormat(QChar character) {
     const char16_t code = character.unicode();
     return code == 0x061C || code == 0x200E || code == 0x200F || (code >= 0x202A && code <= 0x202E)
            || (code >= 0x2066 && code <= 0x2069);
+}
+
+QString summarize(QString text) {
+    if (text.size() <= maxSummaryLength)
+        return text;
+    text.truncate(maxSummaryLength);
+    const qsizetype space = text.lastIndexOf(' ');
+    if (space > maxSummaryLength / 2)
+        text.truncate(space);
+    return text + QChar(0x2026);
 }
 
 // Control characters would make exported OPML invalid XML and garble the

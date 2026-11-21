@@ -2,6 +2,7 @@
 
 #include <QSaveFile>
 
+#include "nostrsource.h"
 #include "smallfile.h"
 
 namespace Library {
@@ -34,6 +35,106 @@ Subscription subscribe(Store &store, const Discovery::Result &found) {
         }
     }
     return subscription;
+}
+
+std::optional<Nip19::Profile> nostrAuthor(const QString &text) {
+    return Nip19::decodeProfile(text);
+}
+
+bool isNostrFeed(const Feed &feed) {
+    return feed.url.startsWith(QLatin1String("npub1"));
+}
+
+namespace {
+NostrQuery authorQuery(const QString &pubkey) {
+    NostrQuery query;
+    query.author = pubkey;
+    query.kinds = {NostrSource::profileKind, NostrSource::longFormKind};
+    query.limit = 100;
+    return query;
+}
+
+// Saves what the relays returned for an author's feed: new and newer
+// articles, and the profile when one came.
+bool saveNostr(Store &store, qint64 feedId, const QString &pubkey, const NostrResult &found, int *added) {
+    const auto profile = NostrSource::profile(found.events, pubkey);
+    if (profile && !store.updateProfile(feedId, profile->feed, profile->revision))
+        return false;
+    const auto feed = store.feed(feedId);
+    if (!feed)
+        return false;
+    const QString author = feed->title != feed->url ? feed->title : QString();
+    *added = store.saveItems(feedId, NostrSource::longForm(found.events, author));
+    if (*added < 0 || !store.recordFetch(feedId, {}, {}, {}))
+        return false;
+    // A refresh that some relay missed asks again from the last one they
+    // all answered, so what only that relay holds is not skipped for good.
+    return !found.complete() || store.recordComplete(feedId, found.startedAt);
+}
+}
+
+NostrQuery nostrQuery(const Feed &feed) {
+    const auto author = Nip19::decodeProfile(feed.url);
+    NostrQuery query = authorQuery(author ? author->pubkey : QString());
+    query.extraRelays = feed.relayHints;
+    // A day's margin for relays' clocks and for events that reach them late.
+    if (feed.completeAt.isValid())
+        query.since = qMax<qint64>(0, feed.completeAt.toSecsSinceEpoch() - 24 * 3600);
+    return query;
+}
+
+NostrQuery nostrQuery(const Nip19::Profile &author) {
+    NostrQuery query = authorQuery(author.pubkey);
+    query.extraRelays = author.relays;
+    return query;
+}
+
+Subscription subscribeNostr(Store &store, const Nip19::Profile &author, const NostrResult &found) {
+    Subscription subscription;
+    if (!found.ok()) {
+        subscription.error = found.error;
+        return subscription;
+    }
+    const QString npub = Nip19::npub(author.pubkey);
+    // Titled by its npub, a placeholder the profile's name replaces.
+    subscription.id = store.addFeed(npub, npub, {}, &subscription.created);
+    if (!subscription.id) {
+        subscription.error = store.lastError();
+        return subscription;
+    }
+    if (subscription.created
+        && (!store.setRelayHints(subscription.id, author.relays)
+            || !saveNostr(store, subscription.id, author.pubkey, found, &subscription.added))) {
+        subscription.error = store.lastError();
+        store.removeFeed(subscription.id);
+        subscription.id = 0;
+        subscription.created = false;
+        subscription.added = 0;
+    }
+    return subscription;
+}
+
+Refresh applyNostr(Store &store, const Feed &feed, const NostrResult &found) {
+    Refresh row;
+    row.title = feed.title;
+    const auto author = Nip19::decodeProfile(feed.url);
+    if (!author) {
+        row.error = QStringLiteral("not an npub: %1").arg(feed.url);
+    } else if (!found.ok()) {
+        row.error = found.error;
+    } else {
+        row.status = QStringLiteral("updated");
+        if (!saveNostr(store, feed.id, author->pubkey, found, &row.added))
+            row.error = store.lastError();
+        if (const auto updated = store.feed(feed.id))
+            row.title = updated->title;
+    }
+    if (!row.error.isEmpty()) {
+        row.status = QStringLiteral("error");
+        row.added = 0;
+        store.recordFetch(feed.id, {}, {}, row.error);
+    }
+    return row;
 }
 
 Refresh apply(Store &store, const Feed &feed, const FetchResult &fetched) {
@@ -89,15 +190,25 @@ Import importFile(Store &store, const QString &path) {
 
 Import importOutlines(Store &store, const QList<Opml::Outline> &outlines) {
     Import result;
-    // Nostr sources arrive in phase 2; until then they are counted, not
-    // dropped silently. They are set aside before de-duplication, so an
-    // unsupported outline cannot shadow a supported one with the same key.
+    // Unsupported outlines are set aside before de-duplication, so one
+    // cannot shadow a supported one with the same key. An nprofile or a
+    // "nostr:" link is stored as the plain npub.
     QList<Opml::Outline> supported;
-    for (const Opml::Outline &outline : outlines) {
-        if (!outline.npub.isEmpty() || !isWebUrl(QUrl(outline.xmlUrl, QUrl::StrictMode)))
-            ++result.unsupported;
-        else
+    for (Opml::Outline outline : outlines) {
+        if (!outline.npub.isEmpty()) {
+            const auto author = Nip19::decodeProfile(outline.npub);
+            if (!author) {
+                ++result.unsupported;
+                continue;
+            }
+            outline.npub = Nip19::npub(author->pubkey);
+            outline.xmlUrl = outline.npub;
             supported << outline;
+        } else if (isWebUrl(QUrl(outline.xmlUrl, QUrl::StrictMode))) {
+            supported << outline;
+        } else {
+            ++result.unsupported;
+        }
     }
 
     // One transaction, so a failure part way leaves no feeds behind that
@@ -107,10 +218,10 @@ Import importOutlines(Store &store, const QList<Opml::Outline> &outlines) {
         const QList<Feed> feeds = store.feeds();
         if (!store.lastError().isEmpty())
             return false;
-        QStringList existing;
+        QStringList existing, npubs;
         for (const Feed &feed : feeds)
-            existing << feed.url;
-        const Opml::Plan plan = Opml::plan(supported, existing);
+            (isNostrFeed(feed) ? npubs : existing) << feed.url;
+        const Opml::Plan plan = Opml::plan(supported, existing, npubs);
         result.skipped = plan.skipped;
         for (const Opml::Outline &outline : plan.toAdd) {
             bool created = false;
@@ -136,7 +247,8 @@ QByteArray exportOpml(Store &store, QString *error) {
     }
     QList<Opml::ExportFeed> exported;
     for (const Feed &feed : feeds)
-        exported << Opml::ExportFeed{QStringLiteral("RSS"), feed.url, feed.title, feed.category, {}};
+        exported << Opml::ExportFeed{isNostrFeed(feed) ? QStringLiteral("NOSTR") : QStringLiteral("RSS"), feed.url,
+                                     feed.title, feed.category, {}};
     return Opml::build(exported);
 }
 

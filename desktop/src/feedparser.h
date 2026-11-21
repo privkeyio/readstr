@@ -21,6 +21,11 @@ struct ParsedItem {
     QString content;
     // Invalid when the feed gives no date that can be read.
     QDateTime published;
+    // Set for a Nostr replaceable event ("30023:<pubkey>:<d>"): versions with
+    // the same address are one article, and the highest `revision` (the
+    // event's created_at) wins.
+    QString address;
+    qint64 revision = 0;
 };
 
 struct ParsedFeed {
@@ -49,6 +54,10 @@ QString plainText(const QString &html);
 // Decodes character references (&amp;, &#38;, &#x26;) and the common named
 // entities; anything else is left as written.
 QString decodeEntities(const QString &text);
+// Shortens plain text to at most maxSummaryLength characters, at a word
+// when one ends past the halfway point, with an ellipsis. It takes text that
+// is already plain, so a literal '<' in a text field survives.
+QString summarize(QString text);
 // Bidirectional formatting characters (embeddings, overrides, isolates, and
 // marks), which can make text read differently than it is.
 bool isBidiFormat(QChar character);

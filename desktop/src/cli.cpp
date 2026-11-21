@@ -23,7 +23,7 @@ void usage(QTextStream &stream) {
     stream << "Usage: readstr [open]\n"
               "       readstr feeds [--json]\n"
               "       readstr articles [--feed ID] [--unread] [--starred] [--limit N] [--json]\n"
-              "       readstr subscribe URL [--json]\n"
+              "       readstr subscribe URL|NPUB [--json]\n"
               "       readstr unsubscribe ID\n"
               "       readstr refresh [--feed ID] [--json]\n"
               "       readstr read|unread|star|unstar ID...\n"
@@ -224,20 +224,29 @@ int subscribe(const QString &command, const QStringList &arguments, QTextStream 
     if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
         return 1;
     if (options.positional.size() != 1)
-        return fail(command, "needs one URL", err);
-    const QUrl url(options.positional.first().trimmed(), QUrl::StrictMode);
-    if (!Library::isWebUrl(url))
-        return fail(command, "the URL must start with http:// or https://", err);
+        return fail(command, "needs one URL or npub", err);
+    const QString text = options.positional.first().trimmed();
+    const auto author = Library::nostrAuthor(text);
+    const QUrl url(text, QUrl::StrictMode);
+    if (!author && !Library::isWebUrl(url))
+        return fail(command, "give a URL starting with http:// or https://, or an npub", err);
 
     Store store;
     if (!openStore(command, store, err))
         return 1;
-    Fetcher fetcher;
-    const Discovery::Result found = Discovery::discover(fetcher, url);
-    if (!found.found)
-        return fail(command, found.error, err);
-
-    const Library::Subscription subscription = Library::subscribe(store, found);
+    Library::Subscription subscription;
+    bool discovered = false;
+    if (author) {
+        RelayPool relays;
+        subscription = Library::subscribeNostr(store, *author, relays.query(Library::nostrQuery(*author)));
+    } else {
+        Fetcher fetcher;
+        const Discovery::Result found = Discovery::discover(fetcher, url);
+        if (!found.found)
+            return fail(command, found.error, err);
+        discovered = found.discovered;
+        subscription = Library::subscribe(store, found);
+    }
     if (!subscription.error.isEmpty())
         return fail(command, subscription.error, err);
     const bool created = subscription.created;
@@ -251,7 +260,7 @@ int subscribe(const QString &command, const QStringList &arguments, QTextStream 
                               {"url", feed->url},
                               {"title", feed->title},
                               {"created", created},
-                              {"discovered", found.discovered},
+                              {"discovered", discovered},
                               {"articles", added}},
                   out);
     } else if (created) {
@@ -307,15 +316,29 @@ int refresh(const QString &command, const QStringList &arguments, QTextStream &o
     }
 
     QList<FetchRequest> requests;
-    for (const Feed &feed : targets)
-        requests << FetchRequest{QUrl(feed.url), feed.etag, feed.lastModified};
+    QList<NostrQuery> queries;
+    QList<qsizetype> web, nostr;
+    for (qsizetype i = 0; i < targets.size(); ++i) {
+        const Feed &feed = targets.at(i);
+        if (Library::isNostrFeed(feed)) {
+            nostr << i;
+            queries << Library::nostrQuery(feed);
+        } else {
+            web << i;
+            requests << FetchRequest{QUrl(feed.url), feed.etag, feed.lastModified};
+        }
+    }
 
     // Each response is parsed and saved as it arrives, so only the few in
     // flight hold a body; the rows are printed in feed order at the end.
     QList<Library::Refresh> rows(targets.size());
     Fetcher fetcher;
     fetcher.fetchEach(requests, [&](qsizetype i, const FetchResult &fetched) {
-        rows[i] = Library::apply(store, targets.at(i), fetched);
+        rows[web.at(i)] = Library::apply(store, targets.at(web.at(i)), fetched);
+    });
+    RelayPool relays;
+    relays.queryEach(queries, [&](qsizetype i, const NostrResult &found) {
+        rows[nostr.at(i)] = Library::applyNostr(store, targets.at(nostr.at(i)), found);
     });
 
     int code = 0;

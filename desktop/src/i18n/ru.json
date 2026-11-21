@@ -10,7 +10,7 @@
   "Pick an article to read it": "Выберите статью, чтобы прочитать её",
   "Add a feed with Ctrl+N or import your subscriptions with Ctrl+O. Press ? to see the keyboard shortcuts.": "Добавьте ленту сочетанием Ctrl+N или импортируйте подписки сочетанием Ctrl+O. Нажмите ?, чтобы увидеть сочетания клавиш.",
   "Add a feed": "Добавить ленту",
-  "Feed or site address": "Адрес ленты или сайта",
+  "Feed, site, or npub": "Лента, сайт или npub",
   "Looking for the feed…": "Ищем ленту…",
   "Cancel": "Отмена",
   "Add": "Добавить",
@@ -64,7 +64,7 @@
     "many": "%n статей отмечено как прочитанные",
     "other": "%n статьи отмечены как прочитанные"
   },
-  "Enter a web address, like https://example.com/feed.xml": "Введите веб-адрес, например https://example.com/feed.xml",
+  "Enter a web address, like https://example.com/feed.xml, or an npub": "Введите веб-адрес, например https://example.com/feed.xml, или npub",
   "Subscribed to %1 (%n articles)": {
     "one": "Вы подписались на %1 (%n статья)",
     "few": "Вы подписались на %1 (%n статьи)",

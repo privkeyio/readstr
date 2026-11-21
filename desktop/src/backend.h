@@ -15,6 +15,7 @@
 #include "feedparser.h"
 #include "fetcher.h"
 #include "library.h"
+#include "relaypool.h"
 #include "sourcemodel.h"
 #include "store.h"
 
@@ -146,6 +147,8 @@ public:
     // How links leave the app; tests replace it.
     void setUrlOpener(std::function<bool(const QUrl &)> opener) { m_openUrl = std::move(opener); }
     void setFetchLimits(const Fetcher::Limits &limits) { m_fetcher->setLimits(limits); }
+    void setRelayLimits(const RelayPool::Limits &limits) { m_relays->setLimits(limits); }
+    void setRelays(const QStringList &relays) { m_relays->setRelays(relays); }
 
 signals:
     void libraryChanged();
@@ -211,6 +214,7 @@ private:
     Store m_store;
     bool m_storeOpen = false;
     std::unique_ptr<Fetcher> m_fetcher;
+    std::unique_ptr<RelayPool> m_relays;
     QThread m_thread;
     LibraryWorker *m_worker = nullptr;
     FilePicker *m_picker = nullptr;
