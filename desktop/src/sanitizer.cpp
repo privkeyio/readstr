@@ -1,6 +1,7 @@
 #include "sanitizer.h"
 
 #include <QCoreApplication>
+#include <QRegularExpression>
 #include <QSet>
 
 #include "feedparser.h"
@@ -448,9 +449,26 @@ QUrl webUrl(const QString &href, const QUrl &base) {
 }
 
 QString plainToRichText(const QString &text) {
-    if (text.isEmpty())
+    QString clean = text.left(maxInputLength);
+    clean.removeIf(isDirectionOverride);
+    if (clean.isEmpty())
         return {};
-    return QLatin1String("<p>") + text.left(maxInputLength).toHtmlEscaped() + QLatin1String("</p>");
+    return QLatin1String("<p>") + clean.toHtmlEscaped() + QLatin1String("</p>");
+}
+
+QString linesToRichText(const QString &text) {
+    QString clean = text.left(maxInputLength);
+    clean.removeIf(isDirectionOverride);
+    clean.replace(QLatin1String("\r\n"), QLatin1String("\n"));
+    QString out;
+    static const QRegularExpression blank(QStringLiteral("\\n[ \\t]*\\n\\s*"));
+    for (const QString &paragraph : clean.split(blank, Qt::SkipEmptyParts)) {
+        const QString trimmed = paragraph.trimmed();
+        if (!trimmed.isEmpty())
+            out += QLatin1String("<p>") + trimmed.toHtmlEscaped().replace('\n', QLatin1String("<br>"))
+                + QLatin1String("</p>");
+    }
+    return out;
 }
 
 QString toRichText(const QString &input, const QUrl &base) {

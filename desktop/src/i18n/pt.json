@@ -10,7 +10,7 @@
   "Pick an article to read it": "Escolha um artigo para o ler",
   "Add a feed with Ctrl+N or import your subscriptions with Ctrl+O. Press ? to see the keyboard shortcuts.": "Adicione um feed com Ctrl+N ou importe as suas subscrições com Ctrl+O. Prima ? para ver os atalhos de teclado.",
   "Add a feed": "Adicionar um feed",
-  "Feed or site address": "Endereço do feed ou do site",
+  "Feed, site, or npub": "Feed, site ou npub",
   "Looking for the feed…": "A procurar o feed…",
   "Cancel": "Cancelar",
   "Add": "Adicionar",
@@ -62,7 +62,7 @@
     "many": "%n de artigos marcados como lidos",
     "other": "%n artigos marcados como lidos"
   },
-  "Enter a web address, like https://example.com/feed.xml": "Introduza um endereço web, como https://example.com/feed.xml",
+  "Enter a web address, like https://example.com/feed.xml, or an npub": "Introduza um endereço web, como https://example.com/feed.xml, ou um npub",
   "Subscribed to %1 (%n articles)": {
     "one": "Subscreveu %1 (%n artigo)",
     "many": "Subscreveu %1 (%n de artigos)",

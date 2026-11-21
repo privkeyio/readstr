@@ -7,7 +7,9 @@
 
 #include "discovery.h"
 #include "fetcher.h"
+#include "nip19.h"
 #include "opml.h"
+#include "relaypool.h"
 #include "store.h"
 
 // What the headless commands and the window both do to the library, written
@@ -28,6 +30,20 @@ struct Subscription {
 // one left half saved would read as subscribed and never get its articles.
 Subscription subscribe(Store &store, const Discovery::Result &found);
 
+// An npub or nprofile (with or without "nostr:"), or null.
+std::optional<Nip19::Profile> nostrAuthor(const QString &text);
+// True for a feed that follows a Nostr author, whose URL is the npub.
+bool isNostrFeed(const Feed &feed);
+// The events a refresh asks relays for: the author's profile and long-form
+// articles, from a day before the last refresh every relay answered on, and
+// from the author's relay hints too.
+NostrQuery nostrQuery(const Feed &feed);
+// The query a new subscription to `author` asks, with its relay hints.
+NostrQuery nostrQuery(const Nip19::Profile &author);
+// Saves a new Nostr author with the articles `found` holds, as subscribe()
+// does for a web feed, or finds the existing subscription.
+Subscription subscribeNostr(Store &store, const Nip19::Profile &author, const NostrResult &found);
+
 struct Refresh {
     // "updated", "not-modified", or "error".
     QString status;
@@ -39,11 +55,13 @@ struct Refresh {
 // Applies one fetch of `feed`: keeps the validators of a 304, parses and
 // saves a new body, or records why it failed on the feed.
 Refresh apply(Store &store, const Feed &feed, const FetchResult &fetched);
+// The same for a Nostr feed and what the relays returned.
+Refresh applyNostr(Store &store, const Feed &feed, const NostrResult &found);
 
 struct Import {
     int added = 0;
     int skipped = 0;
-    // Nostr and non-http(s) outlines, which phase 1 cannot follow.
+    // Outlines that are neither a web feed nor an npub.
     int unsupported = 0;
     QString error;
 };

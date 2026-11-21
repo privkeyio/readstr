@@ -19,7 +19,7 @@
   "No more unread articles in this view": "Não há mais artigos não lidos nesta visualização",
   "Only web links (http and https) can be opened": "Só é possível abrir links da web (http e https)",
   "Cannot mark the view read: %1": "Não é possível marcar a visualização como lida: %1",
-  "Enter a web address, like https://example.com/feed.xml": "Digite um endereço da web, como https://example.com/feed.xml",
+  "Enter a web address, like https://example.com/feed.xml, or an npub": "Digite um endereço da web, como https://example.com/feed.xml, ou um npub",
   "Subscribed to %1 (%n articles)": {
     "one": "Você assinou %1 (%n artigo)",
     "many": "Você assinou %1 (%n de artigos)",
@@ -42,5 +42,6 @@
   "The desktop portal's file chooser is not available (is xdg-desktop-portal running?).": "O seletor de arquivos do portal da área de trabalho não está disponível (o xdg-desktop-portal está em execução?).",
   "Could not listen for the file chooser's answer.": "Não foi possível aguardar a resposta do seletor de arquivos.",
   "The file chooser failed: %1": "O seletor de arquivos falhou: %1",
-  "The file chooser closed without a file.": "O seletor de arquivos fechou sem um arquivo."
+  "The file chooser closed without a file.": "O seletor de arquivos fechou sem um arquivo.",
+  "Feed, site, or npub": "Feed, site ou npub"
 }

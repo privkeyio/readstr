@@ -58,7 +58,7 @@ Dialog {
         TextField {
             id: field
             Layout.fillWidth: true
-            placeholderText: qsTr("Feed or site address")
+            placeholderText: qsTr("Feed, site, or npub")
             enabled: !backend.adding
             inputMethodHints: Qt.ImhUrlCharactersOnly | Qt.ImhNoAutoUppercase
             Material.roundedScale: theme.radius

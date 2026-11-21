@@ -5,5 +5,5 @@ TEMPLATE = app
 
 include(../src/sources.pri)
 
-HEADERS += fakehttpserver.h
+HEADERS += fakehttpserver.h fakerelay.h
 SOURCES += readstr_tests.cpp

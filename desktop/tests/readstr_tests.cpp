@@ -29,6 +29,9 @@
 #include <cstdio>
 #include <climits>
 #include <optional>
+#include <secp256k1.h>
+#include <secp256k1_extrakeys.h>
+#include <secp256k1_schnorrsig.h>
 #include <stdexcept>
 #include <sys/stat.h>
 #include <thread>
@@ -38,13 +41,19 @@
 #include "cli.h"
 #include "discovery.h"
 #include "fakehttpserver.h"
+#include "fakerelay.h"
 #include "feedparser.h"
 #include "fetcher.h"
 #include "filepicker.h"
+#include "library.h"
 #include "localnetwork.h"
+#include "nip19.h"
+#include "nostrevent.h"
+#include "nostrsource.h"
 #include "opml.h"
 #include "paths.h"
 #include "portalfilepicker.h"
+#include "relaypool.h"
 #include "sanitizer.h"
 #include "sourcemodel.h"
 #include "store.h"
@@ -363,12 +372,12 @@ private slots:
         {
             Store store;
             QVERIFY2(store.open(path), qPrintable(store.lastError()));
-            QCOMPARE(store.schemaVersion(), 1);
+            QCOMPARE(store.schemaVersion(), 2);
             QVERIFY(store.addFeed("https://a.example.com/feed", "A"));
         }
         Store again;
         QVERIFY2(again.open(path), qPrintable(again.lastError()));
-        QCOMPARE(again.schemaVersion(), 1);
+        QCOMPARE(again.schemaVersion(), 2);
         QCOMPARE(again.feeds().size(), 1);
 
         QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "raw");
@@ -441,8 +450,8 @@ private slots:
         QCOMPARE(store.feed(id)->title, QString("Example"));
 
         ParsedItem first{"guid-1", "One", "https://example.com/1", "Ada", "Summary", "<p>One</p>",
-                         QDateTime(QDate(2024, 1, 1), QTime(0, 0), QTimeZone::UTC)};
-        ParsedItem second{"guid-2", "Two", {}, {}, {}, {}, {}};
+                         QDateTime(QDate(2024, 1, 1), QTime(0, 0), QTimeZone::UTC), {}, 0};
+        ParsedItem second{"guid-2", "Two", {}, {}, {}, {}, {}, {}, 0};
         QCOMPARE(store.saveItems(id, {first, second}), 2);
         QCOMPARE(store.saveItems(id, {first, second}), 0);
 
@@ -482,7 +491,7 @@ private slots:
         QTemporaryDir dir;
         Store store;
         QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
-        const ParsedItem item{"guid", "Title", {}, {}, {}, {}, {}};
+        const ParsedItem item{"guid", "Title", {}, {}, {}, {}, {}, {}, 0};
         const qint64 first = store.addFeed("https://a.example.com/feed", "A");
         QCOMPARE(store.saveItems(first, {item}), 1);
         const qint64 firstItem = store.articles({}).value(0).id;
@@ -538,7 +547,7 @@ private slots:
             for (int i = 0; i < 8; ++i)
                 threads << QThread::create([&failures, path] {
                     Store store;
-                    if (!store.open(path) || store.schemaVersion() != 1) {
+                    if (!store.open(path) || store.schemaVersion() != 2) {
                         qWarning("%s", qPrintable(store.lastError()));
                         ++failures;
                     }
@@ -576,7 +585,7 @@ private slots:
                 for (int round = 0; round < rounds; ++round) {
                     QList<ParsedItem> items;
                     for (int i = 0; i < perRound; ++i)
-                        items << ParsedItem{QString("%1-%2").arg(worker).arg(i), "Item", {}, {}, {}, {}, {}};
+                        items << ParsedItem{QString("%1-%2").arg(worker).arg(i), "Item", {}, {}, {}, {}, {}, {}, 0};
                     if (store.saveItems(feed, items) < 0) {
                         qWarning("%s", qPrintable(store.lastError()));
                         ++failures;
@@ -593,7 +602,7 @@ private slots:
 
         Store writer;
         QVERIFY2(writer.open(path), qPrintable(writer.lastError()));
-        QCOMPARE(writer.schemaVersion(), 1);
+        QCOMPARE(writer.schemaVersion(), 2);
         QCOMPARE(writer.articles({0, false, false, 0}).size(), workers * perRound);
 
         // A reader in the middle of a transaction neither blocks a writer
@@ -607,7 +616,7 @@ private slots:
             QCOMPARE(query.value(0).toInt(), workers * perRound);
             query.finish();
             const qint64 feed = writer.feeds().value(0).id;
-            QCOMPARE(writer.saveItems(feed, {ParsedItem{"late", "Late", {}, {}, {}, {}, {}}}), 1);
+            QCOMPARE(writer.saveItems(feed, {ParsedItem{"late", "Late", {}, {}, {}, {}, {}, {}, 0}}), 1);
             QVERIFY(query.exec("SELECT COUNT(*) FROM items") && query.next());
             QCOMPARE(query.value(0).toInt(), workers * perRound);
             QVERIFY(query.exec("COMMIT"));
@@ -1929,9 +1938,9 @@ private slots:
     void sourceModelGroupsFeedsByCategory()
     {
         SourceModel model;
-        Feed loose{1, "https://l.example/", "Loose", {}, {}, {}, {}, {}, {}, {}, 2, 3};
-        Feed news{2, "https://n.example/", "Daily", {}, {}, "News", {}, {}, "HTTP 404", {}, 1, 1};
-        Feed alpha{3, "https://a.example/", "Alpha", {}, {}, "art", {}, {}, {}, {}, 4, 4};
+        Feed loose{1, "https://l.example/", "Loose", {}, {}, {}, {}, {}, {}, {}, {}, {}, 2, 3};
+        Feed news{2, "https://n.example/", "Daily", {}, {}, "News", {}, {}, "HTTP 404", {}, {}, {}, 1, 1};
+        Feed alpha{3, "https://a.example/", "Alpha", {}, {}, "art", {}, {}, {}, {}, {}, {}, 4, 4};
         model.setLibrary({loose, news, alpha}, LibraryCounts{8, 7, 1, 8});
         QCOMPARE(model.rowCount(), 9);
         const QStringList kinds{"all", "unread", "starred", "category", "feed", "category", "feed", "category", "feed"};
@@ -3385,7 +3394,581 @@ private slots:
         QTRY_VERIFY(!server.requests.isEmpty());
     }
 
+    void nip19DecodesNpubAndNprofile()
+    {
+        const QString hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        const QString npub = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
+        QCOMPARE(Nip19::npub(hex), npub);
+        QCOMPARE(Nip19::decodeProfile(npub)->pubkey, hex);
+        QCOMPARE(Nip19::decodeProfile("nostr:" + npub.toUpper())->pubkey, hex);
+        QVERIFY(Nip19::decodeProfile(" " + npub + "\n"));
+
+        // The example from NIP-19.
+        const auto profile = Nip19::decodeProfile(
+            "nprofile1qqsrhuxx8l9ex335q7he0f09aej04zpazpl0ne2cgukyawd24mayt8gpp4mhxue69uhhytnc9e3k7mgpz4mhxue69uhkg6nzv9e"
+            "juumpv34kytnrdaksjlyr9p");
+        QVERIFY(profile);
+        QCOMPARE(profile->pubkey, hex);
+        QCOMPARE(profile->relays, QStringList({"wss://r.x.com", "wss://djbas.sadkb.com"}));
+
+        QVERIFY(!Nip19::decodeProfile(npub.left(npub.size() - 1) + 'q'));
+        QVERIFY(!Nip19::decodeProfile("npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6W6"));
+        QVERIFY(!Nip19::decodeProfile("note1" + npub.mid(5)));
+        QVERIFY(!Nip19::decodeProfile("npub1"));
+        QVERIFY(!Nip19::decodeProfile(QString(5000, 'q')));
+        QVERIFY(!Nip19::decodeProfile("https://example.com/feed"));
+        QVERIFY(Nip19::npub("not hex").isEmpty());
+
+        const QString naddr = Nip19::naddr(30023, hex, "my-post");
+        QVERIFY(naddr.startsWith("naddr1"));
+        QCOMPARE(naddr, Nip19::naddr(30023, hex, "my-post"));
+        QVERIFY(naddr != Nip19::naddr(30023, hex, "other"));
+        QVERIFY(Nip19::naddr(30023, hex, QString(300, 'x')).isEmpty());
+    }
+
+    void nostrEventVerifiesItsSignature()
+    {
+        const QJsonObject json = signedEvent(30023, "Line one\n\"quoted\" \\ \u0001 é 😀",
+                                             {{"d", "post"}, {"title", "Hello"}}, 1700000000);
+        auto event = NostrEvent::fromJson(json);
+        QVERIFY(event);
+        QVERIFY(event->verify());
+        QCOMPARE(event->tag("title"), QString("Hello"));
+        QCOMPARE(event->tag("missing"), QString());
+        // JSON.stringify's escaping, which the id is the hash of.
+        QVERIFY(event->serialized().endsWith(
+            QByteArray("[[\"d\",\"post\"],[\"title\",\"Hello\"]],\"Line one\\n\\\"quoted\\\" \\\\ \\u0001 ")
+            + QString("é 😀").toUtf8() + "\"]"));
+
+        NostrEvent changed = *event;
+        changed.content += '!';
+        QVERIFY(!changed.verify());
+        changed = *event;
+        changed.sig[0] = changed.sig[0] == 'a' ? 'b' : 'a';
+        QVERIFY(!changed.verify());
+        changed = *event;
+        changed.pubkey = signedEvent(1, "", {}, 1, 2).value("pubkey").toString();
+        QVERIFY(!changed.verify());
+
+        QJsonObject broken = json;
+        broken.insert("created_at", 1.5);
+        QVERIFY(!NostrEvent::fromJson(broken));
+        broken = json;
+        broken.insert("id", json.value("id").toString().toUpper());
+        QVERIFY(!NostrEvent::fromJson(broken));
+        broken = json;
+        broken.insert("tags", QJsonArray{QJsonArray{"d", 1}});
+        QVERIFY(!NostrEvent::fromJson(broken));
+        broken = json;
+        broken.remove("sig");
+        QVERIFY(!NostrEvent::fromJson(broken));
+        QVERIFY(!NostrEvent::fromJson(QJsonValue("event")));
+    }
+
+    void nostrSourceKeepsTheLatestVersionOfEachArticle()
+    {
+        QList<NostrEvent> events;
+        for (const QJsonObject &json :
+             {signedEvent(30023, "# Old", {{"d", "a"}, {"title", "Old"}, {"published_at", "1600000000"}}, 1700000000),
+              signedEvent(30023, "# New", {{"d", "a"}, {"title", "New\u202e"}, {"published_at", "1600000000"}},
+                          1700000500),
+              signedEvent(30023, "Body text", {{"d", "b"}}, 1700000100),
+              signedEvent(1, "a note", {}, 1700000200),
+              signedEvent(0, R"({"name":"ada","display_name":"Ada L.","about":"Writes.","website":"javascript:x"})",
+                          {}, 1700000300)})
+            events << *NostrEvent::fromJson(json);
+        const QString pubkey = events.first().pubkey;
+
+        const QList<ParsedItem> items = NostrSource::longForm(events, "Ada L.");
+        QCOMPARE(items.size(), 2);
+        QCOMPARE(items.at(0).title, QString("Untitled"));
+        QCOMPARE(items.at(0).summary, QString("Body text"));
+        QCOMPARE(items.at(0).published.toSecsSinceEpoch(), 1700000100);
+        QCOMPARE(items.at(1).title, QString("New"));
+        QCOMPARE(items.at(1).content, QString("# New"));
+        QCOMPARE(items.at(1).guid, events.at(1).id);
+        QCOMPARE(items.at(1).published.toSecsSinceEpoch(), 1600000000);
+        QCOMPARE(items.at(1).address, "30023:" + pubkey + ":a");
+        QCOMPARE(items.at(1).revision, 1700000500);
+        QCOMPARE(items.at(1).url, "https://njump.me/" + Nip19::naddr(30023, pubkey, "a"));
+        QCOMPARE(items.at(1).author, QString("Ada L."));
+
+        const auto profile = NostrSource::profile(events, pubkey);
+        QVERIFY(profile);
+        QCOMPARE(profile->feed.title, QString("Ada L."));
+        QCOMPARE(profile->feed.description, QString("Writes."));
+        QCOMPARE(profile->feed.siteUrl, "https://njump.me/" + Nip19::npub(pubkey));
+        QVERIFY(!NostrSource::profile(events, QString(64, 'a')));
+    }
+
+    void storeKeepsTheNewestVersionOfAReplaceableArticle()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        const qint64 feed = store.addFeed("npub1example", "npub1example");
+        ParsedItem item;
+        item.guid = "event-1";
+        item.title = "First";
+        item.address = "30023:abc:post";
+        item.revision = 100;
+        QCOMPARE(store.saveItems(feed, {item}), 1);
+        const qint64 id = store.articles({})[0].id;
+        QVERIFY(store.setRead(id, true));
+        QVERIFY(store.setStarred(id, true));
+
+        item.guid = "event-2";
+        item.title = "Edited";
+        item.revision = 200;
+        QCOMPARE(store.saveItems(feed, {item}), 0);
+        ParsedItem stale = item;
+        stale.guid = "event-0";
+        stale.title = "Stale";
+        stale.revision = 50;
+        QCOMPARE(store.saveItems(feed, {stale}), 0);
+
+        const QList<Article> articles = store.articles({});
+        QCOMPARE(articles.size(), 1);
+        QCOMPARE(articles[0].id, id);
+        QCOMPARE(articles[0].guid, QString("event-2"));
+        QCOMPARE(articles[0].title, QString("Edited"));
+        QCOMPARE(articles[0].address, QString("30023:abc:post"));
+        QVERIFY(articles[0].read);
+        QVERIFY(articles[0].starred);
+    }
+
+    void storeKeepsTheNewestProfileAndAsksFromTheLastCompleteRefresh()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        const QString npub = Nip19::npub(QString(64, 'c'));
+        const qint64 feed = store.addFeed(npub, npub);
+        ParsedFeed profile;
+        profile.title = "Ada";
+        profile.siteUrl = "https://ada.example/";
+        QVERIFY(store.updateProfile(feed, profile, 200));
+        ParsedFeed old = profile;
+        old.title = "Old Ada";
+        old.siteUrl = "https://expired.example/";
+        QVERIFY(store.updateProfile(feed, old, 100));
+        QCOMPARE(store.feed(feed)->siteUrl, QString("https://ada.example/"));
+        QCOMPARE(store.feed(feed)->title, QString("Ada"));
+
+        // Same second: the lower id wins, whichever comes first.
+        ParsedItem item;
+        item.guid = "b-event";
+        item.title = "B";
+        item.address = "30023:c:post";
+        item.revision = 300;
+        QCOMPARE(store.saveItems(feed, {item}), 1);
+        item.guid = "a-event";
+        item.title = "A";
+        QCOMPARE(store.saveItems(feed, {item}), 0);
+        item.guid = "c-event";
+        item.title = "C";
+        QCOMPARE(store.saveItems(feed, {item}), 0);
+        QCOMPARE(store.articles({})[0].title, QString("A"));
+
+        QVERIFY(store.setRelayHints(feed, {"wss://hint.example.com"}));
+        Feed stored = *store.feed(feed);
+        QVERIFY(Library::isNostrFeed(stored));
+        QCOMPARE(stored.relayHints, QStringList({"wss://hint.example.com"}));
+        NostrQuery query = Library::nostrQuery(stored);
+        QCOMPARE(query.author, QString(64, 'c'));
+        QCOMPARE(query.extraRelays, QStringList({"wss://hint.example.com"}));
+        QCOMPARE(query.since, 0);
+
+        NostrResult partial;
+        partial.relays = 2;
+        partial.answered = 1;
+        partial.startedAt = QDateTime::currentDateTimeUtc();
+        QCOMPARE(Library::applyNostr(store, stored, partial).status, QString("updated"));
+        QCOMPARE(Library::nostrQuery(*store.feed(feed)).since, 0);
+        NostrResult complete = partial;
+        complete.answered = 2;
+        Library::applyNostr(store, stored, complete);
+        QCOMPARE(Library::nostrQuery(*store.feed(feed)).since, complete.startedAt.toSecsSinceEpoch() - 24 * 3600);
+    }
+
+    void sanitizerKeepsTheLinesOfPlainText()
+    {
+        QCOMPARE(Sanitizer::linesToRichText("# Title\n\nOne <b>\nTwo\r\n\r\n\n  Three\u202e "),
+                 QString("<p># Title</p><p>One &lt;b&gt;<br>Two</p><p>Three</p>"));
+        QCOMPARE(Sanitizer::plainToRichText("a\u202eb"), QString("<p>ab</p>"));
+    }
+
+    void relayPoolKeepsOnlyVerifiedEventsOfTheQuery()
+    {
+        FakeRelay first, second;
+        const QJsonObject post = signedEvent(30023, "body", {{"d", "a"}}, 1700000000);
+        const QJsonObject other = signedEvent(30023, "someone else", {{"d", "b"}}, 1700000000, 2);
+        const QJsonObject note = signedEvent(1, "a note", {}, 1700000002);
+        first.events = {post, other, note, QJsonValue("junk"), QJsonValue(QJsonArray{1, 2})};
+        second.events = {post};
+
+        RelayPool pool;
+        pool.setRelays({first.url(), second.url(), "ws://example.com", "wss://user:pw@relay.example.com",
+                        "https://relay.example.com"});
+        NostrQuery query;
+        query.author = post.value("pubkey").toString();
+        query.kinds = {30023};
+        const NostrResult result = pool.query(query);
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.answered, 2);
+        QCOMPARE(result.events.size(), 1);
+        QCOMPARE(result.events.first().id, post.value("id").toString());
+        QCOMPARE(first.filters.size(), 1);
+        QCOMPARE(first.filters.first().value("authors").toArray(), QJsonArray{query.author});
+        QTRY_COMPARE(first.closed.size(), 1);
+    }
+
+    void relayPoolDropsARelayThatForgesEvents()
+    {
+        FakeRelay forger, honest;
+        const QJsonObject post = signedEvent(30023, "body", {{"d", "a"}}, 1700000000);
+        QJsonObject forged = signedEvent(30023, "forged", {{"d", "c"}}, 1700000001);
+        forged.insert("content", "changed");
+        forger.events = {forged, signedEvent(30023, "later", {{"d", "d"}}, 1700000002)};
+        honest.events = {post};
+        RelayPool::Limits limits;
+        limits.maxOpenQueries = 1;
+        RelayPool pool;
+        pool.setLimits(limits);
+        pool.setRelays({forger.url(), honest.url()});
+        NostrQuery query;
+        query.author = post.value("pubkey").toString();
+        query.kinds = {30023};
+        NostrResult result;
+        pool.queryEach({query, query}, [&](qsizetype, const NostrResult &each) { result = each; });
+        QVERIFY(result.ok());
+        QVERIFY(!result.complete());
+        QCOMPARE(result.relays, 2);
+        QCOMPARE(result.answered, 1);
+        QCOMPARE(result.events.size(), 1);
+        QCOMPARE(result.events.first().id, post.value("id").toString());
+        // Given up on after the first forgery: the second query never reaches it.
+        QCOMPARE(forger.filters.size(), 1);
+        QCOMPARE(honest.filters.size(), 2);
+    }
+
+    void relayPoolKeepsTheNewestVersionAndRefusesTheFuture()
+    {
+        FakeRelay relay;
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        const QString bom = QString(QChar(0xFEFF)) + "starts with a byte order mark";
+        const QJsonObject newest = signedEvent(30023, "new", {{"d", "a"}}, now - 100);
+        relay.events = {newest, signedEvent(30023, "old", {{"d", "a"}}, now - 200),
+                        signedEvent(30023, "ancient", {{"d", "b"}}, now - 100000),
+                        signedEvent(30023, "future", {{"d", "c"}}, now + 3 * 24 * 3600),
+                        signedEvent(30023, bom, {{"d", "e"}}, now - 50)};
+        RelayPool pool;
+        pool.setRelays({relay.url()});
+        NostrQuery query;
+        query.author = newest.value("pubkey").toString();
+        query.kinds = {30023};
+        query.since = now - 1000;
+        const NostrResult result = pool.query(query);
+        QVERIFY(result.complete());
+        QStringList contents;
+        for (const NostrEvent &event : result.events)
+            contents << event.content;
+        contents.sort();
+        QCOMPARE(contents, QStringList({"new", bom}));
+    }
+
+    void relayPoolGivesSlowRelaysAShortGrace()
+    {
+        FakeRelay silent, good;
+        silent.silent = true;
+        good.events = {signedEvent(30023, "body", {{"d", "a"}}, 1700000000)};
+        RelayPool::Limits limits;
+        limits.graceMs = 200;
+        limits.subscriptionTimeoutMs = 10000;
+        RelayPool pool;
+        pool.setLimits(limits);
+        pool.setRelays({silent.url(), good.url()});
+        NostrQuery query;
+        query.author = good.events.first().toObject().value("pubkey").toString();
+        query.kinds = {30023};
+        QElapsedTimer timer;
+        timer.start();
+        int delivered = 0, ok = 0;
+        pool.queryEach(QList<NostrQuery>(12, query), [&](qsizetype, const NostrResult &result) {
+            ok += result.ok();
+            ++delivered;
+        });
+        QCOMPARE(delivered, 12);
+        QCOMPARE(ok, 12);
+        // One grace period, after which the silent relay is given up on,
+        // rather than a timeout for every few authors.
+        QVERIFY2(timer.elapsed() < 3000, qPrintable(QString::number(timer.elapsed())));
+        QVERIFY(silent.filters.size() <= 4);
+    }
+
+    void relayPoolReconnectsAfterARelayDrops()
+    {
+        FakeRelay relay;
+        relay.events = {signedEvent(30023, "body", {{"d", "a"}}, 1700000000)};
+        relay.dropAfter = 1;
+        RelayPool::Limits limits;
+        limits.maxOpenQueries = 1;
+        RelayPool pool;
+        pool.setLimits(limits);
+        pool.setRelays({relay.url()});
+        NostrQuery query;
+        query.author = relay.events.first().toObject().value("pubkey").toString();
+        query.kinds = {30023};
+        QList<bool> ok;
+        pool.queryEach(QList<NostrQuery>(3, query), [&](qsizetype, const NostrResult &result) { ok << result.ok(); });
+        QCOMPARE(ok, QList<bool>({true, true, true}));
+        QCOMPARE(relay.connections, 2);
+    }
+
+    void relayPoolKeepsRelayHintsOffTheLocalNetwork()
+    {
+        QVERIFY(RelayPool::isPublicRelay(QUrl("wss://relay.example.com")));
+        for (const char *url : {"ws://relay.example.com", "wss://localhost", "wss://relay.local", "wss://router",
+                                "wss://127.0.0.1", "wss://10.0.0.1", "wss://192.168.1.1", "wss://169.254.1.1",
+                                "wss://[::1]", "wss://[fd00::1]", "wss://[::ffff:127.0.0.1]",
+                                "wss://u:p@relay.example.com"})
+            QVERIFY2(!RelayPool::isPublicRelay(QUrl(url)), url);
+        QVERIFY(RelayPool::isUsableRelay(QUrl("ws://127.0.0.1:7000")));
+        QVERIFY(!RelayPool::isUsableRelay(QUrl("ws://relay.example.com")));
+
+        const EnvironmentGuard guard({"READSTR_RELAYS"});
+        qputenv("READSTR_RELAYS", "ws://relay.example.com, nonsense");
+        QVERIFY(RelayPool::configuredRelays().isEmpty());
+        RelayPool pool;
+        NostrQuery query;
+        query.author = QString(64, 'a');
+        query.kinds = {30023};
+        query.extraRelays = {"ws://127.0.0.1:1"};
+        QCOMPARE(pool.query(query).error, QString("no usable relays"));
+        qunsetenv("READSTR_RELAYS");
+        QCOMPARE(RelayPool::configuredRelays(), RelayPool::defaultRelays());
+    }
+
+    void nostrEventSerializesLikeJsonStringify()
+    {
+        // What JSON.stringify gives for the same array in Node: quote and
+        // backslash escaped, the short escapes, other controls as \u00XX,
+        // DEL and U+2028 raw, a lone surrogate escaped.
+        NostrEvent event;
+        event.pubkey = QString(64, 'a');
+        event.createdAt = 1;
+        event.kind = 1;
+        event.tags = {{"t", QString(QChar(7))}};
+        event.content = QString::fromUtf16(u"q\"b\\ \b\f\n\r\t\u001f\u007f\u2028 \u00e9 \U0001F600 ") + QChar(0xD800) + "x";
+        QCOMPARE(event.serialized(),
+                 "[0,\"" + QByteArray(64, 'a') + "\",1,1,[[\"t\",\"\\u0007\"]],\"q\\\"b\\\\ \\b\\f\\n\\r\\t\\u001f\x7f"
+                 "\xe2\x80\xa8 \xc3\xa9 \xf0\x9f\x98\x80 \\ud800x\"]");
+    }
+
+    void relayPoolReportsRelaysThatFail()
+    {
+        FakeRelay silent, refusing, good;
+        silent.silent = true;
+        refusing.closeWith = "auth-required: sign in";
+        good.events = {signedEvent(30023, "body", {{"d", "a"}}, 1700000000)};
+        RelayPool::Limits limits;
+        limits.connectTimeoutMs = 2000;
+        limits.subscriptionTimeoutMs = 300;
+        RelayPool pool;
+        pool.setLimits(limits);
+        NostrQuery query;
+        query.author = good.events.first().toObject().value("pubkey").toString();
+        query.kinds = {30023};
+
+        pool.setRelays({silent.url(), refusing.url()});
+        QElapsedTimer timer;
+        timer.start();
+        NostrResult result = pool.query(query);
+        QVERIFY(timer.elapsed() < 5000);
+        QVERIFY(!result.ok());
+        QVERIFY(result.error.contains("timed out"));
+        QVERIFY(result.error.contains("auth-required: sign in"));
+
+        pool.setRelays({silent.url(), good.url()});
+        result = pool.query(query);
+        QVERIFY(result.ok());
+        QCOMPARE(result.answered, 1);
+        QCOMPARE(result.events.size(), 1);
+
+        // A port nothing listens on.
+        QTcpServer closed;
+        QVERIFY(closed.listen(QHostAddress::LocalHost));
+        const QString nowhere = QStringLiteral("ws://127.0.0.1:%1").arg(closed.serverPort());
+        closed.close();
+        pool.setRelays({nowhere});
+        QVERIFY(!pool.query(query).ok());
+        pool.setRelays({"wss://user:pw@relay.example.com"});
+        QCOMPARE(pool.query(query).error, QString("no usable relays"));
+    }
+
+    void relayPoolCapsEventsAndOpenQueries()
+    {
+        FakeRelay relay;
+        for (int i = 0; i < 5; ++i)
+            relay.events << signedEvent(30023, QString(1000, 'x'), {{"d", QString::number(i)}}, 1700000000 + i);
+        RelayPool::Limits limits;
+        limits.maxEventsPerQuery = 3;
+        limits.maxOpenQueries = 2;
+        RelayPool pool;
+        pool.setLimits(limits);
+        pool.setRelays({relay.url()});
+        NostrQuery query;
+        query.author = relay.events.first().toObject().value("pubkey").toString();
+        query.kinds = {30023};
+
+        NostrResult result = pool.query(query);
+        QCOMPARE(result.events.size(), 3);
+        QVERIFY(result.truncated);
+        limits.maxEventsPerQuery = 100;
+        limits.maxBytesPerQuery = 6000;
+        pool.setLimits(limits);
+        result = pool.query(query);
+        QCOMPARE(result.events.size(), 2);
+        QVERIFY(result.truncated);
+
+        // Held results keep their slots, so no more than two are open.
+        QList<RelayPool::Release> held;
+        int delivered = 0, finished = 0;
+        pool.queryEachHeld(QList<NostrQuery>(5, query),
+                           [&](qsizetype, const NostrResult &, const RelayPool::Release &release) {
+                               held << release;
+                               ++delivered;
+                           },
+                           [&] { ++finished; });
+        while (!finished) {
+            QTRY_VERIFY(!held.isEmpty() || finished);
+            QTest::qWait(50);
+            QVERIFY(held.size() <= 2);
+            for (const auto &release : std::exchange(held, {})) {
+                release();
+                release();
+            }
+        }
+        QCOMPARE(delivered, 5);
+        QCOMPARE(finished, 1);
+        // One connection per batch, however many queries it carries.
+        QCOMPARE(relay.connections, 3);
+    }
+
+    void cliSubscribesToANostrAuthor()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME", "READSTR_RELAYS"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        qputenv("READSTR_RELAYS", relay.url().toUtf8());
+        relay.events = {signedEvent(0, R"({"name":"ada"})", {}, now + 0),
+                        signedEvent(30023, "# Hi", {{"d", "a"}, {"title", "Hello"}}, now + 100)};
+        const QString npub = Nip19::npub(relay.events.first().toObject().value("pubkey").toString());
+
+        QString out, err;
+        QCOMPARE(run({"subscribe", npub, "--json"}, out, err), 0);
+        QVERIFY2(err.isEmpty(), qPrintable(err));
+        const QJsonObject subscribed = QJsonDocument::fromJson(out.toUtf8()).object();
+        QCOMPARE(subscribed.value("title").toString(), QString("ada"));
+        QCOMPARE(subscribed.value("url").toString(), npub);
+        QCOMPARE(subscribed.value("articles").toInt(), 1);
+        QVERIFY(!relay.filters.first().contains("since"));
+
+        relay.events << signedEvent(30023, "# Edited", {{"d", "a"}, {"title", "Hello again"}}, now + 200)
+                     << signedEvent(30023, "More", {{"d", "b"}, {"title", "Second"}}, now + 300);
+        out.clear();
+        QCOMPARE(run({"refresh", "--json"}, out, err), 0);
+        const QJsonObject refreshed = QJsonDocument::fromJson(out.toUtf8()).array().at(0).toObject();
+        QCOMPARE(refreshed.value("status").toString(), QString("updated"));
+        QCOMPARE(refreshed.value("new").toInt(), 1);
+        QVERIFY(relay.filters.last().contains("since"));
+
+        out.clear();
+        QCOMPARE(run({"articles", "--json"}, out, err), 0);
+        const QJsonArray articles = QJsonDocument::fromJson(out.toUtf8()).array();
+        QCOMPARE(articles.size(), 2);
+        QCOMPARE(articles.at(1).toObject().value("title").toString(), QString("Hello again"));
+
+        out.clear();
+        QCOMPARE(run({"subscribe", "nostr:" + npub}, out, err), 0);
+        QVERIFY(out.startsWith("Already subscribed to ada"));
+        out.clear();
+        QCOMPARE(run({"export"}, out, err), 0);
+        QVERIFY(out.contains("type=\"nostr\""));
+        QVERIFY(out.contains("nostr=\"" + npub + "\""));
+
+        relay.closeWith = "blocked: no";
+        QCOMPARE(run({"subscribe", Nip19::npub(QString(64, 'b'))}, out, err), 1);
+        QVERIFY(err.contains("blocked: no"));
+        QCOMPARE(run({"subscribe", "npub1notreal"}, out, err), 1);
+        QVERIFY(err.contains("or an npub"));
+    }
+
+    void backendRefreshesAndAddsNostrAuthors()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        relay.events = {signedEvent(0, R"({"display_name":"Ada"})", {}, now + 0),
+                        signedEvent(30023, "Some *Markdown*", {{"d", "a"}, {"title", "Hello"}}, now + 100)};
+        const QString npub = Nip19::npub(relay.events.first().toObject().value("pubkey").toString());
+
+        Backend backend;
+        backend.setRelays({relay.url()});
+        QSignalSpy subscribed(&backend, &Backend::subscribed);
+        backend.addFeed(npub);
+        QVERIFY(subscribed.wait(5000));
+        QTRY_VERIFY(backend.status().contains("Ada"));
+
+        relay.events << signedEvent(30023, "Two", {{"d", "b"}, {"title", "Second"}}, now + 200);
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        backend.refreshAll();
+        QVERIFY(finished.wait(5000));
+        QVERIFY2(backend.status().startsWith("1 new article"), qPrintable(backend.status()));
+    }
+
 private:
+    // A NIP-01 event signed with the secret key whose 32 bytes are all
+    // `secretByte`, as a relay would send it.
+    static QJsonObject signedEvent(int kind, const QString &content, const QList<QStringList> &tags,
+                                   qint64 createdAt, char secretByte = 1)
+    {
+        secp256k1_context *context = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
+        const auto cleanup = qScopeGuard([context] { secp256k1_context_destroy(context); });
+        const QByteArray secret(32, secretByte);
+        secp256k1_keypair keypair;
+        secp256k1_xonly_pubkey xonly;
+        unsigned char pubkey[32], signature[64];
+        if (!secp256k1_keypair_create(context, &keypair, reinterpret_cast<const unsigned char *>(secret.constData()))
+            || !secp256k1_keypair_xonly_pub(context, &xonly, nullptr, &keypair)
+            || !secp256k1_xonly_pubkey_serialize(context, pubkey, &xonly))
+            qFatal("cannot make the test key");
+        NostrEvent event;
+        event.pubkey = QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(pubkey), 32).toHex());
+        event.createdAt = createdAt;
+        event.kind = kind;
+        event.tags = tags;
+        event.content = content;
+        const QByteArray hash = QCryptographicHash::hash(event.serialized(), QCryptographicHash::Sha256);
+        if (!secp256k1_schnorrsig_sign32(context, signature, reinterpret_cast<const unsigned char *>(hash.constData()),
+                                         &keypair, nullptr))
+            qFatal("cannot sign the test event");
+        QJsonArray tagArray;
+        for (const QStringList &tag : tags)
+            tagArray << QJsonArray::fromStringList(tag);
+        return {{"id", QString::fromLatin1(hash.toHex())},
+                {"pubkey", event.pubkey},
+                {"created_at", createdAt},
+                {"kind", kind},
+                {"tags", tagArray},
+                {"content", content},
+                {"sig", QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(signature), 64).toHex())}};
+    }
+
     // Restores the variables a test changes, so later tests see the original
     // environment even when a comparison fails part way.
     class EnvironmentGuard {
