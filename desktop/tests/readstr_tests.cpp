@@ -4800,7 +4800,7 @@ private slots:
         backend.playVideo();
         QCOMPARE(launched.size(), 1);
         QCOMPARE(launched.first().first, QString("mpv"));
-        QCOMPARE(launched.first().second, QStringList({"--access-references=no", "--", "https://cdn.example.com/a.mp4"}));
+        QCOMPARE(launched.first().second, QStringList({"--", "https://cdn.example.com/a.mp4"}));
         QVERIFY(!backend.statusError());
         QVERIFY(backend.status().contains("Slow"));
 

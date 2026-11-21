@@ -487,13 +487,13 @@ void Backend::playVideo() {
         setStatus(tr("Cannot play the video: it is on this machine or the local network"), true);
         return;
     }
-    // A playlist at the URL could list entries on this machine or the local
-    // network, which mpv would open, so it follows no references: that also
-    // turns off ordered chapters, mov reference files, and archives, none of
-    // which a video event needs, while HLS streams, which FFmpeg reads
-    // itself, still play. "--" ends mpv's options, so no URL can pass for one.
-    const QStringList arguments = {QStringLiteral("--access-references=no"), QStringLiteral("--"),
-                                   url.toString(QUrl::FullyEncoded)};
+    // "--" ends mpv's options, so no URL can pass for one. mpv still follows
+    // what the URL leads to, redirects and the entries of a playlist or an
+    // HLS stream, to any http(s) host (it refuses local files a network
+    // playlist names). --access-references=no would stop playlists but stops
+    // HLS too, which mpv opens the same way, so checking those hops waits for
+    // a proxy that can tell them apart.
+    const QStringList arguments = {QStringLiteral("--"), url.toString(QUrl::FullyEncoded)};
     switch (m_launch(QStringLiteral("mpv"), arguments)) {
     case Launch::Started:
         setStatus(tr("Playing %1 in mpv").arg(m_article.title));
