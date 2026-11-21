@@ -70,10 +70,12 @@ A video shows its description as plain text, its length, and its thumbnail,
 which is fetched only when you open that video (never from the list), from
 the public internet only, and kept in the cache directory. `P` (or the Play
 button, or a click on the thumbnail) plays it in `mpv`, which is started on
-its own with the video's address and no shell; the status bar says when mpv
-is missing or does not start. A video or thumbnail address that names this
-machine or the local network is never used, since someone else's event chose
-it; a public name that resolves to a local address is not caught.
+its own with the video's address and no shell, following no playlist or
+other references in it; the status bar says when mpv is missing or does not
+start. A video or thumbnail address that names this machine or the local
+network is never used, since someone else's event chose it; a public name
+that resolves to a local address is not caught, and neither is a redirect mpv
+follows to one.
 
 Readstr asks relay.damus.io, relay.primal.net, nos.lol, and relay.snort.social
 (plus an nprofile's own relay hints when you subscribe), only over `wss://`.

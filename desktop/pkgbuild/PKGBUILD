@@ -9,9 +9,10 @@ license=('MIT')
 # qt6-base also provides QtNetwork, QtSql with its SQLite driver, and QtDBus,
 # which reaches xdg-desktop-portal for the OPML open and save dialogs.
 # qt6-websockets talks to Nostr relays and libsecp256k1 checks the signatures
-# on their events. mpv plays Nostr videos; Omarchy ships it.
-depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-wayland' 'qt6-websockets' 'libsecp256k1'
-         'xdg-desktop-portal' 'mpv')
+# on their events. qt6-imageformats has the WebP reader that video thumbnails
+# may need. mpv plays Nostr videos; Omarchy ships it.
+depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-wayland' 'qt6-websockets' 'qt6-imageformats'
+         'libsecp256k1' 'xdg-desktop-portal' 'mpv')
 makedepends=('gcc' 'make')
 options=('!debug')
 source=()

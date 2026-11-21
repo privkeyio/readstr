@@ -4,6 +4,7 @@
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <algorithm>
 
 #include "nip19.h"
 #include "sanitizer.h"
@@ -39,7 +40,9 @@ qsizetype listMarker(QStringView line, qsizetype at) {
 }
 
 // A table's delimiter row ("|---|:-:|"): only pipes, dashes, colons, and
-// blanks, with a pipe and a dash. Returns its columns, or 0.
+// whitespace, with a pipe and a dash. Returns its columns, or 0. The
+// whitespace is md4c's, which takes form feeds and vertical tabs between the
+// cells as well as blanks, so no row Qt reads as a delimiter goes uncounted.
 int delimiterColumns(QStringView rest) {
     bool pipe = false, dash = false;
     for (const QChar character : rest) {
@@ -47,7 +50,7 @@ int delimiterColumns(QStringView rest) {
             pipe = true;
         else if (character == '-')
             dash = true;
-        else if (character != ':' && !isBlank(character))
+        else if (character != ':' && !isBlank(character) && character != '\f' && character != '\v')
             return 0;
     }
     if (!pipe || !dash)
@@ -97,15 +100,22 @@ bool withinCaps(const QString &input) {
             columns = 0;
             continue;
         }
-        if (!columns) {
-            columns = delimiterColumns(rest);
-            if (!columns)
-                continue;
-            if (columns > maxTableColumns)
+        // Every delimiter row is taken for a new table's, even inside one,
+        // since a table also ends without a blank line when a quote or list
+        // opens, and the one after it may be wider. Counting a row of dashes
+        // in a table's body as a header and a delimiter is the safe mistake.
+        const int delimiter = delimiterColumns(rest);
+        if (delimiter) {
+            if (delimiter > maxTableColumns)
                 return false;
-            // The header row above it, and the delimiter row.
+            // The header row above it, and the delimiter row. The widest
+            // table so far sets the cells of the rows after it, as the
+            // scan cannot tell where one ends.
+            columns = std::max(columns, delimiter);
             tableRows += 2;
-            tableCells += 2 * columns;
+            tableCells += 2 * delimiter;
+        } else if (!columns) {
+            continue;
         } else {
             ++tableRows;
             tableCells += columns;

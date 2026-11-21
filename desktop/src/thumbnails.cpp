@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QImageReader>
 #include <QPainter>
+#include <QPointer>
 #include <QTimer>
 
 #include "library.h"
@@ -205,8 +206,14 @@ void Thumbnails::fetch(const QUrl &url, std::function<void(const QUrl &)> done) 
         QTimer::singleShot(0, this, [this, wanted, url, hit, done] {
             if (wanted != m_wanted)
                 return;
-            if (!hit.isValid())
+            if (!hit.isValid()) {
+                // A slot on failed may cancel or replace this fetch, or even
+                // delete this object, and done must not run after either.
+                const QPointer<Thumbnails> alive(this);
                 emit failed(url, QStringLiteral("no cache directory"));
+                if (!alive || wanted != m_wanted)
+                    return;
+            }
             done(hit);
         });
         return;
@@ -220,8 +227,14 @@ void Thumbnails::fetch(const QUrl &url, std::function<void(const QUrl &)> done) 
             [this, wanted, url, done, file, error] {
                 if (wanted != m_wanted)
                     return;
-                if (!file.isValid())
+                if (!file.isValid()) {
+                    // As above: done must not run once a slot on failed has
+                    // dropped this fetch or deleted this object.
+                    const QPointer<Thumbnails> alive(this);
                     emit failed(url, error);
+                    if (!alive || wanted != m_wanted)
+                        return;
+                }
                 done(file);
             },
             Qt::QueuedConnection);

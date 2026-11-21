@@ -351,8 +351,13 @@ void Backend::updateThumbnail() {
     }
     // A failed one shows no thumbnail, and nothing else: the video still plays.
     m_thumbnails->fetch(url, [this, request](const QUrl &file) {
-        if (!m_closing && request == m_thumbnailRequest)
-            setThumbnail(file);
+        if (m_closing || request != m_thumbnailRequest)
+            return;
+        // Forgotten when it failed, so choosing the video again tries again
+        // rather than finding its URL already handled.
+        if (!file.isValid())
+            m_thumbnailSource.clear();
+        setThumbnail(file);
     });
 }
 
@@ -482,8 +487,14 @@ void Backend::playVideo() {
         setStatus(tr("Cannot play the video: it is on this machine or the local network"), true);
         return;
     }
-    // "--" ends mpv's options, so no URL can pass for one.
-    switch (m_launch(QStringLiteral("mpv"), {QStringLiteral("--"), url.toString(QUrl::FullyEncoded)})) {
+    // A playlist at the URL could list entries on this machine or the local
+    // network, which mpv would open, so it follows no references: that also
+    // turns off ordered chapters, mov reference files, and archives, none of
+    // which a video event needs, while HLS streams, which FFmpeg reads
+    // itself, still play. "--" ends mpv's options, so no URL can pass for one.
+    const QStringList arguments = {QStringLiteral("--access-references=no"), QStringLiteral("--"),
+                                   url.toString(QUrl::FullyEncoded)};
+    switch (m_launch(QStringLiteral("mpv"), arguments)) {
     case Launch::Started:
         setStatus(tr("Playing %1 in mpv").arg(m_article.title));
         break;

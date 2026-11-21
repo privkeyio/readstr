@@ -80,12 +80,23 @@ private:
             return events;
         QList<QJsonValue> matching;
         const QJsonArray kinds = filter.value(QStringLiteral("kinds")).toArray();
-        for (const QJsonValue &event : events)
+        // Authors and since as NIP-01 has them, before the limit, so an event
+        // a relay would never send cannot take a place in the answer.
+        const bool anyAuthor = !filter.contains(QStringLiteral("authors"));
+        const QJsonArray authors = filter.value(QStringLiteral("authors")).toArray();
+        const qint64 since = filter.value(QStringLiteral("since")).toInteger(0);
+        for (const QJsonValue &event : events) {
+            const QJsonObject object = event.toObject();
+            if (!anyAuthor && !authors.contains(object.value(QStringLiteral("pubkey"))))
+                continue;
+            if (object.value(QStringLiteral("created_at")).toInteger() < since)
+                continue;
             for (const QJsonValue &kind : kinds)
-                if (kind.toInt() == event.toObject().value(QStringLiteral("kind")).toInt(-1)) {
+                if (kind.toInt() == object.value(QStringLiteral("kind")).toInt(-1)) {
                     matching << event;
                     break;
                 }
+        }
         std::stable_sort(matching.begin(), matching.end(), [](const QJsonValue &a, const QJsonValue &b) {
             return a.toObject().value(QStringLiteral("created_at")).toInteger()
                 > b.toObject().value(QStringLiteral("created_at")).toInteger();

@@ -4196,6 +4196,16 @@ private slots:
         for (int i = 0; i < Markdown::maxTableCells / 10 - 2; ++i)
             capped += "|" + QString("1|").repeated(10) + "\n";
         QTest::newRow("table at the caps") << capped << false;
+        // md4c takes form feeds and vertical tabs between delimiter cells.
+        QTest::newRow("form-feed delimiter") << "|a|b|\n|---\f|---|\n" + QString("|x|y|\n").repeated(8000) << true;
+        QTest::newRow("vertical-tab delimiter") << "|a|b|\n|---|\v---|\n" + QString("|x|y|\n").repeated(8000) << true;
+        // A quote ends a table without a blank line, and starts a wider one.
+        const QString narrow = "|a|\n|-|\n|1|\n";
+        QTest::newRow("quoted wide table") << narrow + "> |" + QString("b|").repeated(65) + "\n> |"
+                + QString("-|").repeated(65) + "\n> |" + QString("x|").repeated(65) + "\n" << true;
+        QTest::newRow("quoted long table") << narrow + "> |" + QString("b|").repeated(64) + "\n> |"
+                + QString("-|").repeated(64) + "\n" + ("> |" + QString("x|").repeated(64) + "\n").repeated(400) << true;
+        QTest::newRow("quoted small table") << narrow + "> |b|c|\n> |-|-|\n> |x|y|\n" << false;
         QTest::newRow("bullets at the cap") << QString("- x\n").repeated(Markdown::maxListItems) << false;
         QTest::newRow("long line") << QString(n, 'x') << false;
         QTest::newRow("long lines") << (QString(20000, 'y') + "\n").repeated(n / 20001) << false;
@@ -4790,7 +4800,7 @@ private slots:
         backend.playVideo();
         QCOMPARE(launched.size(), 1);
         QCOMPARE(launched.first().first, QString("mpv"));
-        QCOMPARE(launched.first().second, QStringList({"--", "https://cdn.example.com/a.mp4"}));
+        QCOMPARE(launched.first().second, QStringList({"--access-references=no", "--", "https://cdn.example.com/a.mp4"}));
         QVERIFY(!backend.statusError());
         QVERIFY(backend.status().contains("Slow"));
 
@@ -5042,6 +5052,39 @@ private slots:
         QVERIFY(fetchThumbnail(thumbnails, server.url("/c.png")).isValid());
     }
 
+    void thumbnailsSkipDoneOnceFailedDropsTheFetch()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.serve("/b.png", png(20, 40), "image/png");
+        Thumbnails thumbnails;
+        Thumbnails::Limits limits;
+        limits.publicHostsOnly = false;
+        thumbnails.setLimits(limits);
+
+        // A slot on failed that cancels: the failed fetch's done never runs.
+        int calledGone = 0;
+        auto connection = connect(&thumbnails, &Thumbnails::failed, &thumbnails, [&thumbnails] { thumbnails.cancel(); });
+        thumbnails.fetch(server.url("/gone.png"), [&calledGone](const QUrl &) { ++calledGone; });
+        QTRY_COMPARE(server.requests.size(), 1);
+        QTest::qWait(200);
+        QCOMPARE(calledGone, 0);
+        disconnect(connection);
+
+        // One that starts another fetch: only the new one's done runs.
+        std::optional<QUrl> b;
+        connection = connect(&thumbnails, &Thumbnails::failed, &thumbnails, [&] {
+            thumbnails.fetch(server.url("/b.png"), [&b](const QUrl &file) { b = file; });
+        });
+        thumbnails.fetch(server.url("/gone.png"), [&calledGone](const QUrl &) { ++calledGone; });
+        QTRY_VERIFY(b.has_value());
+        QCOMPARE(*b, QUrl::fromLocalFile(Thumbnails::cachePath(server.url("/b.png"))));
+        QCOMPARE(calledGone, 0);
+        disconnect(connection);
+    }
+
     void thumbnailsPruneTheCache()
     {
         QTemporaryDir dir;
@@ -5149,6 +5192,12 @@ private slots:
         QTest::qWait(100);
         QVERIFY(!backend.articleThumbnail().isValid());
         QVERIFY(!backend.statusError());
+        // Opened again once it is there, it is asked for again and shows.
+        server.serve("/missing.png", png(30, 30), "image/png");
+        backend.selectArticle(0);
+        QTRY_COMPARE(backend.articleThumbnail(),
+                     QUrl::fromLocalFile(Thumbnails::cachePath(server.url("/missing.png"))));
+        QCOMPARE(server.requests.size(), asked + 2);
     }
 
 private:
@@ -5273,7 +5322,10 @@ private:
         return data;
     }
 
-    // Waits for one fetch's file: URL, empty when it failed.
+    // Waits for one fetch's file: URL, empty when it failed. A fetch that
+    // has not finished in time is cancelled, so its callback never writes to
+    // `result` once this has returned, and fails the test as a timeout
+    // rather than passing for a failed fetch.
     static QUrl fetchThumbnail(Thumbnails &thumbnails, const QUrl &url)
     {
         std::optional<QUrl> result;
@@ -5281,6 +5333,10 @@ private:
         const QDeadlineTimer deadline(10000);
         while (!result && !deadline.hasExpired())
             QTest::qWait(10);
+        if (!result) {
+            thumbnails.cancel();
+            QTest::qFail(qPrintable("the thumbnail fetch of " + url.toString() + " timed out"), __FILE__, __LINE__);
+        }
         return result.value_or(QUrl());
     }
 
