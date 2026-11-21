@@ -515,12 +515,37 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
     }
 
     // A kind whose only versions were past the size cap is refused as one
-    // that does not fit, since the web app refuses it the same way.
-    for (const auto &[kind, dTag] : result.oversized)
-        if ((kind == subscriptionsKind && dTag == QLatin1String(subscriptionsTag))
-            || (kind == readStatusKind && dTag == QLatin1String(readStatusTag))
-            || (kind == viewsKind && dTag == QLatin1String(viewsTag)))
-            refuse(kind);
+    // that does not fit, since the web app refuses it the same way, but only
+    // when the newest of them would have been applied had it fit: one no
+    // newer than what is already applied is obsolete, as it is for a payload
+    // that fits, and must not fail every pull.
+    for (const NostrEvent &event : result.oversized) {
+        if (event.pubkey != account.pubkey)
+            continue;
+        const QString dTag = event.tag(QStringLiteral("d"));
+        const char *tag = nullptr;
+        if (event.kind == subscriptionsKind && dTag == QLatin1String(subscriptionsTag))
+            tag = subscriptionsTag;
+        else if (event.kind == readStatusKind && dTag == QLatin1String(readStatusTag))
+            tag = readStatusTag;
+        else if (event.kind == viewsKind && dTag == QLatin1String(viewsTag))
+            tag = viewsTag;
+        if (!tag)
+            continue;
+        bool emptyLibrary = false;
+        if (event.kind == subscriptionsKind) {
+            emptyLibrary = store.feeds().isEmpty();
+            if (!store.lastError().isEmpty())
+                return storeFailed();
+        }
+        bool fresh = false;
+        if (!stillFresh(tag, event, emptyLibrary, &fresh))
+            return storeFailed();
+        if (changed)
+            return npubChanged();
+        if (fresh)
+            refuse(event.kind);
+    }
 
     // The pool stopped keeping events at its size cap, so a newer one may
     // be missing. What came is still applied, as the watermarks keep it from

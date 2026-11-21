@@ -922,6 +922,8 @@ void Backend::syncApplied(const Sync::Outcome &outcome, const QString &pubkey) {
     emit syncChanged();
     reloadSyncAccount();
     const bool again = std::exchange(m_syncAgain, false);
+    if (outcome.added > 0)
+        m_syncFeedsAdded = true;
     // An npub set while the pull was out is pulled for now.
     if (!m_syncAccount.pubkey.isEmpty() && m_syncAccount.pubkey != pubkey) {
         m_syncAddedBefore = m_syncMarkedBefore = 0;
@@ -968,7 +970,7 @@ void Backend::syncApplied(const Sync::Outcome &outcome, const QString &pubkey) {
         setStatus(tr("Synced with Nostr: %n feeds added, %1 articles marked read", nullptr, added).arg(markedRead));
     }
     emit syncFinished();
-    if (added == 0)
+    if (!std::exchange(m_syncFeedsAdded, false))
         return;
     // The feeds the sync added have never been fetched.
     if (m_refreshing)

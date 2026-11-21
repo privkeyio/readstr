@@ -4618,7 +4618,11 @@ private slots:
         QVERIFY2(result.ok(), qPrintable(result.error));
         QCOMPARE(result.events.size(), 1);
         QCOMPARE(result.events.first().createdAt, now);
-        QCOMPARE(result.oversized, (QList<std::pair<int, QString>>{{Sync::viewsKind, Sync::viewsTag}}));
+        QCOMPARE(result.oversized.size(), 1);
+        QCOMPARE(result.oversized.first().kind, Sync::viewsKind);
+        QCOMPARE(result.oversized.first().tag("d"), QString(Sync::viewsTag));
+        QCOMPARE(result.oversized.first().id, relay.events.last().toObject().value("id").toString());
+        QVERIFY(result.oversized.first().content.isEmpty());
 
         query.maxContentLength = 0;
         const NostrResult uncapped = pool.query(query);
@@ -4633,6 +4637,52 @@ private slots:
         QVERIFY(outcome.error.isEmpty());
         QCOMPARE(outcome.problems, QStringList{"the saved views do not fit the web app's format"});
         QCOMPARE(outcome.pendingRead, 1);
+        QVERIFY(!store.syncAccount().syncedAt.isValid());
+    }
+
+    // An oversized event no newer than what was already applied for its
+    // kind is obsolete, as one that fits would be, so it fails no pull; one
+    // newer than that, or any after the account starts afresh, is refused.
+    void syncRefusesOnlyAFreshOversizedEvent()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        FakeRelay relay;
+        const SyncAccount account = *Sync::account(syncNpub());
+        relay.events = {syncEvent(Sync::viewsKind, Sync::viewsTag,
+                                  {{"views", QJsonArray()}, {"padding", QString(200, 'x')}}, now)};
+        RelayPool pool;
+        pool.setLimits(Sync::limits());
+        pool.setRelays({relay.url()});
+        NostrQuery query = Sync::query(account);
+        query.maxContentLength = 150;
+        const NostrResult result = pool.query(query);
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QVERIFY(result.events.isEmpty());
+        QCOMPARE(result.oversized.size(), 1);
+        QCOMPARE(result.oversized.first().createdAt, now);
+
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
+        QVERIFY(store.setSyncAccount(account.npub, account.pubkey, {}));
+        QVERIFY(store.setSyncApplied(Sync::viewsTag, now + 100, QString(64, 'f')));
+        Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), result);
+        QVERIFY(outcome.error.isEmpty());
+        QVERIFY2(outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        QVERIFY(store.syncAccount().syncedAt.isValid());
+
+        QVERIFY(store.clearSyncAccount());
+        QVERIFY(store.setSyncAccount(account.npub, account.pubkey, {}));
+        QVERIFY(store.setSyncApplied(Sync::viewsTag, now - 100, QString(64, 'f')));
+        outcome = Sync::apply(store, store.syncAccount(), result);
+        QVERIFY(outcome.error.isEmpty());
+        QCOMPARE(outcome.problems, QStringList{"the saved views do not fit the web app's format"});
+        QVERIFY(!store.syncAccount().syncedAt.isValid());
+
+        QVERIFY(store.clearSyncAccount());
+        QVERIFY(store.setSyncAccount(account.npub, account.pubkey, {}));
+        outcome = Sync::apply(store, store.syncAccount(), result);
+        QCOMPARE(outcome.problems, QStringList{"the saved views do not fit the web app's format"});
         QVERIFY(!store.syncAccount().syncedAt.isValid());
     }
 
@@ -4905,6 +4955,51 @@ private slots:
         QTest::qWait(800);
         QCOMPARE(synced.count(), 1);
         QCOMPARE(relay.requests.size(), 2);
+    }
+
+    // A feed one account's pull added, whose fetch waited for the follow-up
+    // pull, is still fetched when the account changes during that follow-up
+    // and the new account's pull adds nothing.
+    void backendFetchesAFeedAddedBeforeTheAccountChanged()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        relay.events = {syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                                  {{"rss", QJsonArray()}, {"nostr", QJsonArray{syncNpub()}}}, now),
+                        signedEvent(0, R"({"name":"me"})", {}, now)};
+        relay.delayMs = 300;
+        const QString other = Nip19::npub(signedEvent(1, "", {}, 1, 2).value("pubkey").toString());
+        Backend backend;
+        backend.setRelays({relay.url()});
+        QSignalSpy synced(&backend, &Backend::syncFinished);
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        // Counted as each pull starts, since syncChanged also says the
+        // account changed.
+        int pulls = 0;
+        bool wasSyncing = false;
+        connect(&backend, &Backend::syncChanged, &backend, [&] {
+            if (!backend.syncing() || std::exchange(wasSyncing, true)) {
+                wasSyncing = backend.syncing();
+                return;
+            }
+            if (++pulls == 1)
+                QVERIFY(backend.setSyncNpub(syncNpub()));
+            else if (pulls == 2)
+                QVERIFY(backend.setSyncNpub(other));
+        });
+        QVERIFY(backend.setSyncNpub(syncNpub()));
+        QVERIFY(synced.wait(10000));
+        QCOMPARE(pulls, 3);
+        QCOMPARE(backend.syncNpub(), other);
+        QVERIFY2(backend.status().startsWith("Synced with Nostr: 0 feeds"), qPrintable(backend.status()));
+        QCOMPARE(backend.feedCount(), 1);
+        QVERIFY(finished.wait(10000));
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.feeds().first().lastFetchedAt.isValid());
     }
 
     // Markdown

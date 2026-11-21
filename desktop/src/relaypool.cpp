@@ -59,9 +59,9 @@ struct RelayPool::Batch {
         // By id, or for a replaceable event by its address, holding only
         // the newest version.
         QHash<QString, NostrEvent> events;
-        // The kind and d tag, by address, of verified events passed over for
-        // being past the query's maxContentLength.
-        QHash<QString, std::pair<int, QString>> oversized;
+        // By address, the newest verified event passed over for being past
+        // the query's maxContentLength, without its content.
+        QHash<QString, NostrEvent> oversized;
         qint64 bytes = 0;
         bool truncated = false;
         // A relay hint was left out at the connection cap.
@@ -492,14 +492,25 @@ bool RelayPool::accept(const std::shared_ptr<Batch> &batch, int queryIndex, cons
     const QString address = replaceableKey(event);
     if (state.query.maxContentLength > 0 && event.content.size() > state.query.maxContentLength) {
         // Noted so the result can say it was refused, should no version of
-        // its address that fits come. Only the first one per address is
-        // verified, which is enough to keep a relay from claiming a refusal
-        // with a forged event without hashing every oversized copy.
-        if (address.isEmpty() || state.events.contains(address) || state.oversized.contains(address))
+        // its address that fits come. Only the newest one per address is
+        // kept, since the sync judges it against its watermark, and only a
+        // version newer than the one held is verified, which keeps a relay
+        // from claiming a refusal with a forged event without hashing every
+        // oversized copy.
+        if (address.isEmpty() || state.events.contains(address))
+            return true;
+        const auto held = state.oversized.constFind(address);
+        if (held != state.oversized.cend() && (held->id == event.id || !event.isNewerThan(*held)))
             return true;
         if (!event.verify())
             return false;
-        state.oversized.insert(address, {event.kind, event.tag(QStringLiteral("d"))});
+        NostrEvent stripped;
+        stripped.id = event.id;
+        stripped.pubkey = event.pubkey;
+        stripped.createdAt = event.createdAt;
+        stripped.kind = event.kind;
+        stripped.tags = {{QStringLiteral("d"), event.tag(QStringLiteral("d"))}};
+        state.oversized.insert(address, stripped);
         return true;
     }
     const QString key = address.isEmpty() ? event.id : address;

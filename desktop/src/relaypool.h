@@ -50,9 +50,11 @@ struct NostrResult {
     QString error;
     // The events were cut off at the query's count or size cap.
     bool truncated = false;
-    // The kind and d tag of each replaceable event a relay sent only past
-    // the query's maxContentLength, so no version of it was kept.
-    QList<std::pair<int, QString>> oversized;
+    // The newest version of each replaceable event a relay sent only past
+    // the query's maxContentLength, so no version of it was kept. Only its
+    // id, author, date, kind and d tag are kept, so it can be judged against
+    // a watermark without holding the content that did not fit.
+    QList<NostrEvent> oversized;
     // A relay hint was not asked, past the batch's connection cap.
     bool deferred = false;
     // When the query went out.

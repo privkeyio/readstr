@@ -333,6 +333,10 @@ private:
     // What the pulls a follow-up replaced changed, said with its own.
     int m_syncAddedBefore = 0;
     int m_syncMarkedBefore = 0;
+    // Some pull added feeds that have not been fetched yet. Kept apart from
+    // the counts above, which a switch of account resets, so the feeds an
+    // earlier account's pull added are still fetched.
+    bool m_syncFeedsAdded = false;
     bool m_autoRefreshOn = false;
     QTimer m_autoRefresh;
 
