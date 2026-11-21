@@ -26,5 +26,9 @@
   "Exported %n feeds to %1": {
     "one": "Exported %n feed to %1",
     "other": "Exported %n feeds to %1"
+  },
+  "Synced with Nostr: %n feeds added, %1 articles marked read": {
+    "one": "Synced with Nostr: %n feed added, %1 articles marked read",
+    "other": "Synced with Nostr: %n feeds added, %1 articles marked read"
   }
 }

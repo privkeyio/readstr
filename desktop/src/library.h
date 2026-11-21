@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QString>
 #include <QUrl>
+#include <functional>
 #include <optional>
 #include <utility>
 
@@ -86,6 +87,8 @@ struct Import {
     int skipped = 0;
     // Outlines that are neither a web feed nor an npub.
     int unsupported = 0;
+    // The gate said to add nothing, so nothing was.
+    bool stopped = false;
     QString error;
 };
 // Reads and parses an OPML file (a regular file of at most Opml::maxBytes)
@@ -93,8 +96,13 @@ struct Import {
 // opened. Null with the reason in `error` when it cannot.
 std::optional<QList<Opml::Outline>> readOpml(const QString &path, QString *error);
 // Adds the feeds the outlines list that are not subscribed yet, all of them
-// or, when one cannot be saved, none; folders become categories.
-Import importOutlines(Store &store, const QList<Opml::Outline> &outlines);
+// or, when one cannot be saved, none; folders become categories. `gate`,
+// when set, runs first inside the same transaction, so what it reads cannot
+// change before the feeds are added and what it writes commits with them:
+// it returns false on a store failure, which rolls everything back, and
+// sets *proceed to false to add nothing.
+Import importOutlines(Store &store, const QList<Opml::Outline> &outlines,
+                      const std::function<bool(bool *proceed)> &gate = {});
 // readOpml() and then importOutlines().
 Import importFile(Store &store, const QString &path);
 // The subscriptions as OPML, or null with the reason in `error`.

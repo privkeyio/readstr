@@ -215,7 +215,8 @@ Import importFile(Store &store, const QString &path) {
     return outlines ? importOutlines(store, *outlines) : result;
 }
 
-Import importOutlines(Store &store, const QList<Opml::Outline> &outlines) {
+Import importOutlines(Store &store, const QList<Opml::Outline> &outlines,
+                      const std::function<bool(bool *proceed)> &gate) {
     Import result;
     // Unsupported outlines are set aside before de-duplication, so one
     // cannot shadow a supported one with the same key. An nprofile or a
@@ -247,6 +248,16 @@ Import importOutlines(Store &store, const QList<Opml::Outline> &outlines) {
     // nothing would fetch, and the subscriptions it reads cannot change
     // before it writes.
     const bool saved = store.transaction([&] {
+        if (gate) {
+            bool proceed = true;
+            if (!gate(&proceed))
+                return false;
+            if (!proceed) {
+                result = Import{};
+                result.stopped = true;
+                return true;
+            }
+        }
         const QList<Feed> feeds = store.feeds();
         if (!store.lastError().isEmpty())
             return false;

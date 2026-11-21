@@ -52,7 +52,7 @@ QString richText(const Article &article) {
 
 Backend::Backend(FilePicker *picker, QObject *parent)
     : QObject(parent), m_fetcher(std::make_unique<Fetcher>()), m_relays(std::make_unique<RelayPool>()),
-      m_thumbnails(std::make_unique<Thumbnails>()), m_picker(picker) {
+      m_syncRelays(std::make_unique<RelayPool>()), m_thumbnails(std::make_unique<Thumbnails>()), m_picker(picker) {
     m_openUrl = [](const QUrl &url) { return QDesktopServices::openUrl(url); };
     m_writeClipboard = [](const QString &text) { QGuiApplication::clipboard()->setText(text, QClipboard::Clipboard); };
     m_launch = &Backend::launchDetached;
@@ -65,6 +65,7 @@ Backend::Backend(FilePicker *picker, QObject *parent)
     m_thread.setObjectName(QStringLiteral("readstr-library"));
     m_thread.start();
 
+    m_syncRelays->setLimits(Sync::limits());
     m_autoRefresh.setSingleShot(true);
     connect(&m_autoRefresh, &QTimer::timeout, this, &Backend::refreshAll);
 
@@ -94,6 +95,7 @@ Backend::Backend(FilePicker *picker, QObject *parent)
     if (!m_storeOpen)
         setStatus(tr("Cannot open the library: %1").arg(m_store.lastError()), true);
     reloadLibrary();
+    reloadSyncAccount();
 }
 
 Backend::~Backend() {
@@ -104,6 +106,7 @@ Backend::~Backend() {
     m_autoRefresh.stop();
     m_fetcher.reset();
     m_relays.reset();
+    m_syncRelays.reset();
     m_thumbnails.reset();
     m_thread.quit();
     m_thread.wait();
@@ -702,8 +705,11 @@ void Backend::refreshAll() {
     }
     if (feeds.isEmpty()) {
         scheduleAutoRefresh();
+        // A new library may get its feeds from the sync.
+        sync();
         return;
     }
+    m_syncAfterRefresh = true;
     refresh(feeds);
 }
 
@@ -812,14 +818,11 @@ void Backend::refreshApplied(const Feed &feed, const Library::Refresh &outcome) 
     emit refreshFinished();
 
     // Feeds imported while this refresh ran have never been fetched.
-    if (m_fetchNewFeeds) {
-        m_fetchNewFeeds = false;
-        QList<Feed> fresh;
-        for (const Feed &candidate : m_store.feeds())
-            if (!candidate.lastFetchedAt.isValid())
-                fresh << candidate;
-        if (!fresh.isEmpty())
-            refresh(fresh);
+    if (std::exchange(m_fetchNewFeeds, false) && refreshUnfetched())
+        return;
+    if (std::exchange(m_syncAfterRefresh, false)) {
+        m_refreshStatus = {m_status, m_statusError};
+        sync();
     }
 }
 
@@ -836,6 +839,137 @@ int Backend::autoRefreshDelayMs(double unit) {
 void Backend::scheduleAutoRefresh() {
     if (m_autoRefreshOn)
         m_autoRefresh.start(autoRefreshDelayMs(QRandomGenerator::global()->generateDouble()));
+}
+
+QVariant Backend::syncedAt() const {
+    return m_syncAccount.syncedAt.isValid() ? QVariant(m_syncAccount.syncedAt.toLocalTime()) : QVariant();
+}
+
+void Backend::reloadSyncAccount() {
+    if (!m_storeOpen)
+        return;
+    const SyncAccount account = m_store.syncAccount();
+    if (!m_store.lastError().isEmpty()) {
+        setStatus(tr("Cannot read the library: %1").arg(m_store.lastError()), true);
+        return;
+    }
+    m_syncAccount = account;
+    emit syncChanged();
+}
+
+bool Backend::setSyncNpub(const QString &text) {
+    const auto account = Sync::account(text);
+    if (!account || !m_storeOpen)
+        return false;
+    writeOnWorker(
+        [account = *account](Store &store) {
+            return store.setSyncAccount(account.npub, account.pubkey, account.relays) ? 1 : -1;
+        },
+        tr("Cannot sync with %1: %2").arg(Nip19::shortNpub(account->npub, account->npub)),
+        [this, npub = account->npub](const WriteResult &result) {
+            if (!result.error.isEmpty()) {
+                setStatus(tr("Cannot sync with %1: %2").arg(Nip19::shortNpub(npub, npub), result.error), true);
+                return;
+            }
+            reloadSyncAccount();
+            sync();
+        });
+    return true;
+}
+
+void Backend::stopSync() {
+    if (!m_storeOpen || m_syncAccount.npub.isEmpty())
+        return;
+    const QString npub = m_syncAccount.npub;
+    writeOnWorker([](Store &store) { return store.clearSyncAccount() ? 1 : -1; },
+                  tr("Cannot stop syncing: %1"), [this, npub](const WriteResult &result) {
+                      if (!result.error.isEmpty()) {
+                          setStatus(tr("Cannot stop syncing: %1").arg(result.error), true);
+                          return;
+                      }
+                      reloadSyncAccount();
+                      setStatus(tr("Stopped syncing with %1").arg(Nip19::shortNpub(npub, npub)));
+                  });
+}
+
+void Backend::sync() {
+    if (m_syncing)
+        return;
+    if (!m_storeOpen || m_syncAccount.pubkey.isEmpty()) {
+        m_refreshStatus.reset();
+        return;
+    }
+    m_syncing = true;
+    emit syncChanged();
+    setStatus(tr("Syncing with Nostr…"));
+    const SyncAccount account = m_syncAccount;
+    m_syncRelays->queryEachHeld({Sync::query(account)}, [this, account](qsizetype, const NostrResult &found,
+                                                                       const RelayPool::Release &release) {
+        if (m_closing)
+            return;
+        onWorker<Sync::Outcome>([account, found](Store &store) { return Sync::apply(store, account, found); },
+                                [this, release, pubkey = account.pubkey](const Sync::Outcome &outcome) {
+                                    release();
+                                    syncApplied(outcome, pubkey);
+                                });
+    });
+}
+
+void Backend::syncApplied(const Sync::Outcome &outcome, const QString &pubkey) {
+    m_syncing = false;
+    emit syncChanged();
+    reloadSyncAccount();
+    // An npub set while the pull was out is pulled for now.
+    if (!m_syncAccount.pubkey.isEmpty() && m_syncAccount.pubkey != pubkey) {
+        sync();
+        return;
+    }
+    reloadLibrary();
+    const std::optional<std::pair<QString, bool>> refreshStatus = std::exchange(m_refreshStatus, std::nullopt);
+    QStringList errors = outcome.problems;
+    if (!outcome.error.isEmpty())
+        errors.prepend(outcome.error);
+    // Anything said while the relays were asked is newer than the refresh's
+    // message, so that comes back only over the syncing one.
+    const bool stillSyncing = m_status == tr("Syncing with Nostr…");
+    if (m_syncAccount.pubkey.isEmpty()) {
+        // Syncing was stopped while the pull was out, which is no failure.
+        // The window's own stop says so; a stop from elsewhere (`readstr
+        // sync logout`) must not leave "Syncing" up.
+        if (stillSyncing)
+            setStatus(refreshStatus ? refreshStatus->first : QString(), refreshStatus && refreshStatus->second);
+    } else if (!errors.isEmpty()) {
+        // Said on stderr too, since the status bar keeps only the latest.
+        for (const QString &error : std::as_const(errors))
+            qWarning("readstr: sync: %s", qPrintable(error));
+        setStatus(tr("Cannot sync with Nostr: %1").arg(errors.join("; ")), true);
+    } else if (refreshStatus && stillSyncing && outcome.added == 0 && outcome.markedRead == 0) {
+        // A sync that changed nothing would only hide what the refresh
+        // before it said, such as a feed that cannot be refreshed.
+        setStatus(refreshStatus->first, refreshStatus->second);
+    } else {
+        setStatus(tr("Synced with Nostr: %n feeds added, %1 articles marked read", nullptr, outcome.added)
+                      .arg(outcome.markedRead));
+    }
+    emit syncFinished();
+    if (outcome.added == 0)
+        return;
+    // The feeds the sync added have never been fetched.
+    if (m_refreshing)
+        m_fetchNewFeeds = true;
+    else
+        refreshUnfetched();
+}
+
+bool Backend::refreshUnfetched() {
+    QList<Feed> fresh;
+    for (const Feed &candidate : m_store.feeds())
+        if (!candidate.lastFetchedAt.isValid())
+            fresh << candidate;
+    if (fresh.isEmpty())
+        return false;
+    refresh(fresh);
+    return true;
 }
 
 void Backend::importOpml() {

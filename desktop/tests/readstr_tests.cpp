@@ -60,6 +60,7 @@
 #include "sanitizer.h"
 #include "sourcemodel.h"
 #include "store.h"
+#include "sync.h"
 #include "theme.h"
 #include "thumbnails.h"
 #include "translator.h"
@@ -376,12 +377,12 @@ private slots:
         {
             Store store;
             QVERIFY2(store.open(path), qPrintable(store.lastError()));
-            QCOMPARE(store.schemaVersion(), 4);
+            QCOMPARE(store.schemaVersion(), 5);
             QVERIFY(store.addFeed("https://a.example.com/feed", "A"));
         }
         Store again;
         QVERIFY2(again.open(path), qPrintable(again.lastError()));
-        QCOMPARE(again.schemaVersion(), 4);
+        QCOMPARE(again.schemaVersion(), 5);
         QCOMPARE(again.feeds().size(), 1);
 
         QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "raw");
@@ -551,7 +552,7 @@ private slots:
             for (int i = 0; i < 8; ++i)
                 threads << QThread::create([&failures, path] {
                     Store store;
-                    if (!store.open(path) || store.schemaVersion() != 4) {
+                    if (!store.open(path) || store.schemaVersion() != 5) {
                         qWarning("%s", qPrintable(store.lastError()));
                         ++failures;
                     }
@@ -606,7 +607,7 @@ private slots:
 
         Store writer;
         QVERIFY2(writer.open(path), qPrintable(writer.lastError()));
-        QCOMPARE(writer.schemaVersion(), 4);
+        QCOMPARE(writer.schemaVersion(), 5);
         QCOMPARE(writer.articles({0, false, false, 0}).size(), workers * perRound);
 
         // A reader in the middle of a transaction neither blocks a writer
@@ -1690,7 +1691,7 @@ private slots:
                 strings << match.captured(1);
         }
         const QString source = QFileInfo(QFINDTESTDATA("../src/backend.cpp")).absolutePath();
-        for (const char *name : {"backend.cpp", "sanitizer.cpp", "portalfilepicker.cpp"}) {
+        for (const char *name : {"backend.cpp", "sanitizer.cpp", "portalfilepicker.cpp", "sync.cpp"}) {
             QFile file(source + "/" + name);
             QVERIFY(file.open(QIODevice::ReadOnly));
             for (const auto &match : cppString.globalMatch(QString::fromUtf8(file.readAll())))
@@ -4088,6 +4089,632 @@ private slots:
         QVERIFY2(backend.status().startsWith("1 new article"), qPrintable(backend.status()));
     }
 
+    // Sync
+
+    void syncLogsInAndOutWithAnNpubOnly()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString npub = syncNpub();
+        QString out, err;
+        QCOMPARE(run({"sync"}, out, err), 1);
+        QVERIFY2(err.contains("sync login NPUB"), qPrintable(err));
+        err.clear();
+        QCOMPARE(run({"sync", "login", "npub1notreal"}, out, err), 1);
+        QVERIFY(err.contains("npub or nprofile"));
+        QCOMPARE(run({"sync", "login"}, out, err), 1);
+        QCOMPARE(run({"sync", "pull"}, out, err), 1);
+        QVERIFY(err.contains("unknown action"));
+
+        // An nprofile is kept as its npub, with its public relay hints.
+        const QByteArray key = QByteArray::fromHex(Nip19::decodeProfile(npub)->pubkey.toLatin1());
+        const QByteArray relay = "wss://relay.example.com";
+        const QString nprofile =
+            bech32("nprofile", QByteArray(1, 0) + char(32) + key + char(1) + char(relay.size()) + relay);
+        out.clear();
+        QCOMPARE(run({"sync", "login", "nostr:" + nprofile}, out, err), 0);
+        QVERIFY2(out.startsWith("Syncing with " + npub), qPrintable(out));
+        {
+            Store store;
+            QVERIFY(store.open());
+            const SyncAccount account = store.syncAccount();
+            QCOMPARE(account.npub, npub);
+            QCOMPARE(account.pubkey, Nip19::decodeProfile(npub)->pubkey);
+            QCOMPARE(account.relays, QStringList{QString::fromLatin1(relay)});
+            QVERIFY(!account.syncedAt.isValid());
+            QCOMPARE(Sync::query(account).extraRelays, account.relays);
+
+            // Another npub starts afresh; the same one keeps its watermarks.
+            QVERIFY(store.setSyncApplied(Sync::readStatusTag, 100));
+            QVERIFY(store.setSyncApplied(Sync::readStatusTag, 50));
+            QVERIFY(store.setSyncAccount(npub, account.pubkey, {}));
+            QCOMPARE(store.syncAccount().applied.value(Sync::readStatusTag), 100);
+            const QString other = Nip19::npub(QString(64, 'b'));
+            QVERIFY(store.setSyncAccount(other, QString(64, 'b'), {}));
+            QVERIFY(store.syncAccount().applied.isEmpty());
+            // A pull for the account before is not merged into this one's.
+            QCOMPARE(Sync::apply(store, account, NostrResult()).error, QString("the npub changed during the pull"));
+        }
+        out.clear();
+        QCOMPARE(run({"sync", "logout"}, out, err), 0);
+        QCOMPARE(out, "Stopped syncing with " + Nip19::npub(QString(64, 'b')) + "\n");
+        out.clear();
+        QCOMPARE(run({"sync", "logout"}, out, err), 0);
+        QCOMPARE(out, QString("Not syncing with any npub\n"));
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.syncAccount().npub.isEmpty());
+    }
+
+    // The web app's three events, pulled and merged into a library that
+    // already has some of it: subscriptions only added (its `deleted` list
+    // ignored), articles only marked read, views kept with local mute words.
+    void syncPullsAndMergesEachKind()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME", "READSTR_RELAYS"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        qputenv("READSTR_RELAYS", relay.url().toUtf8());
+        const QString author = Nip19::npub(QString(64, 'c'));
+        qint64 existing = 0;
+        {
+            Store store;
+            QVERIFY(store.open());
+            existing = store.addFeed("https://a.example.com/feed", "A");
+            ParsedItem one, two, three;
+            one.guid = one.title = "g1";
+            two.guid = two.title = "g2";
+            three.guid = three.title = "g3";
+            QCOMPARE(store.saveItems(existing, {one, two, three}), 3);
+            for (const Article &article : store.articles({}))
+                if (article.guid == "g3")
+                    QVERIFY(store.setRead(article.id, true));
+        }
+        relay.events = {
+            syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                      {{"rss", QJsonArray{"https://A.example.com/feed/", "https://b.example.com/rss",
+                                          "javascript:alert(1)", "file:///etc/passwd"}},
+                       {"nostr", QJsonArray{author, "npub1bad"}},
+                       {"categories", QJsonObject{{"https://b.example.com/rss", QJsonObject{{"name", "News"}}}}},
+                       {"tags", QJsonObject{{author, QJsonArray{"nostr"}}}},
+                       {"deleted", QJsonArray{"https://a.example.com/feed"}},
+                       {"lastUpdated", now}},
+                      now),
+            syncEvent(Sync::readStatusKind, Sync::readStatusTag, {{"itemGuids", QJsonArray{"g1", "later"}}}, now),
+            syncEvent(Sync::viewsKind, Sync::viewsTag,
+                      {{"views", QJsonArray{QJsonObject{{"id", "v1"},
+                                                        {"name", "Morning"},
+                                                        {"order", 3},
+                                                        {"source", QJsonObject{{"kind", "feed"}, {"feedId", "x"}}},
+                                                        {"keywords", QJsonObject{{"include", QJsonArray{"ai"}},
+                                                                                 {"exclude", QJsonArray{"leak"}}}}},
+                                            QJsonObject{{"name", "  "}}}}},
+                      now)};
+
+        QString out, err;
+        QCOMPARE(run({"sync", "login", syncNpub()}, out, err), 0);
+        out.clear();
+        QCOMPARE(run({"sync", "--json"}, out, err), 0);
+        QVERIFY2(err.isEmpty(), qPrintable(err));
+        QVERIFY(out.endsWith("}\n") && out.count('\n') == 1);
+        const QJsonObject json = QJsonDocument::fromJson(out.toUtf8()).object();
+        QCOMPARE(json.keys(), (QStringList{"added", "errors", "markedRead", "npub", "pendingRead", "skipped", "syncedAt",
+                                           "unsupported", "views"}));
+        QCOMPARE(json.value("npub").toString(), syncNpub());
+        QCOMPARE(json.value("added").toInt(), 2);
+        QCOMPARE(json.value("skipped").toInt(), 1);
+        QCOMPARE(json.value("unsupported").toInt(), 3);
+        QCOMPARE(json.value("markedRead").toInt(), 1);
+        QCOMPARE(json.value("pendingRead").toInt(), 1);
+        QCOMPARE(json.value("views").toInt(), 1);
+        QVERIFY(json.value("syncedAt").toString().endsWith('Z'));
+        QCOMPARE(json.value("errors").toArray(), QJsonArray());
+        // One request for the three events, by their d tags.
+        QCOMPARE(relay.filters.size(), 1);
+        QCOMPARE(relay.filters.first().value("#d").toArray(),
+                 (QJsonArray{"readstr-subscriptions", "readstr-read-status", "readstr-views"}));
+        QCOMPARE(relay.filters.first().value("kinds").toArray(), (QJsonArray{30404, 30405, 30406}));
+
+        Store store;
+        QVERIFY(store.open());
+        QHash<QString, Feed> feeds;
+        for (const Feed &feed : store.feeds())
+            feeds.insert(feed.url, feed);
+        QCOMPARE(feeds.size(), 3);
+        QVERIFY(feeds.contains("https://a.example.com/feed"));
+        QCOMPARE(feeds.value("https://b.example.com/rss").category, QString("News"));
+        QVERIFY(feeds.contains(author));
+        QHash<QString, bool> read;
+        for (const Article &article : store.articles({}))
+            read.insert(article.guid, article.read);
+        QCOMPARE(read, (QHash<QString, bool>{{"g1", true}, {"g2", false}, {"g3", true}}));
+        // A read article that arrives later comes in read.
+        ParsedItem later, other;
+        later.guid = later.title = "later";
+        other.guid = other.title = "other";
+        QCOMPARE(store.saveItems(feeds.value("https://b.example.com/rss").id, {later, other}), 2);
+        for (const Article &article : store.articles({}))
+            if (article.guid == "later" || article.guid == "other")
+                QCOMPARE(article.read, article.guid == "later");
+        QCOMPARE(store.pendingReadCount(), 0);
+
+        QList<SavedView> views = store.savedViews();
+        QCOMPARE(views.size(), 1);
+        QCOMPARE(views.first().id, QString("v1"));
+        QCOMPARE(views.first().view.value("name").toString(), QString("Morning"));
+        QCOMPARE(views.first().view.value("order").toInt(), 0);
+        QCOMPARE(views.first().view.value("keywords").toObject(), (QJsonObject{{"include", QJsonArray{"ai"}}}));
+        QVERIFY(views.first().exclude.isEmpty());
+
+        // The same events again change nothing, so a feed unsubscribed here
+        // stays gone and an article marked unread here stays unread.
+        QVERIFY(store.removeFeed(feeds.value("https://b.example.com/rss").id));
+        for (const Article &article : store.articles({}))
+            if (article.guid == "g1")
+                QVERIFY(store.setRead(article.id, false));
+        views.first().exclude = QStringList{"mute"};
+        QVERIFY(store.replaceSavedViews(views));
+        out.clear();
+        QCOMPARE(run({"sync", "--json"}, out, err), 0);
+        const QJsonObject again = QJsonDocument::fromJson(out.toUtf8()).object();
+        QCOMPARE(again.value("added").toInt(), 0);
+        QCOMPARE(again.value("markedRead").toInt(), 0);
+        QCOMPARE(store.feeds().size(), 2);
+
+        // Newer ones apply: a view renamed keeps its local mute words, and a
+        // local view the remote lacks stays.
+        views << SavedView{"local", QJsonObject{{"id", "local"}, {"name", "Mine"}, {"order", 1}}, {}};
+        QVERIFY(store.replaceSavedViews(views));
+        relay.events = {
+            syncEvent(Sync::readStatusKind, Sync::readStatusTag, {{"itemGuids", QJsonArray{"g2"}}}, now + 10),
+            syncEvent(Sync::viewsKind, Sync::viewsTag,
+                      {{"views", QJsonArray{QJsonObject{{"id", "v1"}, {"name", "Evening"},
+                                                        {"keywords", QJsonObject{{"exclude", QJsonArray{"remote"}}}}}}}},
+                      now + 10)};
+        out.clear();
+        QCOMPARE(run({"sync"}, out, err), 0);
+        QVERIFY2(out.startsWith("Synced with " + syncNpub() + ": 0 feeds added"), qPrintable(out));
+        read.clear();
+        for (const Article &article : store.articles({}))
+            read.insert(article.guid, article.read);
+        QCOMPARE(read, (QHash<QString, bool>{{"g1", false}, {"g2", true}, {"g3", true}}));
+        views = store.savedViews();
+        QCOMPARE(views.size(), 2);
+        QCOMPARE(views.first().view.value("name").toString(), QString("Evening"));
+        QVERIFY(!views.first().view.contains("keywords"));
+        QCOMPARE(views.first().exclude, QStringList{"mute"});
+        QCOMPARE(views.last().id, QString("local"));
+    }
+
+    // RelayPool's checks hold for sync events: another author's, another
+    // kind's, another d tag's, and a forged one are never applied.
+    void syncRejectsEventsItDidNotAskFor()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        FakeRelay relay, forger;
+        const EnvironmentGuard guard({"READSTR_HOME", "READSTR_RELAYS"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        qputenv("READSTR_RELAYS", (relay.url() + "," + forger.url()).toUtf8());
+        const QJsonObject list{{"rss", QJsonArray{"https://evil.example.com/feed"}}, {"nostr", QJsonArray()}};
+        const QString content = QString::fromUtf8(QJsonDocument(list).toJson(QJsonDocument::Compact));
+        relay.events = {signedEvent(Sync::subscriptionsKind, content, {{"d", Sync::subscriptionsTag}}, now, 2),
+                        signedEvent(30023, content, {{"d", Sync::subscriptionsTag}}, now),
+                        signedEvent(Sync::subscriptionsKind, content, {{"d", "other"}}, now),
+                        signedEvent(Sync::readStatusKind, content, {{"d", Sync::subscriptionsTag}}, now),
+                        syncEvent(Sync::readStatusKind, Sync::readStatusTag, {{"itemGuids", QJsonArray{"g1"}}}, now)};
+        QJsonObject forged = syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                                       {{"rss", QJsonArray()}, {"nostr", QJsonArray()}}, now + 5);
+        forged.insert("content", content);
+        forger.events = {forged};
+
+        QString out, err;
+        QCOMPARE(run({"sync", "login", syncNpub()}, out, err), 0);
+        out.clear();
+        QCOMPARE(run({"sync", "--json"}, out, err), 0);
+        QVERIFY2(err.isEmpty(), qPrintable(err));
+        const QJsonObject json = QJsonDocument::fromJson(out.toUtf8()).object();
+        QCOMPARE(json.value("added").toInt(), 0);
+        QCOMPARE(json.value("pendingRead").toInt(), 1);
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.feeds().isEmpty());
+        QVERIFY(!store.syncAccount().applied.contains(Sync::subscriptionsTag));
+
+        // No relay answering is a failure, said on stderr.
+        relay.closeWith = "blocked: no";
+        forger.closeWith = "blocked: no";
+        out.clear();
+        err.clear();
+        QCOMPARE(run({"sync", "--json"}, out, err), 1);
+        QVERIFY2(err.contains("blocked: no"), qPrintable(err));
+        QVERIFY(QJsonDocument::fromJson(out.toUtf8()).object().value("errors").toArray().first().toString().contains(
+            "blocked: no"));
+    }
+
+    // Payloads past the web app's caps are refused whole and said so; an
+    // event dated days ahead, or too large, is passed over for the newest
+    // one that fits; and a list with nothing applied is tried again.
+    void syncEnforcesCapsAndDates()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME", "READSTR_RELAYS"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        qputenv("READSTR_RELAYS", relay.url().toUtf8());
+        QJsonArray tooMany;
+        for (int i = 0; i <= Sync::maxFeeds; ++i)
+            tooMany << QStringLiteral("https://f%1.example.com/feed").arg(i);
+        QJsonArray views;
+        for (int i = 0; i <= Sync::maxRemoteViews; ++i)
+            views << QJsonObject{{"name", QString::number(i)}};
+        relay.events = {
+            syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, {{"rss", tooMany}, {"nostr", QJsonArray()}}, now),
+            syncEvent(Sync::readStatusKind, Sync::readStatusTag,
+                      {{"itemGuids", QJsonArray{QString(Sync::maxGuidLength + 1, 'g')}}}, now),
+            syncEvent(Sync::viewsKind, Sync::viewsTag, {{"views", views}}, now)};
+
+        QString out, err;
+        QCOMPARE(run({"sync", "login", syncNpub()}, out, err), 0);
+        out.clear();
+        QCOMPARE(run({"sync", "--json"}, out, err), 1);
+        for (const char *problem : {"subscription list", "read status", "saved views"})
+            QVERIFY2(err.contains(problem), qPrintable(err));
+        QCOMPARE(QJsonDocument::fromJson(out.toUtf8()).object().value("errors").toArray().size(), 3);
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.feeds().isEmpty());
+            QVERIFY(store.syncAccount().applied.isEmpty());
+        }
+
+        // Older events that fit, beside a newer one too large and one dated
+        // three days ahead.
+        relay.events = {
+            syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                      {{"rss", QJsonArray{"https://ok.example.com/feed", "ftp://x.example.com/feed"}},
+                       {"nostr", QJsonArray()}},
+                      now),
+            syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                      {{"rss", QJsonArray{"https://future.example.com/feed"}}, {"nostr", QJsonArray()}},
+                      QDateTime::currentSecsSinceEpoch() + 3 * 24 * 3600),
+            syncEvent(Sync::readStatusKind, Sync::readStatusTag, {{"itemGuids", QJsonArray{"small"}}}, now),
+            syncEvent(Sync::readStatusKind, Sync::readStatusTag,
+                      {{"itemGuids", QJsonArray{"big"}}, {"padding", QString(Sync::maxContentLength, 'x')}}, now + 5)};
+        out.clear();
+        err.clear();
+        QCOMPARE(run({"sync", "--json"}, out, err), 0);
+        QVERIFY2(err.isEmpty(), qPrintable(err));
+        const QJsonObject json = QJsonDocument::fromJson(out.toUtf8()).object();
+        QCOMPARE(json.value("added").toInt(), 1);
+        QCOMPARE(json.value("unsupported").toInt(), 1);
+        Store store;
+        QVERIFY(store.open());
+        QCOMPARE(store.feeds().size(), 1);
+        QCOMPARE(store.feeds().first().url, QString("https://ok.example.com/feed"));
+        QCOMPARE(store.syncAccount().applied.value(Sync::readStatusTag), now);
+    }
+
+    // Another writer on the same library (the window and `readstr sync`)
+    // may apply a newer event while a pull is out, or the npub be stopped
+    // and set again; the pull's events are judged against the library as it
+    // is when the pull writes, not as it was when the pull began.
+    void syncJudgesFreshnessWhenItWrites()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store, other;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        QVERIFY2(other.open(path), qPrintable(other.lastError()));
+        const SyncAccount login = *Sync::account(syncNpub());
+        QVERIFY(store.setSyncAccount(login.npub, login.pubkey, {}));
+        // A library with feeds, so the subscription list's watermark counts.
+        QVERIFY(store.addFeed("https://a.invalid/feed", "A"));
+        const auto subscriptions = [](const char *url, qint64 at) {
+            return syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                             {{"rss", QJsonArray{url}}, {"nostr", QJsonArray()}}, at);
+        };
+        const auto read = [](const char *guid, qint64 at) {
+            return syncEvent(Sync::readStatusKind, Sync::readStatusTag, {{"itemGuids", QJsonArray{guid}}}, at);
+        };
+        const auto views = [](const char *name, qint64 at) {
+            return syncEvent(Sync::viewsKind, Sync::viewsTag,
+                             {{"views", QJsonArray{QJsonObject{{"id", "v"}, {"name", name}}}}}, at);
+        };
+
+        const SyncAccount stale = store.syncAccount();
+        Sync::Outcome outcome = Sync::apply(
+            other, other.syncAccount(),
+            syncResult({subscriptions("https://new.invalid/feed", now + 20), read("new", now + 20), views("New", now + 20)}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.error));
+        QCOMPARE(outcome.added, 1);
+        // The pull that began before holds older versions and applies none.
+        outcome = Sync::apply(
+            store, stale,
+            syncResult({subscriptions("https://old.invalid/feed", now + 15), read("old", now + 15), views("Old", now + 15)}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.error));
+        QCOMPARE(outcome.added, 0);
+        QCOMPARE(outcome.markedRead, 0);
+        QCOMPARE(store.feeds().size(), 2);
+        QCOMPARE(store.savedViews().first().view.value("name").toString(), QString("New"));
+        QCOMPARE(store.syncAccount().applied.value(Sync::readStatusTag), now + 20);
+        ParsedItem oldItem, newItem;
+        oldItem.guid = oldItem.title = "old";
+        newItem.guid = newItem.title = "new";
+        QCOMPARE(store.saveItems(store.feeds().first().id, {oldItem, newItem}), 2);
+        for (const Article &article : store.articles({}))
+            QCOMPARE(article.read, article.guid == "new");
+
+        // Stopped and set again while a pull was out: what was applied for
+        // the npub before is forgotten, so the pull's events apply rather
+        // than being held to the old watermarks.
+        const SyncAccount before = store.syncAccount();
+        QVERIFY(other.clearSyncAccount());
+        QVERIFY(other.setSyncAccount(login.npub, login.pubkey, {}));
+        outcome = Sync::apply(store, before, syncResult({read("old", now + 10), views("Again", now + 10)}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.error));
+        QCOMPARE(outcome.markedRead, 1);
+        QCOMPARE(store.syncAccount().applied.value(Sync::readStatusTag), now + 10);
+        QCOMPARE(store.savedViews().first().view.value("name").toString(), QString("Again"));
+        QVERIFY(store.syncAccount().syncedAt.isValid());
+
+        // Stopped while a pull was out: nothing is applied or dated.
+        const SyncAccount gone = store.syncAccount();
+        QVERIFY(other.clearSyncAccount());
+        outcome = Sync::apply(store, gone, syncResult({views("Late", now + 30)}));
+        QCOMPARE(outcome.error, QString("the npub changed during the pull"));
+        QCOMPARE(store.savedViews().first().view.value("name").toString(), QString("Again"));
+        QVERIFY(store.syncAccount().npub.isEmpty());
+
+        // A newer event committed by the other writer after this pull's first
+        // check, but before it writes: the check inside each write refuses
+        // the pull's older events.
+        QVERIFY(store.setSyncAccount(login.npub, login.pubkey, {}));
+        QVERIFY(store.addFeed("https://b.invalid/feed", "B"));
+        const SyncAccount racing = store.syncAccount();
+        const qsizetype feedsBefore = store.feeds().size();
+        outcome = Sync::apply(
+            store, racing,
+            syncResult({subscriptions("https://race.invalid/feed", now + 50), read("race", now + 50),
+                        views("Race", now + 50)}),
+            [&] {
+                const Sync::Outcome won = Sync::apply(
+                    other, other.syncAccount(),
+                    syncResult({subscriptions("https://won.invalid/feed", now + 60), read("won", now + 60),
+                                views("Won", now + 60)}));
+                QVERIFY2(won.error.isEmpty() && won.problems.isEmpty(), qPrintable(won.error));
+            });
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.error));
+        QCOMPARE(outcome.added, 0);
+        QCOMPARE(store.feeds().size(), feedsBefore + 1);
+        for (const Feed &feed : store.feeds())
+            QVERIFY(feed.url != "https://race.invalid/feed");
+        QCOMPARE(store.savedViews().first().view.value("name").toString(), QString("Won"));
+        QCOMPARE(store.syncAccount().applied.value(Sync::readStatusTag), now + 60);
+        QCOMPARE(store.syncAccount().applied.value(Sync::subscriptionsTag), now + 60);
+
+        // Stopped by the other writer between the first check and the writes:
+        // the import's gate sees it and nothing is added.
+        const SyncAccount stopping = store.syncAccount();
+        outcome = Sync::apply(store, stopping, syncResult({subscriptions("https://late.invalid/feed", now + 70)}),
+                              [&] { QVERIFY(other.clearSyncAccount()); });
+        QCOMPARE(outcome.error, QString("the npub changed during the pull"));
+        for (const Feed &feed : store.feeds())
+            QVERIFY(feed.url != "https://late.invalid/feed");
+    }
+
+    // Whoever holds the npub's key picks the synced feeds, which the window
+    // fetches at once, so none on this machine or the local network is
+    // added; OPML import, from a file the user picked, still takes them.
+    void syncLeavesOutLocalFeeds()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
+        const SyncAccount account = *Sync::account(syncNpub());
+        QVERIFY(store.setSyncAccount(account.npub, account.pubkey, {}));
+        const Sync::Outcome outcome = Sync::apply(
+            store, store.syncAccount(),
+            syncResult({syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                                  {{"rss", QJsonArray{"http://127.0.0.1:8080/feed", "http://192.168.1.2/rss",
+                                                      "http://localhost/feed", "http://[::1]/feed",
+                                                      "http://router/feed", "https://ok.invalid/feed"}},
+                                   {"nostr", QJsonArray()}},
+                                  now)}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.error));
+        QCOMPARE(outcome.added, 1);
+        QCOMPARE(outcome.unsupported, 5);
+        QCOMPARE(store.feeds().size(), 1);
+        QCOMPARE(store.feeds().first().url, QString("https://ok.invalid/feed"));
+
+        const Library::Import imported =
+            Library::importOutlines(store, {Opml::Outline{{}, "http://127.0.0.1:8080/feed", {}, {}, {}}});
+        QCOMPARE(imported.added, 1);
+    }
+
+    // A lastUpdated past the safe integers, or with a fraction, is refused
+    // as zod refuses it, rather than cast (undefined for 1e300).
+    void syncRefusesAnUnsafeLastUpdated()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
+        const SyncAccount account = *Sync::account(syncNpub());
+        QVERIFY(store.setSyncAccount(account.npub, account.pubkey, {}));
+        for (const double lastUpdated : {1e300, 9007199254740992.0, 1.5, -1.0}) {
+            const Sync::Outcome outcome = Sync::apply(
+                store, store.syncAccount(),
+                syncResult({syncEvent(Sync::readStatusKind, Sync::readStatusTag,
+                                      {{"itemGuids", QJsonArray{"g"}}, {"lastUpdated", lastUpdated}}, now)}));
+            QVERIFY(outcome.error.isEmpty());
+            QCOMPARE(outcome.problems, QStringList{"the read status does not fit the web app's format"});
+        }
+        const Sync::Outcome outcome = Sync::apply(
+            store, store.syncAccount(),
+            syncResult({syncEvent(Sync::readStatusKind, Sync::readStatusTag,
+                                  {{"itemGuids", QJsonArray{"g"}}, {"lastUpdated", 9007199254740991.0}}, now)}));
+        QVERIFY(outcome.problems.isEmpty());
+        QCOMPARE(outcome.pendingRead, 1);
+    }
+
+    // A view without an id gets the same one from every newer event, so it
+    // is updated in place rather than piling up as copies.
+    void syncKeepsOneCopyOfAViewWithoutAnId()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
+        const SyncAccount account = *Sync::account(syncNpub());
+        QVERIFY(store.setSyncAccount(account.npub, account.pubkey, {}));
+        for (qint64 at : {now, now + 1, now + 2}) {
+            const Sync::Outcome outcome = Sync::apply(
+                store, store.syncAccount(),
+                syncResult({syncEvent(Sync::viewsKind, Sync::viewsTag,
+                                      {{"views", QJsonArray{QJsonObject{{"name", "Morning"}}}}}, at)}));
+            QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.error));
+            QCOMPARE(outcome.views, 1);
+        }
+        QVERIFY(store.savedViews().first().id.startsWith("synced-"));
+    }
+
+    // Only the kind and d tag pairs asked for are kept, so an event of one
+    // kind carrying another's d tag cannot fill the byte cap and push the
+    // real one out; a pull cut short anyway says so and is not dated.
+    void syncKeepsOnlyThePairsItAsksFor()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        FakeRelay relay;
+        const SyncAccount account = *Sync::account(syncNpub());
+        const QJsonObject real =
+            syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, {{"rss", QJsonArray()}, {"nostr", QJsonArray()}}, now);
+        relay.events = {signedEvent(Sync::readStatusKind, QString(100000, 'x'), {{"d", Sync::subscriptionsTag}}, now + 5),
+                        signedEvent(Sync::viewsKind, QString(100000, 'x'), {{"d", Sync::readStatusTag}}, now + 5),
+                        real};
+        RelayPool pool;
+        RelayPool::Limits limits = Sync::limits();
+        limits.maxBytesPerQuery = 50000;
+        pool.setLimits(limits);
+        pool.setRelays({relay.url()});
+        const NostrResult result = pool.query(Sync::query(account));
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QVERIFY(!result.truncated);
+        QCOMPARE(result.events.size(), 1);
+        QCOMPARE(result.events.first().id, real.value("id").toString());
+
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
+        QVERIFY(store.setSyncAccount(account.npub, account.pubkey, {}));
+        NostrResult truncated = syncResult({syncEvent(Sync::readStatusKind, Sync::readStatusTag,
+                                                      {{"itemGuids", QJsonArray{"g"}}}, now)});
+        truncated.truncated = true;
+        const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), truncated);
+        QVERIFY(outcome.error.isEmpty());
+        QCOMPARE(outcome.problems, QStringList{"the relays sent more than fits, so some sync events may be missing"});
+        QCOMPARE(outcome.pendingRead, 1);
+        QVERIFY(!store.syncAccount().syncedAt.isValid());
+    }
+
+    void syncMigratesALibraryFromVersionFour()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        {
+            QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "v4");
+            raw.setDatabaseName(path);
+            QVERIFY(raw.open());
+            QSqlQuery query(raw);
+            QStringList statements = versionOneSchema();
+            statements << "ALTER TABLE items ADD COLUMN address TEXT"
+                       << "ALTER TABLE items ADD COLUMN revision INTEGER"
+                       << "CREATE INDEX items_by_address ON items(feed_id, address) WHERE address IS NOT NULL"
+                       << "ALTER TABLE feeds ADD COLUMN relay_hints TEXT"
+                       << "ALTER TABLE feeds ADD COLUMN profile_revision INTEGER"
+                       << "ALTER TABLE feeds ADD COLUMN profile_event_id TEXT"
+                       << "ALTER TABLE feeds ADD COLUMN profile_title TEXT"
+                       << "ALTER TABLE feeds ADD COLUMN complete_at INTEGER"
+                       << "ALTER TABLE items ADD COLUMN media_url TEXT"
+                       << "ALTER TABLE items ADD COLUMN thumbnail_url TEXT"
+                       << "ALTER TABLE items ADD COLUMN duration REAL"
+                       << "ALTER TABLE feeds ADD COLUMN incomplete INTEGER NOT NULL DEFAULT 0"
+                       << "INSERT INTO feeds (url, url_key, title, created_at) VALUES ('https://a.example.com/feed',"
+                          " 'a.example.com/feed', 'A', 1)"
+                       << "INSERT INTO items (feed_id, guid, title, created_at, is_starred) VALUES (1, 'old', 'Old', 1, 1)"
+                       << "PRAGMA user_version = 4";
+            for (const QString &statement : statements)
+                QVERIFY2(query.exec(statement), qPrintable(query.lastError().text()));
+            query = QSqlQuery();
+            raw.close();
+            raw = QSqlDatabase();
+            QSqlDatabase::removeDatabase("v4");
+        }
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        QCOMPARE(store.schemaVersion(), 5);
+        QCOMPARE(store.articles({}).first().title, QString("Old"));
+        QVERIFY(store.articles({}).first().starred);
+        const SyncAccount none = store.syncAccount();
+        QVERIFY(store.lastError().isEmpty());
+        QVERIFY(none.npub.isEmpty());
+        QVERIFY(store.savedViews().isEmpty());
+        QCOMPARE(store.applyReadGuids({"old", "new"}), 1);
+        QCOMPARE(store.pendingReadCount(), 1);
+        QVERIFY(store.articles({}).first().read);
+        QVERIFY(store.setSyncAccount(Nip19::npub(QString(64, 'a')), QString(64, 'a'), {}));
+        QVERIFY(store.recordSynced(QDateTime::currentDateTimeUtc()));
+        QVERIFY(store.syncAccount().syncedAt.isValid());
+    }
+
+    // The window pulls once the dialog sets an npub, and after a refresh of
+    // every feed, and says in the status bar what came of it.
+    void backendSyncsAfterLoginAndRefresh()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        // The account follows its own author, whose profile names the feed.
+        const QString author = syncNpub();
+        relay.events = {syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                                  {{"rss", QJsonArray()}, {"nostr", QJsonArray{author}}}, now),
+                        signedEvent(0, R"({"name":"me"})", {}, now)};
+
+        Backend backend;
+        backend.setRelays({relay.url()});
+        QSignalSpy synced(&backend, &Backend::syncFinished);
+        QVERIFY(!backend.setSyncNpub("not an npub"));
+        QVERIFY(backend.syncNpub().isEmpty());
+        QVERIFY(backend.setSyncNpub(syncNpub()));
+        QVERIFY(synced.wait(10000));
+        QVERIFY2(backend.status().startsWith("Synced with Nostr: 1 feed"), qPrintable(backend.status()));
+        QVERIFY(!backend.statusError());
+        QCOMPARE(backend.syncNpub(), syncNpub());
+        QVERIFY(backend.syncedAt().isValid());
+        // The feed it added is fetched at once.
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        QVERIFY(finished.wait(10000));
+        QCOMPARE(backend.feedCount(), 1);
+
+        relay.closeWith = "blocked: no";
+        backend.refreshAll();
+        QVERIFY(synced.wait(10000));
+        QVERIFY2(backend.status().startsWith("Cannot sync with Nostr: "), qPrintable(backend.status()));
+        QVERIFY(backend.statusError());
+
+        backend.stopSync();
+        QTRY_VERIFY(backend.syncNpub().isEmpty());
+        QVERIFY(backend.status().startsWith("Stopped syncing with npub1"));
+    }
+
     // Markdown
 
     void markdownRendersTheAllowedSubset()
@@ -4508,7 +5135,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 4);
+        QCOMPARE(store.schemaVersion(), 5);
         QList<Article> articles = store.articles({});
         QCOMPARE(articles.size(), 1);
         QCOMPARE(articles.first().title, QString("Old"));
@@ -4571,7 +5198,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 4);
+        QCOMPARE(store.schemaVersion(), 5);
         const QList<Feed> feeds = store.feeds();
         QCOMPARE(feeds.size(), 2);
         for (const Feed &feed : feeds) {
@@ -4881,7 +5508,7 @@ private slots:
         {
             Store store;
             QVERIFY2(store.open(path), qPrintable(store.lastError()));
-            QCOMPARE(store.schemaVersion(), 4);
+            QCOMPARE(store.schemaVersion(), 5);
             const QList<Feed> feeds = store.feeds();
             QCOMPARE(feeds.size(), 1);
             QCOMPARE(feeds.first().title, QString("Ada"));
@@ -5639,6 +6266,28 @@ private:
                 {"tags", tagArray},
                 {"content", content},
                 {"sig", QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(signature), 64).toHex())}};
+    }
+
+    // The test key's public key and npub, which the sync tests pull for.
+    static QString syncPubkey() { return signedEvent(1, "", {}, 1).value("pubkey").toString(); }
+    static QString syncNpub() { return Nip19::npub(syncPubkey()); }
+
+    // A sync event as the web app publishes it: `content` as JSON, with its
+    // d tag and client tag.
+    static QJsonObject syncEvent(int kind, const char *dTag, const QJsonObject &content, qint64 createdAt)
+    {
+        return signedEvent(kind, QString::fromUtf8(QJsonDocument(content).toJson(QJsonDocument::Compact)),
+                           {{"d", dTag}, {"client", "readstr"}}, createdAt);
+    }
+
+    // What a relay that answered would hand Sync::apply for these events.
+    static NostrResult syncResult(const QList<QJsonObject> &events)
+    {
+        NostrResult result;
+        result.relays = result.answered = 1;
+        for (const QJsonObject &event : events)
+            result.events << *NostrEvent::fromJson(event);
+        return result;
     }
 
     // Restores the variables a test changes, so later tests see the original

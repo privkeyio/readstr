@@ -22,6 +22,13 @@ QJsonObject NostrQuery::filter() const {
     QJsonObject object{{"authors", QJsonArray{author}}, {"kinds", kindArray}, {"limit", limit}};
     if (since > 0)
         object.insert("since", since);
+    if (!dTags.isEmpty()) {
+        QStringList values;
+        for (const auto &[kind, dTag] : dTags)
+            if (!values.contains(dTag))
+                values << dTag;
+        object.insert("#d", QJsonArray::fromStringList(values));
+    }
     return object;
 }
 
@@ -468,7 +475,10 @@ bool RelayPool::accept(const std::shared_ptr<Batch> &batch, int queryIndex, cons
     // Dropped before anything costly.
     if (state.delivered || event.pubkey != state.query.author || !state.query.kinds.contains(event.kind)
         || event.createdAt < state.query.since
-        || event.createdAt > QDateTime::currentSecsSinceEpoch() + maxClockSkew)
+        || event.createdAt > QDateTime::currentSecsSinceEpoch() + maxClockSkew
+        || (!state.query.dTags.isEmpty()
+            && !state.query.dTags.contains(std::pair(event.kind, event.tag(QStringLiteral("d")))))
+        || (state.query.maxContentLength > 0 && event.content.size() > state.query.maxContentLength))
         return true;
     const QString address = replaceableKey(event);
     const QString key = address.isEmpty() ? event.id : address;

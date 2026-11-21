@@ -6,6 +6,7 @@
         <file alias="ReaderPane.qml">ReaderPane.qml</file>
         <file alias="AddFeedDialog.qml">AddFeedDialog.qml</file>
         <file alias="UnsubscribeDialog.qml">UnsubscribeDialog.qml</file>
+        <file alias="SyncDialog.qml">SyncDialog.qml</file>
         <file alias="ShortcutsOverlay.qml">ShortcutsOverlay.qml</file>
         <file alias="i18n/en.json">i18n/en.json</file>
         <file alias="i18n/da.json">i18n/da.json</file>

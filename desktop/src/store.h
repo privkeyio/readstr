@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QDateTime>
+#include <QHash>
+#include <QJsonObject>
 #include <QList>
 #include <QSqlDatabase>
 #include <QString>
@@ -55,6 +57,28 @@ struct Article {
     // The feed's URL, an npub for a Nostr author, so its title can be shown
     // as Nip19::shortNpub shows it.
     QString feedUrl;
+};
+
+// The npub the library pulls sync events for: a public key only, since
+// Readstr reads them and never signs. Empty when none is set.
+struct SyncAccount {
+    QString npub;
+    // 64 lowercase hex characters.
+    QString pubkey;
+    // The nprofile's relay hints, asked besides the configured relays.
+    QStringList relays;
+    // When a pull last reached a relay and was merged, invalid until one has.
+    QDateTime syncedAt;
+    // The created_at of the last event applied, by d tag.
+    QHash<QString, qint64> applied;
+};
+
+// A saved view as kind 30406 carries it, without keywords.exclude, and the
+// mute words that stay on this machine.
+struct SavedView {
+    QString id;
+    QJsonObject view;
+    QStringList exclude;
 };
 
 struct ArticleFilter {
@@ -118,8 +142,9 @@ public:
     // Records a fetch attempt: validators on success, the reason on failure.
     bool recordFetch(qint64 id, const QString &etag, const QString &lastModified, const QString &error);
     // Adds new items and refreshes existing ones (same guid in the same feed)
-    // without touching their read and starred flags. Returns how many are new,
-    // or -1 on failure.
+    // without touching their read and starred flags. A new one is read when
+    // its guid is among the last synced read GUIDs. Returns how many are
+    // new, or -1 on failure.
     int saveItems(qint64 feedId, const QList<ParsedItem> &items);
 
     QList<Article> articles(const ArticleFilter &filter);
@@ -131,6 +156,26 @@ public:
     // unread. Returns how many changed, or -1 on failure.
     int markRead(const ArticleFilter &filter, qint64 upToId);
     bool setStarred(qint64 articleId, bool starred);
+
+    // Empty, with lastError() set, when it cannot be read.
+    SyncAccount syncAccount();
+    // Sets the sync account. Another npub than the current one starts
+    // afresh, forgetting what was applied for the last.
+    bool setSyncAccount(const QString &npub, const QString &pubkey, const QStringList &relays);
+    // Forgets the account and what was pulled for it; subscriptions, read
+    // marks, and saved views stay.
+    bool clearSyncAccount();
+    // Moves the d tag's watermark up to `createdAt`, never down.
+    bool setSyncApplied(const QString &dTag, qint64 createdAt);
+    bool recordSynced(const QDateTime &time);
+    // Remembers `guids` in place of the last list and marks the unread
+    // articles with any of them read, as saveItems() does for articles that
+    // come later. Returns how many changed, or -1 on failure.
+    int applyReadGuids(const QStringList &guids);
+    // The remembered read GUIDs no article has yet, or -1 on failure.
+    int pendingReadCount();
+    QList<SavedView> savedViews();
+    bool replaceSavedViews(const QList<SavedView> &views);
 
     // Runs `work` in one transaction that commits when it returns true and
     // rolls back when it returns false, keeping its lastError(), or throws,
@@ -149,6 +194,7 @@ private:
     bool fail(const QString &message);
     bool setFlag(const char *column, qint64 articleId, bool value);
     qint64 categoryId(const QString &name);
+    bool clearSyncState();
 
     QString m_connection;
     QSqlDatabase m_db;

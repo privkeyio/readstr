@@ -9,6 +9,7 @@
 #include <QUrl>
 #include <functional>
 #include <memory>
+#include <utility>
 
 #include "nostrevent.h"
 
@@ -22,6 +23,14 @@ struct NostrQuery {
     qint64 since = 0;
     // Relays to ask besides the pool's own, such as an nprofile's hints.
     QStringList extraRelays;
+    // When set, only events whose kind and d tag are one of these pairs. The
+    // "#d" filter can only ask for the d tags across every kind, so a kind
+    // carrying another kind's d tag, which would take up the query's byte
+    // cap, is dropped here.
+    QList<std::pair<int, QString>> dTags;
+    // When set, events whose content is longer are passed over rather than
+    // kept, so a huge newer version cannot hide a smaller older one.
+    qsizetype maxContentLength = 0;
 
     QJsonObject filter() const;
 };

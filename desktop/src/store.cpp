@@ -99,6 +99,36 @@ const QList<QStringList> migrations = {
         // after it.
         "ALTER TABLE feeds ADD COLUMN incomplete INTEGER NOT NULL DEFAULT 0",
     },
+    {
+        // The npub whose sync events are pulled (a public key only, as
+        // Readstr never signs), its nprofile's relay hints, and when a pull
+        // last succeeded. One row at most.
+        "CREATE TABLE sync_account ("
+        " id INTEGER PRIMARY KEY CHECK (id = 1),"
+        " npub TEXT NOT NULL,"
+        " pubkey TEXT NOT NULL,"
+        " relay_hints TEXT,"
+        " synced_at INTEGER)",
+        // The created_at of the last event applied per d tag, so an older
+        // or repeated one is never applied again, as the web app keeps it.
+        "CREATE TABLE sync_applied ("
+        " d_tag TEXT PRIMARY KEY,"
+        " created_at INTEGER NOT NULL)",
+        // The read GUIDs of the last kind 30405 event applied (when the web
+        // app publishes one; it does not yet), so articles that arrive later
+        // are marked read too.
+        "CREATE TABLE sync_read (guid TEXT PRIMARY KEY) WITHOUT ROWID",
+        // Read GUIDs are matched across feeds, as the web app keys them.
+        "CREATE INDEX items_by_guid ON items(guid)",
+        // Saved views from kind 30406, in order: the view as the web app
+        // publishes it (without keywords.exclude) as JSON, and the mute words
+        // (a JSON array), which are local only and never come from a relay.
+        "CREATE TABLE saved_views ("
+        " id TEXT PRIMARY KEY,"
+        " position INTEGER NOT NULL,"
+        " view TEXT NOT NULL,"
+        " exclude TEXT)",
+    },
 };
 
 std::atomic<int> connectionCounter{0};
@@ -139,6 +169,13 @@ QVariant timestamp(const QDateTime &time) {
 // NULL for none.
 QVariant text(const QString &value) {
     return value.isEmpty() ? QVariant(QMetaType::fromType<QString>()) : QVariant(value);
+}
+
+// NULL for none, otherwise a JSON array.
+QVariant jsonList(const QStringList &values) {
+    if (values.isEmpty())
+        return QVariant(QMetaType::fromType<QString>());
+    return QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(values)).toJson(QJsonDocument::Compact));
 }
 }
 
@@ -545,7 +582,8 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
     exists.prepare(QStringLiteral("SELECT 1 FROM items WHERE feed_id = ? AND guid = ?"));
     upsert.prepare(QStringLiteral(
         "INSERT INTO items (feed_id, guid, title, url, author, summary, content, published_at, created_at, address,"
-        " revision, media_url, thumbnail_url, duration) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " revision, media_url, thumbnail_url, duration, is_read) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+        " EXISTS (SELECT 1 FROM sync_read WHERE guid = ?))"
         " ON CONFLICT(feed_id, guid) DO UPDATE SET title = excluded.title, url = excluded.url,"
         " author = excluded.author, summary = excluded.summary, content = excluded.content,"
         " published_at = COALESCE(excluded.published_at, items.published_at), media_url = excluded.media_url,"
@@ -616,6 +654,7 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         upsert.addBindValue(text(item.mediaUrl));
         upsert.addBindValue(text(item.thumbnailUrl));
         upsert.addBindValue(item.duration >= 0 ? QVariant(item.duration) : QVariant(QMetaType::fromType<double>()));
+        upsert.addBindValue(item.guid);
         if (!upsert.exec())
             return failed(upsert);
         added += isNew;
@@ -771,3 +810,140 @@ bool Store::setFlag(const char *column, qint64 articleId, bool value) {
 
 bool Store::setRead(qint64 articleId, bool read) { return setFlag("is_read", articleId, read); }
 bool Store::setStarred(qint64 articleId, bool starred) { return setFlag("is_starred", articleId, starred); }
+
+SyncAccount Store::syncAccount() {
+    m_error.clear();
+    SyncAccount account;
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("SELECT npub, pubkey, relay_hints, synced_at FROM sync_account WHERE id = 1"))) {
+        fail(query.lastError().text());
+        return account;
+    }
+    if (query.next()) {
+        account.npub = query.value(0).toString();
+        account.pubkey = query.value(1).toString();
+        account.relays = QJsonDocument::fromJson(query.value(2).toString().toUtf8()).toVariant().toStringList();
+        if (!query.value(3).isNull())
+            account.syncedAt = QDateTime::fromSecsSinceEpoch(query.value(3).toLongLong(), QTimeZone::UTC);
+    }
+    query.finish();
+    if (account.pubkey.isEmpty())
+        return account;
+    if (!query.exec(QStringLiteral("SELECT d_tag, created_at FROM sync_applied"))) {
+        fail(query.lastError().text());
+        return {};
+    }
+    while (query.next())
+        account.applied.insert(query.value(0).toString(), query.value(1).toLongLong());
+    return account;
+}
+
+bool Store::setSyncAccount(const QString &npub, const QString &pubkey, const QStringList &relays) {
+    return transaction([&] {
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral("SELECT 1 FROM sync_account WHERE pubkey = ?"));
+        query.addBindValue(pubkey);
+        if (!query.exec())
+            return fail(query.lastError().text());
+        const bool same = query.next();
+        query.finish();
+        // Another account's watermarks and read GUIDs say nothing about this
+        // one's events.
+        if (!same && !clearSyncState())
+            return false;
+        query.prepare(QStringLiteral("INSERT INTO sync_account (id, npub, pubkey, relay_hints) VALUES (1, ?, ?, ?)"
+                                     " ON CONFLICT(id) DO UPDATE SET npub = excluded.npub, pubkey = excluded.pubkey,"
+                                     " relay_hints = excluded.relay_hints"));
+        query.addBindValue(npub);
+        query.addBindValue(pubkey);
+        query.addBindValue(jsonList(relays));
+        return query.exec() || fail(query.lastError().text());
+    });
+}
+
+bool Store::clearSyncState() {
+    QSqlQuery query(m_db);
+    for (const char *statement : {"DELETE FROM sync_account", "DELETE FROM sync_applied", "DELETE FROM sync_read"})
+        if (!query.exec(QString::fromLatin1(statement)))
+            return fail(query.lastError().text());
+    return true;
+}
+
+bool Store::clearSyncAccount() {
+    return transaction([this] { return clearSyncState(); });
+}
+
+bool Store::setSyncApplied(const QString &dTag, qint64 createdAt) {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("INSERT INTO sync_applied (d_tag, created_at) VALUES (?, ?) ON CONFLICT(d_tag)"
+                                 " DO UPDATE SET created_at = MAX(created_at, excluded.created_at)"));
+    query.addBindValue(dTag);
+    query.addBindValue(createdAt);
+    return query.exec() || fail(query.lastError().text());
+}
+
+bool Store::recordSynced(const QDateTime &time) {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("UPDATE sync_account SET synced_at = ?"));
+    query.addBindValue(time.toSecsSinceEpoch());
+    return query.exec() || fail(query.lastError().text());
+}
+
+int Store::applyReadGuids(const QStringList &guids) {
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("DELETE FROM sync_read")))
+        return fail(query.lastError().text()), -1;
+    query.prepare(QStringLiteral("INSERT INTO sync_read (guid) VALUES (?) ON CONFLICT DO NOTHING"));
+    for (const QString &guid : guids) {
+        query.addBindValue(guid);
+        if (!query.exec())
+            return fail(query.lastError().text()), -1;
+    }
+    // Only ever from unread to read: a GUID missing from the list says
+    // nothing about an article read here.
+    if (!query.exec(QStringLiteral(
+            "UPDATE items SET is_read = 1 WHERE is_read = 0 AND guid IN (SELECT guid FROM sync_read)")))
+        return fail(query.lastError().text()), -1;
+    return query.numRowsAffected();
+}
+
+int Store::pendingReadCount() {
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("SELECT COUNT(*) FROM sync_read s"
+                                   " WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.guid = s.guid)"))
+        || !query.next())
+        return fail(query.lastError().text()), -1;
+    return query.value(0).toInt();
+}
+
+QList<SavedView> Store::savedViews() {
+    m_error.clear();
+    QList<SavedView> result;
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("SELECT id, view, exclude FROM saved_views ORDER BY position, id"))) {
+        fail(query.lastError().text());
+        return result;
+    }
+    while (query.next())
+        result << SavedView{query.value(0).toString(),
+                            QJsonDocument::fromJson(query.value(1).toString().toUtf8()).object(),
+                            QJsonDocument::fromJson(query.value(2).toString().toUtf8()).toVariant().toStringList()};
+    return result;
+}
+
+bool Store::replaceSavedViews(const QList<SavedView> &views) {
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("DELETE FROM saved_views")))
+        return fail(query.lastError().text());
+    query.prepare(QStringLiteral("INSERT INTO saved_views (id, position, view, exclude) VALUES (?, ?, ?, ?)"));
+    for (qsizetype i = 0; i < views.size(); ++i) {
+        const SavedView &view = views.at(i);
+        query.addBindValue(view.id);
+        query.addBindValue(i);
+        query.addBindValue(QString::fromUtf8(QJsonDocument(view.view).toJson(QJsonDocument::Compact)));
+        query.addBindValue(jsonList(view.exclude));
+        if (!query.exec())
+            return fail(query.lastError().text());
+    }
+    return true;
+}
