@@ -4,9 +4,12 @@
 #include <QDesktopServices>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QProcess>
 #include <QRandomGenerator>
+#include <QStandardPaths>
 
 #include "filepicker.h"
+#include "markdown.h"
 #include "sanitizer.h"
 
 // Lives on the worker thread and owns that thread's connection to the
@@ -40,17 +43,18 @@ struct SearchStep {
 QString richText(const Article &article) {
     if (article.content.isEmpty())
         return Sanitizer::plainToRichText(article.summary);
-    // Nostr long-form is Markdown, shown as its text until it is rendered.
+    // Nostr long-form is Markdown.
     if (!article.address.isEmpty())
-        return Sanitizer::linesToRichText(article.content);
+        return Markdown::toRichText(article.content);
     return Sanitizer::toRichText(article.content, QUrl(article.url));
 }
 }
 
 Backend::Backend(FilePicker *picker, QObject *parent)
     : QObject(parent), m_fetcher(std::make_unique<Fetcher>()), m_relays(std::make_unique<RelayPool>()),
-      m_picker(picker) {
+      m_thumbnails(std::make_unique<Thumbnails>()), m_picker(picker) {
     m_openUrl = [](const QUrl &url) { return QDesktopServices::openUrl(url); };
+    m_launch = &Backend::launchDetached;
 
     m_worker = new LibraryWorker;
     m_worker->moveToThread(&m_thread);
@@ -99,6 +103,7 @@ Backend::~Backend() {
     m_autoRefresh.stop();
     m_fetcher.reset();
     m_relays.reset();
+    m_thumbnails.reset();
     m_thread.quit();
     m_thread.wait();
     // The user's own changes still queued behind a refresh are not lost
@@ -302,6 +307,7 @@ void Backend::loadArticles() {
     }
     m_articleIndex = m_article.id ? m_articles.rowOf(m_article.id) : -1;
     emit articleChanged();
+    updateThumbnail();
 }
 
 void Backend::selectSource(int row) {
@@ -324,6 +330,42 @@ void Backend::showArticle(const Article &article) {
     m_article = article;
     m_articleHtml = richText(article);
     emit articleChanged();
+    updateThumbnail();
+}
+
+void Backend::updateThumbnail() {
+    const QString source = articleIsVideo() ? m_article.thumbnailUrl : QString();
+    if (source == m_thumbnailSource)
+        return;
+    m_thumbnailSource = source;
+    const quint64 request = ++m_thumbnailRequest;
+    const QUrl url(source);
+    const QUrl hit = source.isEmpty() ? QUrl() : Thumbnails::cached(url);
+    setThumbnail(hit);
+    // Only the open video's thumbnail is fetched: leaving it, or opening one
+    // whose thumbnail is cached, drops the one on its way, and so does the
+    // fetch below.
+    if (source.isEmpty() || hit.isValid()) {
+        m_thumbnails->cancel();
+        return;
+    }
+    // A failed one shows no thumbnail, and nothing else: the video still plays.
+    m_thumbnails->fetch(url, [this, request](const QUrl &file) {
+        if (m_closing || request != m_thumbnailRequest)
+            return;
+        // Forgotten when it failed, so choosing the video again tries again
+        // rather than finding its URL already handled.
+        if (!file.isValid())
+            m_thumbnailSource.clear();
+        setThumbnail(file);
+    });
+}
+
+void Backend::setThumbnail(const QUrl &file) {
+    if (file == m_thumbnail)
+        return;
+    m_thumbnail = file;
+    emit thumbnailChanged();
 }
 
 void Backend::selectArticle(int row) {
@@ -432,6 +474,48 @@ void Backend::openOriginal() {
         openLink(m_article.url);
 }
 
+void Backend::playVideo() {
+    const QUrl url(m_article.mediaUrl);
+    if (!m_article.id || !Library::isWebUrl(url)) {
+        setStatus(tr("This article has no video to play"));
+        return;
+    }
+    // Someone else's event chose the URL, so it must not have the player
+    // reach into this machine or the local network. NostrSource drops such
+    // URLs already; this covers a library saved before it did.
+    if (Fetcher::isLocalHost(url.host())) {
+        setStatus(tr("Cannot play the video: it is on this machine or the local network"), true);
+        return;
+    }
+    // A playlist at the URL could list entries on this machine or the local
+    // network, which mpv would open, so it follows no references: that also
+    // turns off ordered chapters, mov reference files, and archives, none of
+    // which a video event needs, while HLS streams, which FFmpeg reads
+    // itself, still play. "--" ends mpv's options, so no URL can pass for one.
+    const QStringList arguments = {QStringLiteral("--access-references=no"), QStringLiteral("--"),
+                                   url.toString(QUrl::FullyEncoded)};
+    switch (m_launch(QStringLiteral("mpv"), arguments)) {
+    case Launch::Started:
+        setStatus(tr("Playing %1 in mpv").arg(m_article.title));
+        break;
+    case Launch::Missing:
+        setStatus(tr("Cannot play the video: mpv is not installed"), true);
+        break;
+    case Launch::Failed:
+        setStatus(tr("Cannot play the video: mpv did not start"), true);
+        break;
+    }
+}
+
+Backend::Launch Backend::launchDetached(const QString &program, const QStringList &arguments) {
+    // QProcess reports a missing program as any other failure to start,
+    // and a missing player deserves its own message.
+    const QString path = QStandardPaths::findExecutable(program);
+    if (path.isEmpty())
+        return Launch::Missing;
+    return QProcess::startDetached(path, arguments) ? Launch::Started : Launch::Failed;
+}
+
 bool Backend::openLink(const QString &link) {
     // Credentials in a link only serve to disguise where it goes.
     const QUrl url = QUrl(link.trimmed()).adjusted(QUrl::RemoveUserInfo);
@@ -491,13 +575,23 @@ void Backend::addFeed(const QString &address) {
         return;
     }
     const Nip19::Profile profile = *author;
+    // The first of the two results to come gives its slot back at once and
+    // waits beside the other, which keeps its own until the feed is saved.
+    auto pairs = std::make_shared<Library::NostrPairs>();
     m_relays->queryEachHeld(
-        {Library::nostrQuery(profile)},
-        [this, profile](qsizetype, const NostrResult &found, const RelayPool::Release &release) {
+        Library::nostrQueries(profile),
+        [this, profile, pairs](qsizetype index, const NostrResult &found, const RelayPool::Release &release) {
             if (m_closing)
                 return;
+            const auto both = pairs->take(index, found);
+            if (!both) {
+                release();
+                return;
+            }
             onWorker<Library::Subscription>(
-                [profile, found](Store &store) { return Library::subscribeNostr(store, profile, found); },
+                [profile, articles = both->first, videos = both->second](Store &store) {
+                    return Library::subscribeNostr(store, profile, articles, videos);
+                },
                 [this, release](const Library::Subscription &subscription) {
                     release();
                     subscribeFinished(subscription);
@@ -637,7 +731,7 @@ void Backend::refresh(const QList<Feed> &targets) {
     for (const Feed &feed : targets) {
         if (Library::isNostrFeed(feed)) {
             nostr << feed;
-            queries << Library::nostrQuery(feed);
+            queries << Library::nostrQueries(feed);
         } else {
             web << feed;
             requests << FetchRequest{QUrl(feed.url), feed.etag, feed.lastModified};
@@ -646,7 +740,9 @@ void Backend::refresh(const QList<Feed> &targets) {
     // Each response goes to the worker as it arrives and keeps its fetch
     // slot until the worker has saved it, so at most maxConcurrent bodies
     // are held at once, in flight or waiting there, however many feeds. The
-    // relays' answers are held the same way.
+    // relays' answers are held the same way, a feed's two at once: the first
+    // to come gives its slot back and waits for the other, which the pool
+    // opens next, since it opens queries in order.
     m_fetcher->fetchEachHeld(
         requests, [this, web](qsizetype index, const FetchResult &fetched, const Fetcher::Release &release) {
             if (m_closing)
@@ -659,13 +755,21 @@ void Backend::refresh(const QList<Feed> &targets) {
                     refreshApplied(feed, outcome);
                 });
         });
+    auto pairs = std::make_shared<Library::NostrPairs>();
     m_relays->queryEachHeld(
-        queries, [this, nostr](qsizetype index, const NostrResult &found, const RelayPool::Release &release) {
+        queries, [this, nostr, pairs](qsizetype index, const NostrResult &found, const RelayPool::Release &release) {
             if (m_closing)
                 return;
-            const Feed feed = nostr.at(index);
+            const auto both = pairs->take(index, found);
+            if (!both) {
+                release();
+                return;
+            }
+            const Feed feed = nostr.at(index / 2);
             onWorker<Library::Refresh>(
-                [feed, found](Store &store) { return Library::applyNostr(store, feed, found); },
+                [feed, articles = both->first, videos = both->second](Store &store) {
+                    return Library::applyNostr(store, feed, articles, videos);
+                },
                 [this, feed, release](const Library::Refresh &outcome) {
                     release();
                     refreshApplied(feed, outcome);

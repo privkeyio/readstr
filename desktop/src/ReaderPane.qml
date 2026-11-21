@@ -25,6 +25,19 @@ Rectangle {
     property var shownId: backend.articleId
     onShownIdChanged: flick.contentY = 0
 
+    // A video's length as h:mm:ss (m:ss under an hour), in the locale's digits.
+    function formatDuration(seconds) {
+        const locale = Qt.locale()
+        const total = Math.round(seconds)
+        const hours = Math.floor(total / 3600)
+        const minutes = Math.floor(total % 3600 / 60)
+        const rest = total % 60
+        const number = (n) => n.toLocaleString(locale, 'f', 0)
+        const padded = (n) => (n < 10 ? locale.zeroDigit : "") + number(n)
+        return hours > 0 ? number(hours) + ":" + padded(minutes) + ":" + padded(rest)
+                         : number(minutes) + ":" + padded(rest)
+    }
+
     Flickable {
         id: flick
         anchors.fill: parent
@@ -110,6 +123,64 @@ Rectangle {
                 TapHandler { onTapped: backend.openOriginal() }
                 ToolTip.visible: originalHover.hovered
                 ToolTip.text: qsTr("Open the original in the browser (O)")
+            }
+
+            // A Nostr video: its thumbnail, once it is cached, and how to
+            // play it. The image is a local file the backend fetched for
+            // this video alone.
+            Image {
+                id: thumbnail
+                Layout.fillWidth: true
+                Layout.topMargin: 6
+                Layout.preferredHeight: implicitWidth > 0 ? width * implicitHeight / implicitWidth : 0
+                visible: backend.articleIsVideo && status === Image.Ready
+                source: backend.articleIsVideo ? backend.articleThumbnail : ""
+                fillMode: Image.PreserveAspectFit
+                asynchronous: true
+
+                HoverHandler { cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: backend.playVideo() }
+            }
+
+            RowLayout {
+                visible: backend.articleIsVideo
+                Layout.topMargin: 6
+                spacing: 14
+
+                Button {
+                    id: playButton
+                    text: "▶  " + qsTr("Play")
+                    focusPolicy: Qt.NoFocus
+                    leftPadding: 20
+                    rightPadding: 20
+                    // Plain colors, as for the add button below.
+                    background: Rectangle {
+                        implicitHeight: 40
+                        radius: Math.min(8, theme.radius)
+                        color: playButton.down ? Qt.darker(theme.accent, 1.15) : playButton.hovered ? Qt.lighter(theme.accent, 1.08) : theme.accent
+                    }
+                    contentItem: Label {
+                        text: playButton.text
+                        textFormat: Text.PlainText
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        font.weight: Font.DemiBold
+                        color: theme.accentForeground
+                    }
+                    onClicked: backend.playVideo()
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Play the video in mpv (P)")
+                }
+
+                Label {
+                    visible: backend.articleDuration >= 0
+                    text: {
+                        translator.language
+                        return pane.formatDuration(backend.articleDuration)
+                    }
+                    textFormat: Text.PlainText
+                    opacity: 0.7
+                }
             }
 
             Rectangle {

@@ -13,6 +13,7 @@
 #include <QWebSocket>
 
 #include "feedparser.h"
+#include "fetcher.h"
 
 QJsonObject NostrQuery::filter() const {
     QJsonArray kindArray;
@@ -34,33 +35,6 @@ QString replaceableKey(const NostrEvent &event) {
     if (kind >= 30000 && kind < 40000)
         return QStringLiteral("%1:%2:%3").arg(kind).arg(event.pubkey, event.tag(QStringLiteral("d")));
     return {};
-}
-
-// Hosts a relay hint from someone else's nprofile must not point at: this
-// machine and the local network, which have no business being reached
-// because a pasted string said so.
-bool isLocalHost(const QString &host) {
-    QString name = host.toLower();
-    // A trailing dot names the same host, so "localhost." is localhost.
-    if (name.endsWith('.'))
-        name.chop(1);
-    // A literal address first, since an IPv6 one has no dot; the name rules
-    // are for names.
-    QHostAddress address;
-    if (!address.setAddress(name))
-        return name == QLatin1String("localhost") || name.endsWith(QLatin1String(".localhost"))
-            || name.endsWith(QLatin1String(".local")) || name.endsWith(QLatin1String(".internal"))
-            || !name.contains('.');
-    if (address.protocol() == QAbstractSocket::IPv6Protocol) {
-        bool mapped = false;
-        const QHostAddress v4(address.toIPv4Address(&mapped));
-        if (mapped)
-            address = v4;
-    }
-    return address.isLoopback() || address.isPrivateUse() || address.isLinkLocal() || address.isSiteLocal()
-        || address.isUniqueLocalUnicast() || address.isMulticast() || address.isNull()
-        || address.isInSubnet(QHostAddress(QStringLiteral("0.0.0.0")), 8)
-        || address.isInSubnet(QHostAddress(QStringLiteral("100.64.0.0")), 10);
 }
 }
 
@@ -393,7 +367,7 @@ bool RelayPool::isUsableRelay(const QUrl &url) {
 
 bool RelayPool::isPublicRelay(const QUrl &url) {
     return url.isValid() && url.scheme().toLower() == QLatin1String("wss") && url.userInfo().isEmpty()
-        && !url.host().isEmpty() && !isLocalHost(url.host());
+        && !url.host().isEmpty() && !Fetcher::isLocalHost(url.host());
 }
 
 void RelayPool::queryEachHeld(const QList<NostrQuery> &queries,

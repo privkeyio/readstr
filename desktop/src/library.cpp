@@ -47,53 +47,75 @@ bool isNostrFeed(const Feed &feed) {
 }
 
 namespace {
-NostrQuery authorQuery(const QString &pubkey) {
-    NostrQuery query;
-    query.author = pubkey;
-    query.kinds = {NostrSource::profileKind, NostrSource::longFormKind};
-    query.limit = 100;
-    return query;
+QList<NostrQuery> authorQueries(const QString &pubkey) {
+    NostrQuery articles;
+    articles.author = pubkey;
+    articles.kinds = {NostrSource::profileKind, NostrSource::longFormKind};
+    articles.limit = 100;
+    NostrQuery videos = articles;
+    videos.kinds = {NostrSource::videoKind, NostrSource::shortVideoKind};
+    return {articles, videos};
 }
 
 // Saves what the relays returned for an author's feed: new and newer
-// articles, and the profile when one came.
-bool saveNostr(Store &store, qint64 feedId, const QString &pubkey, const NostrResult &found, int *added) {
-    const auto profile = NostrSource::profile(found.events, pubkey);
+// articles and videos, and the profile when one came.
+bool saveNostr(Store &store, qint64 feedId, const QString &pubkey, const NostrResult &articles,
+               const NostrResult &videos, int *added) {
+    const QList<NostrEvent> events = articles.events + videos.events;
+    const auto profile = NostrSource::profile(events, pubkey);
     if (profile && !store.updateProfile(feedId, profile->feed, profile->revision, profile->eventId))
         return false;
     const auto feed = store.feed(feedId);
     if (!feed)
         return false;
     const QString author = feed->title != feed->url ? feed->title : QString();
-    *added = store.saveItems(feedId, NostrSource::longForm(found.events, author));
+    *added = store.saveItems(feedId, NostrSource::articles(events, author));
     if (*added < 0 || !store.recordFetch(feedId, {}, {}, {}))
         return false;
-    // A refresh that some relay missed asks again from the last one they
-    // all answered, so what only that relay holds is not skipped for good.
-    return !found.complete() || store.recordComplete(feedId, found.startedAt);
+    // A refresh that some relay missed, for either query, asks again from
+    // the last one they all answered, so what only that relay holds is not
+    // skipped for good. The earlier start covers both.
+    if (!articles.complete() || !videos.complete())
+        return true;
+    return store.recordComplete(feedId, qMin(articles.startedAt, videos.startedAt));
 }
 }
 
-NostrQuery nostrQuery(const Feed &feed) {
+std::optional<std::pair<NostrResult, NostrResult>> NostrPairs::take(qsizetype index, const NostrResult &result) {
+    const auto other = m_waiting.constFind(index ^ 1);
+    if (other == m_waiting.cend()) {
+        m_waiting.insert(index, result);
+        return std::nullopt;
+    }
+    std::pair<NostrResult, NostrResult> both = index % 2 ? std::pair(*other, result) : std::pair(result, *other);
+    m_waiting.erase(other);
+    return both;
+}
+
+QList<NostrQuery> nostrQueries(const Feed &feed) {
     const auto author = Nip19::decodeProfile(feed.url);
-    NostrQuery query = authorQuery(author ? author->pubkey : QString());
-    query.extraRelays = feed.relayHints;
-    // A day's margin for relays' clocks and for events that reach them late.
-    if (feed.completeAt.isValid())
-        query.since = qMax<qint64>(0, feed.completeAt.toSecsSinceEpoch() - 24 * 3600);
-    return query;
+    QList<NostrQuery> queries = authorQueries(author ? author->pubkey : QString());
+    for (NostrQuery &query : queries) {
+        query.extraRelays = feed.relayHints;
+        // A day's margin for relays' clocks and for events that reach them late.
+        if (feed.completeAt.isValid())
+            query.since = qMax<qint64>(0, feed.completeAt.toSecsSinceEpoch() - 24 * 3600);
+    }
+    return queries;
 }
 
-NostrQuery nostrQuery(const Nip19::Profile &author) {
-    NostrQuery query = authorQuery(author.pubkey);
-    query.extraRelays = author.relays;
-    return query;
+QList<NostrQuery> nostrQueries(const Nip19::Profile &author) {
+    QList<NostrQuery> queries = authorQueries(author.pubkey);
+    for (NostrQuery &query : queries)
+        query.extraRelays = author.relays;
+    return queries;
 }
 
-Subscription subscribeNostr(Store &store, const Nip19::Profile &author, const NostrResult &found) {
+Subscription subscribeNostr(Store &store, const Nip19::Profile &author, const NostrResult &articles,
+                            const NostrResult &videos) {
     Subscription subscription;
-    if (!found.ok()) {
-        subscription.error = found.error;
+    if (!articles.ok()) {
+        subscription.error = articles.error;
         return subscription;
     }
     const QString npub = Nip19::npub(author.pubkey);
@@ -105,7 +127,7 @@ Subscription subscribeNostr(Store &store, const Nip19::Profile &author, const No
     }
     if (subscription.created
         && (!store.setRelayHints(subscription.id, author.relays)
-            || !saveNostr(store, subscription.id, author.pubkey, found, &subscription.added))) {
+            || !saveNostr(store, subscription.id, author.pubkey, articles, videos, &subscription.added))) {
         subscription.error = store.lastError();
         store.removeFeed(subscription.id);
         subscription.id = 0;
@@ -115,17 +137,17 @@ Subscription subscribeNostr(Store &store, const Nip19::Profile &author, const No
     return subscription;
 }
 
-Refresh applyNostr(Store &store, const Feed &feed, const NostrResult &found) {
+Refresh applyNostr(Store &store, const Feed &feed, const NostrResult &articles, const NostrResult &videos) {
     Refresh row;
     row.title = feed.title;
     const auto author = Nip19::decodeProfile(feed.url);
     if (!author) {
         row.error = QStringLiteral("not an npub: %1").arg(feed.url);
-    } else if (!found.ok()) {
-        row.error = found.error;
+    } else if (!articles.ok()) {
+        row.error = articles.error;
     } else {
         row.status = QStringLiteral("updated");
-        if (!saveNostr(store, feed.id, author->pubkey, found, &row.added))
+        if (!saveNostr(store, feed.id, author->pubkey, articles, videos, &row.added))
             row.error = store.lastError();
         if (const auto updated = store.feed(feed.id))
             row.title = updated->title;

@@ -81,6 +81,17 @@ const QList<QStringList> migrations = {
         "ALTER TABLE feeds ADD COLUMN profile_title TEXT",
         "ALTER TABLE feeds ADD COLUMN complete_at INTEGER",
     },
+    {
+        // A Nostr video's (NIP-71) media and thumbnail URLs, and its length
+        // in seconds.
+        "ALTER TABLE items ADD COLUMN media_url TEXT",
+        "ALTER TABLE items ADD COLUMN thumbnail_url TEXT",
+        "ALTER TABLE items ADD COLUMN duration REAL",
+        // Nostr feeds were asked only for long-form articles before, so the
+        // first refresh after this one asks for everything again, or the
+        // videos older than the last complete refresh would never come.
+        "UPDATE feeds SET complete_at = NULL WHERE url LIKE 'npub1%'",
+    },
 };
 
 std::atomic<int> connectionCounter{0};
@@ -115,6 +126,11 @@ Feed feedFrom(const QSqlQuery &query) {
 
 QVariant timestamp(const QDateTime &time) {
     return time.isValid() ? QVariant(time.toSecsSinceEpoch()) : QVariant(QMetaType::fromType<qint64>());
+}
+
+// NULL for none.
+QVariant text(const QString &value) {
+    return value.isEmpty() ? QVariant(QMetaType::fromType<QString>()) : QVariant(value);
 }
 }
 
@@ -513,10 +529,11 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
     exists.prepare(QStringLiteral("SELECT 1 FROM items WHERE feed_id = ? AND guid = ?"));
     upsert.prepare(QStringLiteral(
         "INSERT INTO items (feed_id, guid, title, url, author, summary, content, published_at, created_at, address,"
-        " revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " revision, media_url, thumbnail_url, duration) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(feed_id, guid) DO UPDATE SET title = excluded.title, url = excluded.url,"
         " author = excluded.author, summary = excluded.summary, content = excluded.content,"
-        " published_at = COALESCE(excluded.published_at, items.published_at)"));
+        " published_at = COALESCE(excluded.published_at, items.published_at), media_url = excluded.media_url,"
+        " thumbnail_url = excluded.thumbnail_url, duration = excluded.duration"));
     version.prepare(QStringLiteral(
         "SELECT id, revision, guid FROM items WHERE feed_id = ? AND address = ? ORDER BY revision DESC LIMIT 1"));
     // A newer version takes the older one's row, so the article keeps its
@@ -580,6 +597,9 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         upsert.addBindValue(now);
         upsert.addBindValue(item.address.isEmpty() ? QVariant(QMetaType::fromType<QString>()) : QVariant(item.address));
         upsert.addBindValue(item.address.isEmpty() ? QVariant(QMetaType::fromType<qint64>()) : QVariant(item.revision));
+        upsert.addBindValue(text(item.mediaUrl));
+        upsert.addBindValue(text(item.thumbnailUrl));
+        upsert.addBindValue(item.duration >= 0 ? QVariant(item.duration) : QVariant(QMetaType::fromType<double>()));
         if (!upsert.exec())
             return failed(upsert);
         added += isNew;
@@ -594,7 +614,8 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
 namespace {
 const char articleColumns[] =
     "SELECT i.id, i.feed_id, f.title, i.guid, i.title, i.url, i.author, i.summary, %1,"
-    " i.published_at, i.is_read, i.is_starred, i.address FROM items i JOIN feeds f ON f.id = i.feed_id";
+    " i.published_at, i.is_read, i.is_starred, i.address, i.media_url, i.thumbnail_url, i.duration"
+    " FROM items i JOIN feeds f ON f.id = i.feed_id";
 
 Article articleFrom(const QSqlQuery &query) {
     Article article;
@@ -612,6 +633,10 @@ Article articleFrom(const QSqlQuery &query) {
     article.read = query.value(10).toBool();
     article.starred = query.value(11).toBool();
     article.address = query.value(12).toString();
+    article.mediaUrl = query.value(13).toString();
+    article.thumbnailUrl = query.value(14).toString();
+    if (!query.value(15).isNull())
+        article.duration = query.value(15).toDouble();
     return article;
 }
 

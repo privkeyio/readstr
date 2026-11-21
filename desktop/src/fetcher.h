@@ -53,6 +53,12 @@ public:
         // queues the rest, with their deadlines already running, so this
         // stays at six.
         int maxConcurrent = 6;
+        // Refuses this machine and the local network (isLocalHost), on the
+        // first request and on every redirect, for URLs that come from
+        // someone else, such as a video's thumbnail. Feeds the user picked
+        // may live there, so it is off for them. A public name that
+        // resolves to a local address is not caught.
+        bool publicHostsOnly = false;
     };
 
     explicit Fetcher(QObject *parent = nullptr);
@@ -89,6 +95,12 @@ public:
     FetchResult get(const FetchRequest &request) { return fetchAll({request}).constFirst(); }
 
     static QByteArray userAgent();
+    // This machine and the local network, by name or literal address:
+    // localhost, .local, .internal, a name without a dot, loopback,
+    // unspecified, private, link-local, unique-local, CGNAT, benchmarking,
+    // reserved, broadcast, and multicast addresses, and an IPv6 address that
+    // carries one of these IPv4 addresses (mapped, compatible, NAT64, 6to4).
+    static bool isLocalHost(const QString &host);
 
 private:
     struct Batch;

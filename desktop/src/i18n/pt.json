@@ -109,5 +109,13 @@
   "The desktop portal's file chooser is not available (is xdg-desktop-portal running?).": "O seletor de ficheiros do portal do ambiente de trabalho não está disponível (o xdg-desktop-portal está em execução?).",
   "Could not listen for the file chooser's answer.": "Não foi possível aguardar a resposta do seletor de ficheiros.",
   "The file chooser failed: %1": "O seletor de ficheiros falhou: %1",
-  "The file chooser closed without a file.": "O seletor de ficheiros fechou sem um ficheiro."
+  "The file chooser closed without a file.": "O seletor de ficheiros fechou sem um ficheiro.",
+  "Play": "Reproduzir",
+  "Play the video in mpv (P)": "Reproduzir o vídeo no mpv (P)",
+  "Play the video in mpv": "Reproduzir o vídeo no mpv",
+  "This article has no video to play": "Este artigo não tem nenhum vídeo para reproduzir",
+  "Playing %1 in mpv": "A reproduzir %1 no mpv",
+  "Cannot play the video: mpv is not installed": "Não é possível reproduzir o vídeo: o mpv não está instalado",
+  "Cannot play the video: mpv did not start": "Não é possível reproduzir o vídeo: o mpv não arrancou",
+  "Cannot play the video: it is on this machine or the local network": "Não é possível reproduzir o vídeo: está nesta máquina ou na rede local"
 }

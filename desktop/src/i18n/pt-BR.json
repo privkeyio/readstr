@@ -43,5 +43,7 @@
   "Could not listen for the file chooser's answer.": "Não foi possível aguardar a resposta do seletor de arquivos.",
   "The file chooser failed: %1": "O seletor de arquivos falhou: %1",
   "The file chooser closed without a file.": "O seletor de arquivos fechou sem um arquivo.",
-  "Feed, site, or npub": "Feed, site ou npub"
+  "Feed, site, or npub": "Feed, site ou npub",
+  "Playing %1 in mpv": "Reproduzindo %1 no mpv",
+  "Cannot play the video: mpv did not start": "Não é possível reproduzir o vídeo: o mpv não iniciou"
 }

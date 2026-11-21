@@ -40,6 +40,7 @@ ApplicationWindow {
         { keys: "M", action: qsTr("Mark read or unread") },
         { keys: "S", action: qsTr("Star or unstar") },
         { keys: "O", action: qsTr("Open the original in the browser") },
+        { keys: "P", action: qsTr("Play the video in mpv") },
         { keys: "Ctrl+R", action: qsTr("Refresh all feeds") },
         { keys: "Ctrl+N", action: qsTr("Add a feed") },
         { keys: "Ctrl+Shift+A", action: qsTr("Mark everything in the view read") },
@@ -78,6 +79,7 @@ ApplicationWindow {
     Shortcut { sequence: "M"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.toggleRead() }
     Shortcut { sequence: "S"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.toggleStar() }
     Shortcut { sequence: "O"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.openOriginal() }
+    Shortcut { sequence: "P"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.playVideo() }
     Shortcut { sequence: "Ctrl+R"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.refreshAll() }
     Shortcut { sequence: "Ctrl+N"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: addDialog.open() }
     Shortcut { sequence: "Ctrl+Shift+A"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.markViewRead() }

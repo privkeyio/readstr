@@ -1,9 +1,11 @@
 #pragma once
 
 #include <QByteArray>
+#include <QHash>
 #include <QString>
 #include <QUrl>
 #include <optional>
+#include <utility>
 
 #include "discovery.h"
 #include "fetcher.h"
@@ -34,15 +36,34 @@ Subscription subscribe(Store &store, const Discovery::Result &found);
 std::optional<Nip19::Profile> nostrAuthor(const QString &text);
 // True for a feed that follows a Nostr author, whose URL is the npub.
 bool isNostrFeed(const Feed &feed);
-// The events a refresh asks relays for: the author's profile and long-form
-// articles, from a day before the last refresh every relay answered on, and
-// from the author's relay hints too.
-NostrQuery nostrQuery(const Feed &feed);
-// The query a new subscription to `author` asks, with its relay hints.
-NostrQuery nostrQuery(const Nip19::Profile &author);
-// Saves a new Nostr author with the articles `found` holds, as subscribe()
-// does for a web feed, or finds the existing subscription.
-Subscription subscribeNostr(Store &store, const Nip19::Profile &author, const NostrResult &found);
+// The two queries a refresh asks relays for, as the web app asks them: the
+// author's profile and long-form articles first, then their videos, each
+// with its own limit, so that many short videos cannot crowd the articles
+// and the profile out. Both go from a day before the last refresh every
+// relay answered both on, and to the author's relay hints too.
+QList<NostrQuery> nostrQueries(const Feed &feed);
+// The queries a new subscription to `author` asks, with its relay hints.
+QList<NostrQuery> nostrQueries(const Nip19::Profile &author);
+
+// The results of each author's two queries, which arrive in either order,
+// paired up again: query `index` of a list of nostrQueries() belongs to
+// author index / 2.
+class NostrPairs {
+public:
+    // Keeps the result until its pair's other one comes, then returns both,
+    // the articles' first.
+    std::optional<std::pair<NostrResult, NostrResult>> take(qsizetype index, const NostrResult &result);
+
+private:
+    QHash<qsizetype, NostrResult> m_waiting;
+};
+
+// Saves a new Nostr author with the profile and articles `articles` holds
+// and the videos `videos` holds, as subscribe() does for a web feed, or
+// finds the existing subscription. It fails only when the articles' query
+// did; a failed videos query leaves the refresh incomplete instead.
+Subscription subscribeNostr(Store &store, const Nip19::Profile &author, const NostrResult &articles,
+                            const NostrResult &videos);
 
 struct Refresh {
     // "updated", "not-modified", or "error".
@@ -55,8 +76,10 @@ struct Refresh {
 // Applies one fetch of `feed`: keeps the validators of a 304, parses and
 // saves a new body, or records why it failed on the feed.
 Refresh apply(Store &store, const Feed &feed, const FetchResult &fetched);
-// The same for a Nostr feed and what the relays returned.
-Refresh applyNostr(Store &store, const Feed &feed, const NostrResult &found);
+// The same for a Nostr feed and what the relays returned for its two
+// queries. It counts as complete, so the next refresh asks only for what is
+// newer, only when both results are.
+Refresh applyNostr(Store &store, const Feed &feed, const NostrResult &articles, const NostrResult &videos);
 
 struct Import {
     int added = 0;

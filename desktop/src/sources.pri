@@ -22,6 +22,7 @@ HEADERS += \
     $$PWD/nostrevent.h \
     $$PWD/nostrsource.h \
     $$PWD/localnetwork.h \
+    $$PWD/markdown.h \
     $$PWD/opml.h \
     $$PWD/paths.h \
     $$PWD/portalfilepicker.h \
@@ -31,6 +32,7 @@ HEADERS += \
     $$PWD/sourcemodel.h \
     $$PWD/store.h \
     $$PWD/theme.h \
+    $$PWD/thumbnails.h \
     $$PWD/translator.h
 
 SOURCES += \
@@ -45,6 +47,7 @@ SOURCES += \
     $$PWD/nostrevent.cpp \
     $$PWD/nostrsource.cpp \
     $$PWD/localnetwork.cpp \
+    $$PWD/markdown.cpp \
     $$PWD/opml.cpp \
     $$PWD/paths.cpp \
     $$PWD/portalfilepicker.cpp \
@@ -53,6 +56,7 @@ SOURCES += \
     $$PWD/sourcemodel.cpp \
     $$PWD/store.cpp \
     $$PWD/theme.cpp \
+    $$PWD/thumbnails.cpp \
     $$PWD/translator.cpp
 
 RESOURCES += $$PWD/resources.qrc

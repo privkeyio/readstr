@@ -45,6 +45,10 @@ struct Article {
     bool starred = false;
     // A Nostr long-form article's address; its content is Markdown.
     QString address;
+    // A Nostr video's, as ParsedItem has them.
+    QString mediaUrl;
+    QString thumbnailUrl;
+    double duration = -1;
 };
 
 struct ArticleFilter {
