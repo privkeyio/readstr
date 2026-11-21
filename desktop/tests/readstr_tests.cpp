@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QElapsedTimer>
+#include <QImageWriter>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QRegularExpression>
@@ -21,6 +22,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSqlDatabase>
+#include <QSqlError>
 #include <QSqlQuery>
 #include <QTemporaryDir>
 #include <QThread>
@@ -47,6 +49,7 @@
 #include "filepicker.h"
 #include "library.h"
 #include "localnetwork.h"
+#include "markdown.h"
 #include "nip19.h"
 #include "nostrevent.h"
 #include "nostrsource.h"
@@ -58,6 +61,7 @@
 #include "sourcemodel.h"
 #include "store.h"
 #include "theme.h"
+#include "thumbnails.h"
 #include "translator.h"
 
 // Answers the OPML dialogs the way a user would, without a portal.
@@ -372,12 +376,12 @@ private slots:
         {
             Store store;
             QVERIFY2(store.open(path), qPrintable(store.lastError()));
-            QCOMPARE(store.schemaVersion(), 2);
+            QCOMPARE(store.schemaVersion(), 3);
             QVERIFY(store.addFeed("https://a.example.com/feed", "A"));
         }
         Store again;
         QVERIFY2(again.open(path), qPrintable(again.lastError()));
-        QCOMPARE(again.schemaVersion(), 2);
+        QCOMPARE(again.schemaVersion(), 3);
         QCOMPARE(again.feeds().size(), 1);
 
         QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "raw");
@@ -450,8 +454,8 @@ private slots:
         QCOMPARE(store.feed(id)->title, QString("Example"));
 
         ParsedItem first{"guid-1", "One", "https://example.com/1", "Ada", "Summary", "<p>One</p>",
-                         QDateTime(QDate(2024, 1, 1), QTime(0, 0), QTimeZone::UTC), {}, 0};
-        ParsedItem second{"guid-2", "Two", {}, {}, {}, {}, {}, {}, 0};
+                         QDateTime(QDate(2024, 1, 1), QTime(0, 0), QTimeZone::UTC), {}, 0, {}, {}, -1};
+        ParsedItem second{"guid-2", "Two", {}, {}, {}, {}, {}, {}, 0, {}, {}, -1};
         QCOMPARE(store.saveItems(id, {first, second}), 2);
         QCOMPARE(store.saveItems(id, {first, second}), 0);
 
@@ -491,7 +495,7 @@ private slots:
         QTemporaryDir dir;
         Store store;
         QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
-        const ParsedItem item{"guid", "Title", {}, {}, {}, {}, {}, {}, 0};
+        const ParsedItem item{"guid", "Title", {}, {}, {}, {}, {}, {}, 0, {}, {}, -1};
         const qint64 first = store.addFeed("https://a.example.com/feed", "A");
         QCOMPARE(store.saveItems(first, {item}), 1);
         const qint64 firstItem = store.articles({}).value(0).id;
@@ -547,7 +551,7 @@ private slots:
             for (int i = 0; i < 8; ++i)
                 threads << QThread::create([&failures, path] {
                     Store store;
-                    if (!store.open(path) || store.schemaVersion() != 2) {
+                    if (!store.open(path) || store.schemaVersion() != 3) {
                         qWarning("%s", qPrintable(store.lastError()));
                         ++failures;
                     }
@@ -585,7 +589,7 @@ private slots:
                 for (int round = 0; round < rounds; ++round) {
                     QList<ParsedItem> items;
                     for (int i = 0; i < perRound; ++i)
-                        items << ParsedItem{QString("%1-%2").arg(worker).arg(i), "Item", {}, {}, {}, {}, {}, {}, 0};
+                        items << ParsedItem{QString("%1-%2").arg(worker).arg(i), "Item", {}, {}, {}, {}, {}, {}, 0, {}, {}, -1};
                     if (store.saveItems(feed, items) < 0) {
                         qWarning("%s", qPrintable(store.lastError()));
                         ++failures;
@@ -602,7 +606,7 @@ private slots:
 
         Store writer;
         QVERIFY2(writer.open(path), qPrintable(writer.lastError()));
-        QCOMPARE(writer.schemaVersion(), 2);
+        QCOMPARE(writer.schemaVersion(), 3);
         QCOMPARE(writer.articles({0, false, false, 0}).size(), workers * perRound);
 
         // A reader in the middle of a transaction neither blocks a writer
@@ -616,7 +620,7 @@ private slots:
             QCOMPARE(query.value(0).toInt(), workers * perRound);
             query.finish();
             const qint64 feed = writer.feeds().value(0).id;
-            QCOMPARE(writer.saveItems(feed, {ParsedItem{"late", "Late", {}, {}, {}, {}, {}, {}, 0}}), 1);
+            QCOMPARE(writer.saveItems(feed, {ParsedItem{"late", "Late", {}, {}, {}, {}, {}, {}, 0, {}, {}, -1}}), 1);
             QVERIFY(query.exec("SELECT COUNT(*) FROM items") && query.next());
             QCOMPARE(query.value(0).toInt(), workers * perRound);
             QVERIFY(query.exec("COMMIT"));
@@ -3627,21 +3631,40 @@ private slots:
         Feed stored = *store.feed(feed);
         QVERIFY(Library::isNostrFeed(stored));
         QCOMPARE(stored.relayHints, QStringList({"wss://hint.example.com"}));
-        NostrQuery query = Library::nostrQuery(stored);
-        QCOMPARE(query.author, QString(64, 'c'));
-        QCOMPARE(query.extraRelays, QStringList({"wss://hint.example.com"}));
-        QCOMPARE(query.since, 0);
+        const QList<NostrQuery> queries = Library::nostrQueries(stored);
+        QCOMPARE(queries.size(), 2);
+        QCOMPARE(queries.at(0).kinds, QList<int>({0, 30023}));
+        QCOMPARE(queries.at(1).kinds, QList<int>({21, 22}));
+        for (const NostrQuery &query : queries) {
+            QCOMPARE(query.author, QString(64, 'c'));
+            QCOMPARE(query.extraRelays, QStringList({"wss://hint.example.com"}));
+            QCOMPARE(query.since, 0);
+        }
 
+        // Complete only when both queries are.
         NostrResult partial;
         partial.relays = 2;
         partial.answered = 1;
         partial.startedAt = QDateTime::currentDateTimeUtc();
-        QCOMPARE(Library::applyNostr(store, stored, partial).status, QString("updated"));
-        QCOMPARE(Library::nostrQuery(*store.feed(feed)).since, 0);
         NostrResult complete = partial;
         complete.answered = 2;
-        Library::applyNostr(store, stored, complete);
-        QCOMPARE(Library::nostrQuery(*store.feed(feed)).since, complete.startedAt.toSecsSinceEpoch() - 24 * 3600);
+        QCOMPARE(Library::applyNostr(store, stored, partial, complete).status, QString("updated"));
+        QCOMPARE(Library::nostrQueries(*store.feed(feed)).at(0).since, 0);
+        QCOMPARE(Library::applyNostr(store, stored, complete, partial).status, QString("updated"));
+        QCOMPARE(Library::nostrQueries(*store.feed(feed)).at(1).since, 0);
+        NostrResult earlier = complete;
+        earlier.startedAt = complete.startedAt.addSecs(-60);
+        Library::applyNostr(store, stored, complete, earlier);
+        for (const NostrQuery &query : Library::nostrQueries(*store.feed(feed)))
+            QCOMPARE(query.since, earlier.startedAt.toSecsSinceEpoch() - 24 * 3600);
+
+        // A failed videos query still saves the articles, as an incomplete
+        // refresh; a failed articles query fails the feed.
+        NostrResult failed;
+        failed.relays = 2;
+        failed.error = "no relay answered";
+        QCOMPARE(Library::applyNostr(store, stored, complete, failed).status, QString("updated"));
+        QCOMPARE(Library::applyNostr(store, stored, failed, complete).status, QString("error"));
     }
 
     void sanitizerKeepsTheLinesOfPlainText()
@@ -3808,6 +3831,30 @@ private slots:
         QCOMPARE(pool.query(query).error, QString("no usable relays"));
         qunsetenv("READSTR_RELAYS");
         QCOMPARE(RelayPool::configuredRelays(), RelayPool::defaultRelays());
+    }
+
+    void fetcherTellsLocalAddressesFromPublicOnes()
+    {
+        // The unspecified address, IPv6 addresses that carry a local IPv4
+        // one (mapped, compatible, NAT64, 6to4), and the reserved IPv4 ranges.
+        for (const char *host : {"::", "0:0:0:0:0:0:0:0", "::ffff:10.0.0.1", "::10.0.0.1", "::127.0.0.1",
+                                 "::192.168.1.1", "64:ff9b::192.168.1.1", "64:ff9b::7f00:1", "64:ff9b::0.0.0.0",
+                                 "2002:c0a8:0101::1", "2002:7f00:1::", "2002:0a00:0001:1234::5", "198.18.0.1",
+                                 "198.19.255.255", "240.0.0.1", "250.1.2.3", "255.255.255.255",
+                                 "::ffff:198.18.0.1", "64:ff9b::100.64.0.1"})
+            QVERIFY2(Fetcher::isLocalHost(host), host);
+        // The same forms around public IPv4 addresses, and the edges of the
+        // ranges, stay public.
+        for (const char *host : {"1.1.1.1", "198.17.255.255", "198.20.0.0", "223.255.255.255", "::ffff:1.1.1.1",
+                                 "::1.1.1.1", "64:ff9b::1.1.1.1", "64:ff9b::808:808", "2002:0101:0101::1",
+                                 "64:ff9c::a00:1", "2606:4700:4700::1111", "2001:db9::1", "example.com"})
+            QVERIFY2(!Fetcher::isLocalHost(host), host);
+        // As URLs give them, which is how they arrive.
+        QVERIFY(Fetcher::isLocalHost(QUrl("http://[::]:8080/").host()));
+        QVERIFY(Fetcher::isLocalHost(QUrl("http://[64:ff9b::192.168.0.1]/").host()));
+        QVERIFY(Fetcher::isLocalHost(QUrl("http://255.255.255.255/").host()));
+        QVERIFY(!RelayPool::isPublicRelay(QUrl("wss://[2002:c0a8:1::]")));
+        QVERIFY(RelayPool::isPublicRelay(QUrl("wss://[2002:101:101::]")));
     }
 
     void relayPoolTellsRelayPathsApartAndDefersHintsPastItsCap()
@@ -4041,7 +4088,1230 @@ private slots:
         QVERIFY2(backend.status().startsWith("1 new article"), qPrintable(backend.status()));
     }
 
+    // Markdown
+
+    void markdownRendersTheAllowedSubset()
+    {
+        const QString html = Markdown::toRichText(
+            "# Title\n\n*em* **strong** `code` ~~gone~~ [link](https://example.com/a)\n\n> quoted\n\n- one\n- two\n\n"
+            "| a | b |\n|---|---|\n| 1 | 2 |\n\n```\nblock\n```\n\n<script>alert(1)</script> <b>raw</b>\n\n"
+            "[js](javascript:alert(1)) [rel](/relative) [mail](mailto:a@b.c)");
+        for (const char *expected : {"<h1>", "<em>em</em>", "<strong>strong</strong>", "<code>code</code>", "<s>gone</s>",
+                                     "<a href=\"https://example.com/a\">link</a>", "<blockquote>quoted</blockquote>",
+                                     "<ul>", "<li>one</li>", "<li>two</li>", "<table>", "<td>", "<pre><code>block",
+                                     "&lt;script&gt;alert(1)&lt;/script&gt; &lt;b&gt;raw&lt;/b&gt;"})
+            QVERIFY2(html.contains(expected), qPrintable(expected + QString(" in ") + html));
+        for (const char *absent : {"<script", "<b>", "javascript", "/relative", "mailto", "style", "<span", "<img"})
+            QVERIFY2(!html.contains(absent), qPrintable(absent + QString(" in ") + html));
+        QVERIFY(html.contains("js ") && html.contains("rel ") && html.contains("mail"));
+        QVERIFY(Markdown::toRichText("").isEmpty());
+        QVERIFY(Markdown::toRichText(" \n\n ").isEmpty());
+    }
+
+    void markdownLinksNostrEntitiesToNjump()
+    {
+        const QString hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        const QString npub = Nip19::npub(hex);
+        const QString note = "note14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w4sfreljc";
+        const QString nevent = Nip19::nevent(QString(64, 'a'), hex, 1);
+        const QString naddr = Nip19::naddr(30023, hex, "post");
+        const QString nprofile =
+            "nprofile1qqsrhuxx8l9ex335q7he0f09aej04zpazpl0ne2cgukyawd24mayt8gpp4mhxue69uhhytnc9e3k7mgpz4mhxue69uhkg6nzv9e"
+            "juumpv34kytnrdaksjlyr9p";
+        for (const QString &entity : {npub, note, nevent, naddr, nprofile}) {
+            const QString html = Markdown::toRichText("[who](nostr:" + entity + ")");
+            QCOMPARE(html, "<p><a href=\"https://njump.me/" + entity + "\">who</a></p>");
+            QCOMPARE(Markdown::nostrLinkTarget("NOSTR:" + entity.toUpper()), "https://njump.me/" + entity);
+        }
+        QCOMPARE(Markdown::toRichText("<nostr:" + npub + ">"),
+                 "<p><a href=\"https://njump.me/" + npub + "\">nostr:" + npub + "</a></p>");
+        // A broken checksum, a secret key, an unknown prefix, and a bare
+        // mention in prose stay text.
+        const QString broken = npub.left(npub.size() - 1) + (npub.endsWith('q') ? 'p' : 'q');
+        const QString nsec = "nsec1qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qursl6edet";
+        for (const QString &href : QStringList{"nostr:" + broken, "nostr:" + nsec, "nostr:nfoo1qqqqqqqqqqqq", "nostr:",
+                                               "nostr:" + npub + "?x=1", "nostr:" + QString(3000, 'q')}) {
+            const QString html = Markdown::toRichText("[who](" + href + ")");
+            QVERIFY2(!html.contains("<a"), qPrintable(html));
+            QVERIFY(html.contains("who"));
+            QVERIFY(Markdown::nostrLinkTarget(href).isEmpty());
+        }
+        const QString prose = Markdown::toRichText("Ask nostr:" + npub + " about it");
+        QVERIFY2(!prose.contains("<a") && prose.contains("nostr:" + npub.left(40)), qPrintable(prose));
+    }
+
+    void markdownNeverLoadsImages()
+    {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost));
+        int connections = 0;
+        connect(&server, &QTcpServer::newConnection, &server, [&] {
+            while (QTcpSocket *socket = server.nextPendingConnection()) {
+                ++connections;
+                socket->deleteLater();
+            }
+        });
+        const QString base = QStringLiteral("http://127.0.0.1:%1/").arg(server.serverPort());
+        const QString markdown = "![a cat](" + base + "cat.png \"Title\")\n\n![](" + base + "bare.png)\n\n[![inner]("
+                                 + base + "inner.png)](https://example.com/)\n\n<img src=\"" + base + "raw.png\">";
+        const QString html = Markdown::toRichText(markdown);
+        QVERIFY2(!html.contains("<img"), qPrintable(html));
+        QVERIFY2(html.contains("<a href=\"" + base + "cat.png\">[image: a cat]</a>"), qPrintable(html));
+        // Qt leaves out an image without a description, and an image inside a
+        // link loses the link's address for its own.
+        QVERIFY2(!html.contains("bare.png"), qPrintable(html));
+        QVERIFY(html.contains("<a href=\"" + base + "inner.png\">[image: inner]</a>"));
+        // Laid out as the reader would, and given time to ask: nothing does.
+        QTextDocument view;
+        view.setHtml(html);
+        view.setTextWidth(600);
+        QVERIFY(view.size().height() > 0);
+        QTest::qWait(300);
+        QCOMPARE(connections, 0);
+    }
+
+    void markdownStaysFastOnHostileInput_data()
+    {
+        QTest::addColumn<QString>("markdown");
+        QTest::addColumn<bool>("plain");
+        const int n = Markdown::maxInputLength;
+        QTest::newRow("nested quotes") << QString(100000, '>') + " deep" << false;
+        QTest::newRow("nested lists") << QString("- ").repeated(50000) + "x" << true;
+        QTest::newRow("nested quote lists") << QString("> - ").repeated(30000) + "x" << true;
+        QString indented;
+        for (int i = 0; indented.size() < n; ++i)
+            indented += QString(2 * i, ' ') + "- x\n";
+        QTest::newRow("indented lists") << indented << false;
+        QTest::newRow("bullets") << QString("- x\n").repeated(30000) << true;
+        QTest::newRow("loose bullets") << QString("1. x\n\n").repeated(20000) << true;
+        QTest::newRow("brackets") << QString(100000, '[') << false;
+        QTest::newRow("link openers") << QString("[a](").repeated(30000) << false;
+        QString table = "| a | b |\n|---|---|\n";
+        while (table.size() < n)
+            table += "| 1 | 2 |\n";
+        QTest::newRow("huge table") << table << true;
+        QTest::newRow("single-cell rows") << "a|b\n-|-\n" + QString("1\n").repeated(n / 2) << true;
+        QTest::newRow("wide table") << "|" + QString("a|").repeated(8000) + "\n|" + QString("-|").repeated(8000) << true;
+        QString capped = "|" + QString("a|").repeated(10) + "\n|" + QString("-|").repeated(10) + "\n";
+        for (int i = 0; i < Markdown::maxTableCells / 10 - 2; ++i)
+            capped += "|" + QString("1|").repeated(10) + "\n";
+        QTest::newRow("table at the caps") << capped << false;
+        QTest::newRow("bullets at the cap") << QString("- x\n").repeated(Markdown::maxListItems) << false;
+        QTest::newRow("long line") << QString(n, 'x') << false;
+        QTest::newRow("long lines") << (QString(20000, 'y') + "\n").repeated(n / 20001) << false;
+        QTest::newRow("headings") << QString("# h\n").repeated(n / 4) << false;
+        QTest::newRow("hard breaks") << QString("a\\\n").repeated(n / 3) << false;
+        QTest::newRow("emphasis") << QString("*_").repeated(n / 2) << false;
+        QTest::newRow("backticks") << QString(n, '`') << false;
+        // md4c ends a line at a lone carriage return too.
+        QTest::newRow("CR bullets") << QString("- a\r").repeated(8000) << true;
+        QTest::newRow("CR bullets in full") << QString("- a\r").repeated(32767) << true;
+        QString crTable = "| a | b |\r|---|---|\r";
+        while (crTable.size() < n)
+            crTable += "| 1 | 2 |\r";
+        QTest::newRow("CR table") << crTable << true;
+        QTest::newRow("CRLF table") << QString(crTable).replace("\r", "\r\n") << true;
+        QTest::newRow("oversized") << QString("word word word\n\n").repeated(4 * n / 16) << false;
+    }
+
+    void markdownStaysFastOnHostileInput()
+    {
+        QFETCH(QString, markdown);
+        QFETCH(bool, plain);
+        QCOMPARE(Markdown::withinCaps(markdown.left(Markdown::maxInputLength)), !plain);
+        QElapsedTimer timer;
+        timer.start();
+        const QString html = Markdown::toRichText(markdown);
+        const qint64 converted = timer.elapsed();
+        // Laid out as the reader lays it out, on this (the GUI) thread.
+        QTextDocument view;
+        view.setHtml(html);
+        view.setTextWidth(700);
+        view.size();
+        QVERIFY2(timer.elapsed() < 2000,
+                 qPrintable(QString("%1 ms to convert, %2 ms in all").arg(converted).arg(timer.elapsed())));
+        QVERIFY(html.size() <= Sanitizer::maxOutputLength + 8192);
+        QVERIFY(!html.contains("<img"));
+        if (markdown.size() > Markdown::maxInputLength)
+            QVERIFY(html.endsWith(QString("<p>") + QChar(0x2026) + "</p>"));
+    }
+
+    void markdownReadsEveryLineEnding()
+    {
+        // A table and a list read the same whichever line endings they have,
+        // and a CRLF is one line ending, not a blank line between two.
+        const QString lf = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n- one\n- two\n";
+        const QString html = Markdown::toRichText(lf);
+        QVERIFY2(html.contains("<table>") && html.contains("<li>two</li>"), qPrintable(html));
+        QCOMPARE(Markdown::toRichText(QString(lf).replace("\n", "\r\n")), html);
+        QCOMPARE(Markdown::toRichText(QString(lf).replace("\n", "\r")), html);
+        QCOMPARE(Markdown::normalizedLineEndings("a\r\nb\rc\n\r\nd\r\r"), QString("a\nb\nc\n\nd\n\n"));
+        // Counted as md4c counts them: a CRLF table's rows count once each.
+        QString rows = "a|b\r\n-|-\r\n";
+        for (int i = 0; i < Markdown::maxTableRows - 2; ++i)
+            rows += "1|2\r\n";
+        QVERIFY(Markdown::withinCaps(rows));
+        QVERIFY(!Markdown::withinCaps(rows + "1|2\r\n"));
+        QVERIFY(!Markdown::withinCaps(QString(rows).replace("\r\n", "\r") + "1|2\r"));
+    }
+
+    void markdownDocumentsLoadNoResources()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("cat.png");
+        QVERIFY(QImage(37, 23, QImage::Format_RGB32).save(path));
+        const QUrl url = QUrl::fromLocalFile(path);
+        const auto sizeOf = [](const QVariant &resource) {
+            return resource.canConvert<QImage>() ? resource.value<QImage>().size() : QSize();
+        };
+        // A plain QTextDocument reads a local image it is asked for; the one
+        // Markdown converts with never reads anything.
+        QTextDocument plain;
+        QCOMPARE(sizeOf(plain.resource(QTextDocument::ImageResource, url)), QSize(37, 23));
+        Markdown::InertDocument inert;
+        QVERIFY(inert.resource(QTextDocument::ImageResource, url).isNull());
+        QVERIFY(inert.resource(QTextDocument::StyleSheetResource, url).isNull());
+        // Asked to lay out, which has Qt's own image handler load a file by
+        // its name when the document gives it nothing, it lays nothing out
+        // and so reads nothing.
+        inert.setMarkdown("![a cat](" + url.toString() + ")\n\n<img src=\"" + path + "\">");
+        inert.setTextWidth(600);
+        QVERIFY(inert.size().isEmpty());
+        QVERIFY(dynamic_cast<Markdown::InertLayout *>(inert.documentLayout()));
+        QVERIFY(inert.resource(QTextDocument::ImageResource, url).isNull());
+        QVERIFY(inert.resource(QTextDocument::ImageResource, QUrl(path)).isNull());
+        QTextDocument shown;
+        shown.setMarkdown("![a cat](" + url.toString() + ")");
+        shown.setTextWidth(600);
+        QVERIFY(shown.size().height() > inert.size().height());
+    }
+
+    void sanitizerReadsQtStylesOnlyWhenAsked()
+    {
+        const QString html = "<p style=\" margin-left:40px; margin-right:40px;\"><span style=\" font-weight:700;"
+                             " font-style:italic;\">x</span> <span style=\"font-family:'monospace'\">y</span>"
+                             " <span style=\"text-decoration: line-through\">z</span>"
+                             " <span style=\"color:#0000ff\">w</span></p><p style=\"margin-left:40px\">v</p>";
+        Sanitizer::Options qt;
+        qt.qtStyles = true;
+        QCOMPARE(Sanitizer::toRichText(html, QUrl(), qt),
+                 QString("<blockquote><strong><em>x</em></strong> <code>y</code> <s>z</s> w</blockquote><p>v</p>"));
+        QCOMPARE(Sanitizer::toRichText(html, QUrl()), QString("<p>x y z w</p><p>v</p>"));
+        // Spans past the nesting cap, and stray ends, stay balanced.
+        const QString deep = QString("<span style=\"font-weight:700\">").repeated(200) + "t"
+                             + QString("</span>").repeated(300);
+        const QString out = Sanitizer::toRichText(deep, QUrl(), qt);
+        QCOMPARE(out.count("<strong>"), out.count("</strong>"));
+        QVERIFY(out.contains('t'));
+        // A smaller input cap cuts there.
+        Sanitizer::Options small;
+        small.maxInputLength = 10;
+        QCOMPARE(Sanitizer::toRichText("<p>0123456789abc</p>", QUrl(), small),
+                 QString("<p>0123456</p><p>") + QChar(0x2026) + "</p>");
+    }
+
+    // NIP-71 video
+
+    void nip19EncodesNeventAndChecksEntities()
+    {
+        const QString hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        // What nostr-tools' neventEncode({id, author, kind}) gives.
+        QCOMPARE(Nip19::nevent(QString(32, 'a').replace('a', "ab"), hex, 21),
+                 QString("nevent1qvzqqqqqz5pzqwlsccluhy6xxsr6l9a9uhhxf75g85g8a709tprjcn4e42h053vaqqs2h2at4w46h2at4w46h"
+                         "2at4w46h2at4w46h2at4w46h2at4w46h2cgm8zk2"));
+        QVERIFY(Nip19::nevent("not hex", hex, 21).isEmpty());
+        QVERIFY(Nip19::nevent(QString(64, 'a'), "short", 21).isEmpty());
+        QVERIFY(Nip19::nevent(QString(64, 'a'), hex, -1).isEmpty());
+
+        const QString npub = Nip19::npub(hex);
+        const QString note = "note14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w4sfreljc";
+        const QString nevent = Nip19::nevent(QString(64, 'b'), hex, 22);
+        for (const QString &entity : {npub, note, nevent, Nip19::naddr(30023, hex, "x")}) {
+            QCOMPARE(Nip19::entity(entity), entity);
+            QCOMPARE(Nip19::entity(entity.toUpper()), entity);
+        }
+        QVERIFY(Nip19::entity(npub.left(5) + npub.mid(5).toUpper()).isEmpty());
+        QVERIFY(Nip19::entity(npub.left(npub.size() - 1) + (npub.endsWith('q') ? 'p' : 'q')).isEmpty());
+        // A secret key never becomes a link, nor does a key of the wrong size.
+        QVERIFY(Nip19::entity("nsec1qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qurswpc8qursl6edet").isEmpty());
+        QVERIFY(Nip19::entity("note1pyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpysrhujx").isEmpty());
+        QVERIFY(Nip19::entity("npub1pyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysj6qhpr4").isEmpty());
+        QVERIFY(Nip19::entity("npub1" + QString(Nip19::maxLength, 'q')).isEmpty());
+        QVERIFY(Nip19::entity("npub1bbbbbbb").isEmpty());
+        QVERIFY(Nip19::entity("").isEmpty());
+    }
+
+    void nip19RefusesNonAsciiAndIncompleteEntities()
+    {
+        const QString hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        const QByteArray key = QByteArray::fromHex(hex.toLatin1());
+        // The Kelvin sign lowercases to "k", so an uppercase entity with one
+        // for its K would pass for the entity; nothing outside printable
+        // ASCII does.
+        QString withK;
+        for (int kind = 1; withK.isEmpty() && kind < 200; ++kind)
+            if (const QString nevent = Nip19::nevent(QString(64, 'a'), hex, kind); nevent.contains('k'))
+                withK = nevent;
+        QVERIFY(!withK.isEmpty());
+        QCOMPARE(Nip19::entity(withK.toUpper()), withK);
+        QVERIFY(Nip19::entity(withK.toUpper().replace('K', QChar(0x212A))).isEmpty());
+        QVERIFY(Nip19::entity(withK + QChar(0x00A0)).isEmpty());
+        QString npubWithK;
+        for (char c = 'a'; npubWithK.isEmpty() && c <= 'f'; ++c)
+            if (const QString npub = Nip19::npub(QString(64, c)); npub.contains('k'))
+                npubWithK = npub;
+        QVERIFY(!npubWithK.isEmpty());
+        QVERIFY(Nip19::decodeProfile(npubWithK.toUpper()).has_value());
+        QVERIFY(!Nip19::decodeProfile(npubWithK.toUpper().replace('K', QChar(0x212A))).has_value());
+
+        // The encoder below makes what Nip19 does.
+        const auto field = [](int type, const QByteArray &value) {
+            return QByteArray(1, char(type)) + QByteArray(1, char(value.size())) + value;
+        };
+        const QByteArray kind = QByteArray::fromHex("00007597");
+        QCOMPARE(bech32("naddr", field(0, "x") + field(2, key) + field(3, kind)), Nip19::naddr(30103, hex, "x"));
+
+        // What nostr-tools reads, unknown types skipped, is accepted.
+        const QString id = QString(64, 'b');
+        const QByteArray idBytes = QByteArray::fromHex(id.toLatin1());
+        for (const QString &entity :
+             {Nip19::nevent(id, hex, 22), bech32("nevent", field(0, idBytes)), Nip19::naddr(30023, hex, ""),
+              bech32("nevent", field(9, "?") + field(0, idBytes) + field(1, "wss://relay.example.com")),
+              bech32("nprofile", field(0, key) + field(1, "wss://relay.example.com")),
+              bech32("naddr", field(0, "post") + field(2, key) + field(3, kind) + field(7, "extra"))})
+            QVERIFY2(Nip19::entity(entity) == entity, qPrintable(entity));
+        // Without the fields it needs, of the wrong size, or cut short, it
+        // is not.
+        QVERIFY(Nip19::entity("nevent1c3esv7").isEmpty());
+        for (const QString &entity :
+             {bech32("nevent", {}), bech32("nevent", field(0, idBytes.left(31))),
+              bech32("nevent", field(0, idBytes) + field(2, key.left(31))),
+              bech32("nevent", field(0, idBytes) + field(3, kind.left(3))),
+              bech32("nprofile", field(1, "wss://r.example")),
+              bech32("nprofile", field(0, key + 'x')), bech32("nprofile", field(0, key) + field(0, key)),
+              bech32("naddr", field(0, "post")),
+              bech32("naddr", field(2, key) + field(3, kind)), bech32("naddr", field(0, "post") + field(2, key)),
+              bech32("naddr", field(0, "post") + field(2, key) + field(3, kind + 'x')),
+              bech32("naddr", QByteArray::fromHex("deadbeefcafe")), bech32("nevent", field(0, idBytes).chopped(1)),
+              bech32("naddr", field(0, "post") + field(2, key) + field(3, kind) + QByteArray(1, '\x05'))})
+            QVERIFY2(Nip19::entity(entity).isEmpty(), qPrintable(entity));
+        // Subscribing refuses the same two-key nprofile a link does.
+        QVERIFY(!Nip19::decodeProfile(bech32("nprofile", field(0, key) + field(0, key))));
+        QVERIFY(Nip19::decodeProfile(bech32("nprofile", field(0, key) + field(1, "wss://relay.example.com"))));
+    }
+
+    void nostrSourceReadsVideos()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        const QString cdn = "https://cdn.example.com/";
+        QList<NostrEvent> events;
+        for (const QJsonObject &json : {
+                 // Chosen with its own image and duration; a future published_at.
+                 signedEvent(21, "Line one\nline two\n\nNext <b>", {{"title", "Clip\u202e"},
+                             {"published_at", QString::number(now + 7 * 86400)},
+                             {"imeta", "url " + cdn + "a.mp4", "m video/mp4", "image " + cdn + "a.jpg",
+                              "duration 61.5", "dim 1920x1080"}}, now - 100),
+                 // A javascript: url and an ftp: url are skipped; an image
+                 // from an imeta that plays nothing is the thumbnail; NaN is
+                 // no duration.
+                 signedEvent(22, "short", {{"published_at", QString::number(now - 5000)},
+                             {"imeta", "url javascript:alert(1)", "m video/mp4", "image " + cdn + "first.jpg"},
+                             {"imeta", "url ftp://cdn.example.com/b.mp4"},
+                             {"imeta", "url " + cdn + "b.webm", "duration NaN", "image javascript:x"}}, now - 200),
+                 // Not a video type, and an imeta without a url.
+                 signedEvent(21, "", {{"imeta", "url " + cdn + "c.jpg", "m image/jpeg"},
+                             {"imeta", "m video/mp4", "duration 3"}}, now - 300),
+                 // No imeta; a later one wins over an earlier usable one only
+                 // when the earlier does not play.
+                 signedEvent(21, "", {{"title", "Bare"}}, now - 400),
+                 signedEvent(21, "", {{"imeta", "url " + cdn + QString(9000, 'x') + ".mp4"},
+                             {"imeta", "url " + cdn + "e1.mp4", "M VIDEO/MP4", "duration -3"},
+                             {"imeta", "url " + cdn + "e2.mp4", "duration 9"}}, now - 500),
+                 signedEvent(21, "", {{"imeta", "url " + cdn + "f.mp4", "duration inf", "m VIDEO/WebM"}}, now - 600),
+                 signedEvent(30023, "# Long", {{"d", "a"}}, now - 50),
+                 signedEvent(1, "a note", {}, now - 60)})
+            events << *NostrEvent::fromJson(json);
+        const QString pubkey = events.first().pubkey;
+
+        const QList<ParsedItem> items = NostrSource::videos(events, "Ada");
+        QCOMPARE(items.size(), 6);
+        const ParsedItem &a = items.at(0);
+        QCOMPARE(a.title, QString("Clip"));
+        QCOMPARE(a.guid, events.at(0).id);
+        QCOMPARE(a.published.toSecsSinceEpoch(), now - 100);
+        QCOMPARE(a.mediaUrl, cdn + "a.mp4");
+        QCOMPARE(a.thumbnailUrl, cdn + "a.jpg");
+        QCOMPARE(a.duration, 61.5);
+        QCOMPARE(a.author, QString("Ada"));
+        QCOMPARE(a.content, QString("<p>Line one<br>line two</p><p>Next &lt;b&gt;</p>"));
+        QCOMPARE(a.summary, QString("Line one line two Next <b>"));
+        QCOMPARE(a.url, "https://njump.me/" + Nip19::nevent(events.at(0).id, pubkey, 21));
+        QVERIFY(a.address.isEmpty());
+
+        const ParsedItem &e = items.at(3);
+        QCOMPARE(e.mediaUrl, cdn + "e1.mp4");
+        QCOMPARE(e.duration, -1.0);
+        QCOMPARE(items.at(4).mediaUrl, cdn + "f.mp4");
+        QCOMPARE(items.at(4).duration, -1.0);
+
+        const ParsedItem &b = items.at(5);
+        QCOMPARE(b.title, QString("Untitled Video"));
+        QCOMPARE(b.published.toSecsSinceEpoch(), now - 5000);
+        QCOMPARE(b.mediaUrl, cdn + "b.webm");
+        QCOMPARE(b.thumbnailUrl, cdn + "first.jpg");
+        QCOMPARE(b.duration, -1.0);
+        QCOMPARE(b.url, "https://njump.me/" + Nip19::nevent(events.at(1).id, pubkey, 22));
+
+        const ParsedItem &c = items.at(1);
+        QVERIFY(c.mediaUrl.isEmpty());
+        QVERIFY(c.thumbnailUrl.isEmpty());
+        QCOMPARE(c.duration, -1.0);
+        QVERIFY(c.content.isEmpty());
+        QCOMPARE(items.at(2).title, QString("Bare"));
+        QVERIFY(items.at(2).mediaUrl.isEmpty());
+        // The long-form reader leaves videos alone.
+        QCOMPARE(NostrSource::longForm(events, "Ada").size(), 1);
+    }
+
+    void storeMigratesAVersionOneLibraryAndKeepsMedia()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        {
+            // A library as phase 1 wrote it, schema version 1.
+            QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "v1");
+            raw.setDatabaseName(path);
+            QVERIFY(raw.open());
+            QSqlQuery query(raw);
+            const QStringList statements =
+                versionOneSchema()
+                << "INSERT INTO feeds (url, url_key, title, created_at) VALUES ('https://a.example.com/feed',"
+                   " 'a.example.com/feed', 'A', 1)"
+                << "INSERT INTO items (feed_id, guid, title, created_at, is_starred) VALUES (1, 'old', 'Old', 1, 1)"
+                << "PRAGMA user_version = 1";
+            for (const QString &statement : statements)
+                QVERIFY2(query.exec(statement), qPrintable(query.lastError().text()));
+            query = QSqlQuery();
+            raw.close();
+            raw = QSqlDatabase();
+            QSqlDatabase::removeDatabase("v1");
+        }
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        QCOMPARE(store.schemaVersion(), 3);
+        QList<Article> articles = store.articles({});
+        QCOMPARE(articles.size(), 1);
+        QCOMPARE(articles.first().title, QString("Old"));
+        QVERIFY(articles.first().starred);
+        QVERIFY(articles.first().mediaUrl.isEmpty());
+        QCOMPARE(articles.first().duration, -1.0);
+
+        ParsedItem video;
+        video.guid = "video";
+        video.title = "Clip";
+        video.mediaUrl = "https://cdn.example.com/a.mp4";
+        video.thumbnailUrl = "https://cdn.example.com/a.jpg";
+        video.duration = 12.5;
+        QCOMPARE(store.saveItems(1, {video}), 1);
+        Article saved = store.articles({}).first();
+        QCOMPARE(saved.mediaUrl, video.mediaUrl);
+        QCOMPARE(saved.thumbnailUrl, video.thumbnailUrl);
+        QCOMPARE(saved.duration, 12.5);
+        // A later save of the same event updates it in place.
+        video.thumbnailUrl.clear();
+        video.duration = -1;
+        QCOMPARE(store.saveItems(1, {video}), 0);
+        saved = *store.article(saved.id);
+        QVERIFY(saved.thumbnailUrl.isEmpty());
+        QCOMPARE(saved.duration, -1.0);
+        QCOMPARE(saved.mediaUrl, video.mediaUrl);
+    }
+
+    void storeMigrationAsksNostrFeedsForEverythingAgain()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        {
+            // A library as the long-form release wrote it, schema version 2,
+            // with a Nostr feed that every relay answered.
+            QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "v2");
+            raw.setDatabaseName(path);
+            QVERIFY(raw.open());
+            QSqlQuery query(raw);
+            QStringList statements = versionOneSchema();
+            statements << "ALTER TABLE items ADD COLUMN address TEXT"
+                       << "ALTER TABLE items ADD COLUMN revision INTEGER"
+                       << "CREATE INDEX items_by_address ON items(feed_id, address) WHERE address IS NOT NULL"
+                       << "ALTER TABLE feeds ADD COLUMN relay_hints TEXT"
+                       << "ALTER TABLE feeds ADD COLUMN profile_revision INTEGER"
+                       << "ALTER TABLE feeds ADD COLUMN profile_event_id TEXT"
+                       << "ALTER TABLE feeds ADD COLUMN profile_title TEXT"
+                       << "ALTER TABLE feeds ADD COLUMN complete_at INTEGER"
+                       << "INSERT INTO feeds (url, url_key, title, created_at, complete_at) VALUES ('"
+                              + Nip19::npub(QString(64, 'a')) + "', 'nostr-a', 'Ada', 1, 1700000000)"
+                       << "INSERT INTO feeds (url, url_key, title, created_at, complete_at) VALUES"
+                          " ('https://a.example.com/feed', 'a.example.com/feed', 'A', 1, 1700000000)"
+                       << "PRAGMA user_version = 2";
+            for (const QString &statement : statements)
+                QVERIFY2(query.exec(statement), qPrintable(query.lastError().text()));
+            query = QSqlQuery();
+            raw.close();
+            raw = QSqlDatabase();
+            QSqlDatabase::removeDatabase("v2");
+        }
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        QCOMPARE(store.schemaVersion(), 3);
+        const QList<Feed> feeds = store.feeds();
+        QCOMPARE(feeds.size(), 2);
+        for (const Feed &feed : feeds) {
+            // The Nostr feed asks for everything again, its videos among
+            // them; nothing else changes.
+            QCOMPARE(feed.completeAt.isValid(), !Library::isNostrFeed(feed));
+            if (Library::isNostrFeed(feed))
+                for (const NostrQuery &query : Library::nostrQueries(feed))
+                    QCOMPARE(query.since, 0);
+        }
+    }
+
+    void nostrAuthorsBringVideosAndLongForm()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeRelay relay;
+        // The thumbnail is on this machine, which the window never asks.
+        const QJsonObject video = signedEvent(21, "Watch this", {{"title", "Clip"},
+            {"imeta", "url https://cdn.example.com/a.mp4", "m video/mp4", "image http://127.0.0.1:1/a.jpg",
+             "duration 3725"}}, now + 300);
+        relay.events = {signedEvent(0, R"({"name":"ada"})", {}, now),
+                        signedEvent(30023, "# Hi", {{"d", "a"}, {"title", "Hello"}, {"published_at", QString::number(now)}},
+                                    now + 100),
+                        signedEvent(22, "Short one", {{"imeta", "url https://cdn.example.com/b.mp4"}}, now + 200),
+                        video, video};
+        const QString pubkey = relay.events.first().toObject().value("pubkey").toString();
+        const auto author = Nip19::decodeProfile(Nip19::npub(pubkey));
+
+        RelayPool pool;
+        pool.setRelays({relay.url()});
+        const QList<NostrResult> found = queryAll(pool, Library::nostrQueries(*author));
+        QVERIFY2(found.at(0).complete() && found.at(1).complete(), qPrintable(found.at(0).error + found.at(1).error));
+        QCOMPARE(relay.filters.size(), 2);
+        const QList<QJsonArray> kinds{relay.filters.at(0).value("kinds").toArray(),
+                                      relay.filters.at(1).value("kinds").toArray()};
+        QVERIFY(kinds.contains(QJsonArray({0, 30023})) && kinds.contains(QJsonArray({21, 22})));
+        // Videos are regular events: the repeated one is kept once, by id.
+        QCOMPARE(found.at(0).events.size(), 2);
+        QCOMPARE(found.at(1).events.size(), 2);
+        Store store;
+        QVERIFY(store.open());
+        const Library::Subscription subscription = Library::subscribeNostr(store, *author, found.at(0), found.at(1));
+        QVERIFY2(subscription.error.isEmpty(), qPrintable(subscription.error));
+        QCOMPARE(subscription.added, 3);
+
+        // A second refresh with an edited article adds nothing twice.
+        relay.events << signedEvent(30023, "# Hi again",
+                                    {{"d", "a"}, {"title", "Hello again"}, {"published_at", QString::number(now)}},
+                                    now + 400);
+        const QList<NostrResult> refreshed = queryAll(pool, Library::nostrQueries(*store.feed(subscription.id)));
+        const Library::Refresh refresh =
+            Library::applyNostr(store, *store.feed(subscription.id), refreshed.at(0), refreshed.at(1));
+        QVERIFY2(refresh.error.isEmpty(), qPrintable(refresh.error));
+        QCOMPARE(refresh.added, 0);
+        const QList<Article> articles = store.articles({});
+        QCOMPARE(articles.size(), 3);
+        QCOMPARE(articles.at(0).title, QString("Clip"));
+        QCOMPARE(articles.at(0).guid, video.value("id").toString());
+        QCOMPARE(articles.at(0).duration, 3725.0);
+        QCOMPARE(articles.at(1).title, QString("Untitled Video"));
+        QCOMPARE(articles.at(2).title, QString("Hello again"));
+        QVERIFY(articles.at(2).mediaUrl.isEmpty());
+
+        // The window shows the video, its length, and the long-form as Markdown.
+        Backend backend;
+        QList<QPair<QString, QStringList>> launched;
+        backend.setLauncher([&](const QString &program, const QStringList &arguments) {
+            launched << qMakePair(program, arguments);
+            return Backend::Launch::Started;
+        });
+        backend.selectArticle(2);
+        QVERIFY(!backend.articleIsVideo());
+        QVERIFY2(backend.articleHtml().contains("<h1>") && backend.articleHtml().contains("Hi again"),
+                 qPrintable(backend.articleHtml()));
+        backend.playVideo();
+        QVERIFY(launched.isEmpty());
+        QVERIFY(!backend.statusError());
+        backend.selectArticle(0);
+        QVERIFY(backend.articleIsVideo());
+        QCOMPARE(backend.articleDuration(), 3725.0);
+        QCOMPARE(backend.articleHtml(), QString("<p>Watch this</p>"));
+        QVERIFY(backend.articleUrl().startsWith("https://njump.me/nevent1"));
+    }
+
+    void nostrShortsLeaveRoomForArticlesAndTheProfile()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 7200;
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME", "READSTR_RELAYS"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        qputenv("READSTR_RELAYS", relay.url().toUtf8());
+        // A profile and an article older than 150 short videos, which one
+        // query with one limit would have crowded out.
+        relay.events = {signedEvent(0, R"({"name":"ada"})", {}, now),
+                        signedEvent(30023, "# Hi", {{"d", "a"}, {"title", "Hello"}}, now + 1)};
+        for (int i = 0; i < 150; ++i)
+            relay.events << signedEvent(
+                22, "Short", {{"imeta", "url https://cdn.example.com/" + QString::number(i) + ".mp4"}}, now + 10 + i);
+        const QString npub = Nip19::npub(relay.events.first().toObject().value("pubkey").toString());
+
+        // Through the headless commands...
+        QString out, err;
+        QCOMPARE(run({"subscribe", npub, "--json"}, out, err), 0);
+        const QJsonObject subscribed = QJsonDocument::fromJson(out.toUtf8()).object();
+        QCOMPARE(subscribed.value("title").toString(), QString("ada"));
+        QCOMPARE(subscribed.value("articles").toInt(), 101);
+        Store store;
+        QVERIFY(store.open());
+        ArticleFilter all;
+        all.limit = 1000;
+        QList<Article> articles = store.articles(all);
+        QCOMPARE(articles.size(), 101);
+        QCOMPARE(articles.last().title, QString("Hello"));
+        QVERIFY(store.feeds().first().completeAt.isValid());
+        relay.events << signedEvent(30023, "More", {{"d", "b"}, {"title", "Second"}}, now + 2);
+        out.clear();
+        QCOMPARE(run({"refresh", "--json"}, out, err), 0);
+        const QJsonObject refreshed = QJsonDocument::fromJson(out.toUtf8()).array().at(0).toObject();
+        QCOMPARE(refreshed.value("status").toString(), QString("updated"));
+        QCOMPARE(refreshed.value("new").toInt(), 1);
+
+        // ...and through the window.
+        relay.events << signedEvent(30023, "Third", {{"d", "c"}, {"title", "Third"}}, now + 3);
+        Backend backend;
+        backend.setRelays({relay.url()});
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        backend.refreshAll();
+        QVERIFY(finished.wait(5000));
+        QVERIFY2(backend.status().startsWith("1 new article"), qPrintable(backend.status()));
+        articles = store.articles(all);
+        QCOMPARE(articles.size(), 103);
+        QCOMPARE(articles.last().title, QString("Hello"));
+    }
+
+    void nostrSourceKeepsVideosOffTheLocalNetwork()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        const auto video = [now](const QList<QStringList> &tags) {
+            return NostrEvent::fromJson(signedEvent(21, "", tags, now));
+        };
+        // A local media URL is passed over for the next imeta's, and a local
+        // image is no thumbnail.
+        auto event = video({{"imeta", "url http://192.168.1.5/a.mp4", "image https://cdn.example.com/a.jpg"},
+                            {"imeta", "url http://[::ffff:127.0.0.1]/b.mp4"},
+                            {"imeta", "url https://cdn.example.com/c.mp4", "image http://10.0.0.1/c.jpg"}});
+        QVERIFY(event);
+        QList<ParsedItem> items = NostrSource::videos({*event}, "Ada");
+        QCOMPARE(items.size(), 1);
+        QCOMPARE(items.first().mediaUrl, QString("https://cdn.example.com/c.mp4"));
+        QCOMPARE(items.first().thumbnailUrl, QString("https://cdn.example.com/a.jpg"));
+        event = video({{"imeta", "url http://localhost/a.mp4", "image http://router/a.jpg"}});
+        items = NostrSource::videos({*event}, "Ada");
+        QVERIFY(items.first().mediaUrl.isEmpty());
+        QVERIFY(items.first().thumbnailUrl.isEmpty());
+    }
+
+    void nostrSourceBelievesOnlySaneDurations()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        // Zero is unknown, as is anything not above it, past 1e7 seconds, or
+        // not finite.
+        const QList<QPair<QString, double>> cases = {{"0", -1},       {"0.0", -1},     {"-0", -1},   {"0.5", 0.5},
+                                                      {"3725", 3725}, {"1e7", 1e7},    {"1e7.5", -1}, {"10000001", -1},
+                                                      {"1e308", -1},  {"1e309", -1},   {"nan", -1},  {"x", -1}};
+        for (const auto &[text, expected] : cases) {
+            const auto event = NostrEvent::fromJson(
+                signedEvent(21, "", {{"imeta", "url https://cdn.example.com/a.mp4", "duration " + text}}, now));
+            QVERIFY(event);
+            QCOMPARE(NostrSource::videos({*event}, "Ada").first().duration, expected);
+        }
+    }
+
+    void backendRefusesToPlayLocalVideos()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        {
+            // As a library saved before NostrSource dropped such URLs holds it.
+            Store store;
+            QVERIFY(store.open());
+            const qint64 feed = store.addFeed(Nip19::npub(QString(64, 'a')), "Ada");
+            ParsedItem item;
+            item.guid = "local";
+            item.title = "Local";
+            item.mediaUrl = "http://192.168.1.5/a.mp4";
+            item.published = QDateTime(QDate(2026, 1, 1), QTime(12, 0), QTimeZone::UTC);
+            QCOMPARE(store.saveItems(feed, {item}), 1);
+        }
+        Backend backend;
+        QStringList launched;
+        backend.setLauncher([&](const QString &program, const QStringList &) {
+            launched << program;
+            return Backend::Launch::Started;
+        });
+        backend.selectArticle(0);
+        QVERIFY(backend.articleIsVideo());
+        backend.playVideo();
+        QVERIFY(launched.isEmpty());
+        QVERIFY(backend.statusError());
+        QVERIFY2(backend.status().contains("local network"), qPrintable(backend.status()));
+    }
+
+    void backendPlaysVideosInMpv()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME", "PATH"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        // Thumbnails on this machine, which the window never asks.
+        seedVideos(QUrl("http://127.0.0.1:1/a.jpg"), QUrl("http://127.0.0.1:1/b.jpg"));
+        Backend backend;
+        QList<QPair<QString, QStringList>> launched;
+        Backend::Launch answer = Backend::Launch::Started;
+        backend.setLauncher([&](const QString &program, const QStringList &arguments) {
+            launched << qMakePair(program, arguments);
+            return answer;
+        });
+        backend.playVideo();
+        QVERIFY(launched.isEmpty());
+        backend.selectArticle(0);
+        backend.playVideo();
+        QCOMPARE(launched.size(), 1);
+        QCOMPARE(launched.first().first, QString("mpv"));
+        QCOMPARE(launched.first().second, QStringList({"--", "https://cdn.example.com/a.mp4"}));
+        QVERIFY(!backend.statusError());
+        QVERIFY(backend.status().contains("Slow"));
+
+        answer = Backend::Launch::Missing;
+        backend.playVideo();
+        QVERIFY(backend.statusError());
+        QVERIFY2(backend.status().contains("mpv is not installed"), qPrintable(backend.status()));
+        answer = Backend::Launch::Failed;
+        backend.playVideo();
+        QVERIFY(backend.statusError());
+        QVERIFY(backend.status().contains("mpv did not start"));
+        backend.selectArticle(2);
+        backend.playVideo();
+        QCOMPARE(launched.size(), 3);
+        QCOMPARE(backend.status(), QString("This article has no video to play"));
+
+        // Without mpv on PATH the real launcher says so, and starts nothing.
+        QTemporaryDir empty;
+        qputenv("PATH", empty.path().toUtf8());
+        QCOMPARE(Backend::launchDetached("mpv", {"--", "https://cdn.example.com/a.mp4"}), Backend::Launch::Missing);
+    }
+
+    void thumbnailsFetchDecodeAndCache()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.serve("/wide.png", png(3000, 300), "image/png");
+        Thumbnails thumbnails;
+        Thumbnails::Limits limits;
+        limits.publicHostsOnly = false;
+        thumbnails.setLimits(limits);
+
+        const QUrl url = server.url("/wide.png");
+        QVERIFY(!Thumbnails::cached(url).isValid());
+        const QUrl file = fetchThumbnail(thumbnails, url);
+        QVERIFY(file.isLocalFile());
+        QCOMPARE(file, Thumbnails::cached(url));
+        QCOMPARE(file.toLocalFile(), Thumbnails::cachePath(url));
+        QVERIFY(file.toLocalFile().startsWith(dir.path() + "/cache/thumbnails/"));
+        QVERIFY(file.toLocalFile().endsWith(
+            QCryptographicHash::hash(url.toString(QUrl::FullyEncoded).toUtf8(), QCryptographicHash::Sha256).toHex()
+            + ".jpg"));
+        // Kept as JPEG, which is far smaller than PNG for a photograph.
+        QFile saved(file.toLocalFile());
+        QVERIFY(saved.open(QIODevice::ReadOnly));
+        QVERIFY(saved.read(3) == QByteArray("\xff\xd8\xff"));
+        const QImage image(file.toLocalFile());
+        QCOMPARE(image.size(), QSize(1280, 128));
+        QCOMPARE(mode(file.toLocalFile()), 0600);
+        QCOMPARE(mode(dir.path() + "/cache/thumbnails"), 0700);
+        QCOMPARE(mode(dir.path() + "/cache"), 0700);
+        QCOMPARE(server.requests.size(), 1);
+        QVERIFY(server.requests.first().headers.value("cookie").isEmpty());
+        // From the cache the second time, without asking.
+        QCOMPARE(fetchThumbnail(thumbnails, url), file);
+        QCOMPARE(server.requests.size(), 1);
+        // Nothing but the final file is left in the directory.
+        QCOMPARE(QDir(dir.path() + "/cache/thumbnails").entryList(QDir::Files).size(), 1);
+    }
+
+    void thumbnailsRefuseWhatTheyShouldNot()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.serve("/big.png", png(10, 10) + QByteArray(3 * 1024 * 1024, 'x'), "image/png");
+        server.serve("/page.png", png(10, 10), "text/html");
+        server.serve("/bomb.png", pngClaiming(100000, 100000), "image/png");
+        server.serve("/svg.png", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>",
+                     "image/svg+xml");
+        server.serve("/junk.png", QByteArray(1000, 'j'), "image/png");
+        server.route("/gone.png", [](const FakeHttpServer::Request &) { return FakeHttpServer::Response{404, {}, {}}; });
+        Thumbnails thumbnails;
+        Thumbnails::Limits limits;
+        limits.publicHostsOnly = false;
+        thumbnails.setLimits(limits);
+        QSignalSpy failed(&thumbnails, &Thumbnails::failed);
+        const QList<QPair<const char *, const char *>> cases = {{"/big.png", "larger than 2 MiB"},
+                                                                 {"/page.png", "not an image (text/html)"},
+                                                                 {"/bomb.png", "too large to decode"},
+                                                                 {"/svg.png", "not a PNG"},
+                                                                 {"/junk.png", "not a PNG"},
+                                                                 {"/gone.png", "HTTP 404"}};
+        for (const auto &[path, reason] : cases) {
+            failed.clear();
+            QVERIFY2(!fetchThumbnail(thumbnails, server.url(path)).isValid(), path);
+            QCOMPARE(failed.size(), 1);
+            QVERIFY2(failed.first().at(1).toString().contains(reason), qPrintable(failed.first().at(1).toString()));
+            QVERIFY(!Thumbnails::cached(server.url(path)).isValid());
+        }
+
+        // Within the dimensions but past the allocation limit, and past the
+        // dimensions however few pixels.
+        QString error;
+        Thumbnails::Limits tight;
+        tight.allocationLimitMb = 1;
+        QVERIFY(Thumbnails::decode(png(1000, 1000), tight, &error).isNull());
+        QVERIFY2(error.contains("too large"), qPrintable(error));
+        QVERIFY(Thumbnails::decode(png(9000, 2), Thumbnails::Limits{}, &error).isNull());
+        QVERIFY(error.contains("9000 by 2"));
+        QVERIFY(!Thumbnails::decode(png(500, 2000), Thumbnails::Limits{}, &error).isNull());
+
+        // By default this machine is never asked.
+        const int asked = int(server.requests.size());
+        Thumbnails strict;
+        failed.clear();
+        QSignalSpy strictFailed(&strict, &Thumbnails::failed);
+        QVERIFY(!fetchThumbnail(strict, server.url("/page.png")).isValid());
+        QVERIFY(strictFailed.first().at(1).toString().contains("local network"));
+        QCOMPARE(server.requests.size(), asked);
+        Fetcher fetcher;
+        Fetcher::Limits publicOnly;
+        publicOnly.publicHostsOnly = true;
+        fetcher.setLimits(publicOnly);
+        QVERIFY(fetcher.get({QUrl("http://localhost:1/x"), {}, {}}).error.contains("local network"));
+        QVERIFY(fetcher.get({QUrl("http://[::1]:1/x"), {}, {}}).error.contains("local network"));
+        QCOMPARE(server.requests.size(), asked);
+    }
+
+    void thumbnailsSniffTheFormatBeforeAnyReader()
+    {
+        QCOMPARE(Thumbnails::sniff(png(2, 2)), QByteArray("png"));
+        QCOMPARE(Thumbnails::sniff(jpeg(2, 2)), QByteArray("jpeg"));
+        QCOMPARE(Thumbnails::sniff(QByteArray("GIF89a\x02\x00\x02\x00", 10)), QByteArray("gif"));
+        QCOMPARE(Thumbnails::sniff(QByteArray("GIF87a\x02\x00\x02\x00", 10)), QByteArray("gif"));
+        QCOMPARE(Thumbnails::sniff(QByteArray("RIFF\x10\x00\x00\x00WEBPVP8 ", 16)), QByteArray("webp"));
+        // Documents and the formats left out, whatever type they came as.
+        const QByteArray svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>";
+        const QByteArray pdf = "%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n";
+        for (const QByteArray &data :
+             {svg, pdf, QByteArray("<?xml version=\"1.0\"?>") + svg, QByteArray("II*\x00\x08\x00\x00\x00", 8),
+              QByteArray("MM\x00*", 4), QByteArray("BM\x36\x00"), QByteArray("RIFF\x10\x00\x00\x00WAVE", 12),
+              QByteArray("\x89PNG", 4), QByteArray("\xff\xd8"), QByteArray("GIF8"), QByteArray()}) {
+            QVERIFY2(Thumbnails::sniff(data).isEmpty(), data.toHex().constData());
+            QString error;
+            QVERIFY(Thumbnails::decode(data, Thumbnails::Limits{}, &error).isNull());
+            QVERIFY2(error.contains("not a PNG"), qPrintable(error));
+        }
+        // The bytes decide, not the name: a JPEG is read as a JPEG.
+        QString error;
+        QCOMPARE(Thumbnails::decode(jpeg(30, 20), Thumbnails::Limits{}, &error).size(), QSize(30, 20));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+    }
+
+    void thumbnailsRefuseJpegsThatTakeLongToDecode()
+    {
+        // A progressive JPEG decodes in a few scans.
+        const QByteArray progressive = jpeg(64, 48, true);
+        QVERIFY(progressive.count(QByteArrayView("\xff\xda", 2)) > 1);
+        QString error;
+        QCOMPARE(Thumbnails::decode(progressive, Thumbnails::Limits{}, &error).size(), QSize(64, 48));
+        // A thousand more, empty, are refused before any reader is made, at once.
+        QByteArray bomb = progressive.chopped(2);
+        for (int i = 0; i < 1000; ++i)
+            bomb += QByteArray::fromHex("ffda000801010000003f00");
+        bomb += QByteArray::fromHex("ffd9");
+        QElapsedTimer timer;
+        timer.start();
+        QVERIFY(Thumbnails::decode(bomb, Thumbnails::Limits{}, &error).isNull());
+        QVERIFY2(error.contains("scans, too many"), qPrintable(error));
+        QVERIFY(timer.elapsed() < 500);
+        // A progressive one also has a smaller pixel cap than the rest.
+        Thumbnails::Limits limits;
+        limits.maxProgressivePixels = 64 * 47;
+        QVERIFY(Thumbnails::decode(progressive, limits, &error).isNull());
+        QVERIFY2(error.contains("progressive JPEG is 64 by 48"), qPrintable(error));
+        QCOMPARE(Thumbnails::decode(jpeg(64, 48), limits, &error).size(), QSize(64, 48));
+        // So does a baseline one of several scans.
+        const QByteArray baseline = jpeg(64, 48);
+        const QByteArray twoScans = baseline.chopped(2) + QByteArray::fromHex("ffda000801010000003f00ffd9");
+        QVERIFY(Thumbnails::decode(twoScans, limits, &error).isNull());
+        QVERIFY2(error.contains("JPEG of several scans is 64 by 48"), qPrintable(error));
+        // Scan markers inside a marker segment (an Exif thumbnail's) are no
+        // scans of this image, though the quick count errs toward them.
+        QByteArray exif = QByteArray::fromHex("ffe1") + QByteArray(1, 0) + QByteArray(1, char(2 + 5 * 2))
+                          + QByteArray("\xff\xda").repeated(5);
+        const QByteArray tagged = baseline.left(2) + exif + baseline.mid(2);
+        QCOMPARE(Thumbnails::decode(tagged, limits, &error).size(), QSize(64, 48));
+        limits.maxJpegScans = 5;
+        QVERIFY(Thumbnails::decode(tagged, limits, &error).isNull());
+        QVERIFY2(error.contains("6 scans"), qPrintable(error));
+    }
+
+    void thumbnailsBudgetWhatDecodingHolds()
+    {
+        QString error;
+        // Past half the allocation limit at 4 bytes a pixel, since scaling
+        // makes a second copy, a PNG is refused before it is decoded.
+        QVERIFY(Thumbnails::decode(pngClaiming(5000, 5000), Thumbnails::Limits{}, &error).isNull());
+        QVERIFY2(error.contains("5000 by 5000 pixels, too large"), qPrintable(error));
+        Thumbnails::Limits small;
+        small.allocationLimitMb = 1;
+        // 362 by 362 is just within 1 MiB at 8 bytes a pixel.
+        QVERIFY(Thumbnails::decode(png(363, 363), small, &error).isNull());
+        QVERIFY2(!Thumbnails::decode(png(362, 362), small, &error).isNull(), qPrintable(error));
+        // A baseline JPEG decodes straight to a fraction of its size, so
+        // more of one fits; a progressive one holds its coefficients too.
+        small.maxWidth = 100;
+        QVERIFY2(!Thumbnails::decode(jpeg(800, 400), small, &error).isNull(), qPrintable(error));
+        QCOMPARE(Thumbnails::decode(jpeg(800, 400), small, &error).width(), 100);
+        QVERIFY(Thumbnails::decode(jpeg(800, 400, true), small, &error).isNull());
+        QVERIFY2(error.contains("800 by 400"), qPrintable(error));
+    }
+
+    void thumbnailsFetchOnlyTheLatest()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        for (const char *path : {"/a.png", "/c.png"})
+            server.route(path, [](const FakeHttpServer::Request &) {
+                FakeHttpServer::Response response{200, {{"Content-Type", "image/png"}}, png(40, 20)};
+                response.delayMs = 300;
+                return response;
+            });
+        server.serve("/b.png", png(20, 40), "image/png");
+        Thumbnails thumbnails;
+        Thumbnails::Limits limits;
+        limits.publicHostsOnly = false;
+        thumbnails.setLimits(limits);
+        QSignalSpy failed(&thumbnails, &Thumbnails::failed);
+
+        // A, then B at once: A is dropped before it is asked, or aborted, and
+        // only B arrives and is cached.
+        int calledA = 0;
+        thumbnails.fetch(server.url("/a.png"), [&calledA](const QUrl &) { ++calledA; });
+        const QUrl b = fetchThumbnail(thumbnails, server.url("/b.png"));
+        QCOMPARE(b, QUrl::fromLocalFile(Thumbnails::cachePath(server.url("/b.png"))));
+        QTest::qWait(600);
+        QCOMPARE(calledA, 0);
+        QVERIFY(!Thumbnails::cached(server.url("/a.png")).isValid());
+        QCOMPARE(QDir(dir.path() + "/cache/thumbnails").entryList(QDir::Files).size(), 1);
+
+        // Once asked, leaving it (cancel) aborts it the same way.
+        int calledC = 0;
+        thumbnails.fetch(server.url("/c.png"), [&calledC](const QUrl &) { ++calledC; });
+        QTRY_VERIFY(std::any_of(server.requests.cbegin(), server.requests.cend(),
+                                [](const FakeHttpServer::Request &request) { return request.path == "/c.png"; }));
+        thumbnails.cancel();
+        QTest::qWait(600);
+        QCOMPARE(calledC, 0);
+        QVERIFY(!Thumbnails::cached(server.url("/c.png")).isValid());
+        QVERIFY(failed.isEmpty());
+        // And the next fetch works as ever.
+        QVERIFY(fetchThumbnail(thumbnails, server.url("/c.png")).isValid());
+    }
+
+    void thumbnailsPruneTheCache()
+    {
+        QTemporaryDir dir;
+        const QString cache = dir.filePath("thumbnails");
+        QVERIFY(QDir().mkpath(cache));
+        const QDateTime now = QDateTime::currentDateTimeUtc();
+        // Ten files of 100 bytes, an hour apart, and one from 40 days ago.
+        const auto make = [&cache](const QString &name, const QDateTime &time) {
+            QFile file(cache + "/" + name);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write(QByteArray(100, 'x'));
+            // Written out first, or closing it would date it now.
+            QVERIFY(file.flush());
+            QVERIFY(file.setFileTime(time, QFileDevice::FileModificationTime));
+        };
+        for (int i = 0; i < 10; ++i)
+            make(QString("%1.jpg").arg(i), now.addSecs(-3600 * i));
+        make("old.jpg", now.addDays(-40));
+        // Past the size, the oldest go first; past the age, so does that one.
+        QCOMPARE(Thumbnails::prune(cache, 450, 30), 7);
+        QCOMPARE(QDir(cache).entryList(QDir::Files, QDir::Name), QStringList({"0.jpg", "1.jpg", "2.jpg", "3.jpg"}));
+        QCOMPARE(Thumbnails::prune(cache, 10000, 30), 0);
+        QCOMPARE(Thumbnails::prune(QString(), 0, 0), 0);
+
+        // A new Thumbnails prunes the cache, off its own thread.
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString own = dir.filePath("cache/thumbnails");
+        QVERIFY(QDir().mkpath(own));
+        QFile stale(own + "/stale.jpg");
+        QVERIFY(stale.open(QIODevice::WriteOnly));
+        stale.write("x");
+        QVERIFY(stale.flush());
+        QVERIFY(stale.setFileTime(now.addDays(-31), QFileDevice::FileModificationTime));
+        stale.close();
+        Thumbnails thumbnails;
+        QTRY_VERIFY(!QFileInfo::exists(own + "/stale.jpg"));
+    }
+
+    void backendShowsOnlyTheOpenVideosThumbnail()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.route("/slow.png", [](const FakeHttpServer::Request &) {
+            FakeHttpServer::Response response{200, {{"Content-Type", "image/png"}}, png(40, 20)};
+            response.delayMs = 600;
+            return response;
+        });
+        server.serve("/fast.png", png(20, 40), "image/png");
+        seedVideos(server.url("/slow.png"), server.url("/fast.png"));
+        Backend backend;
+        Thumbnails::Limits limits;
+        limits.publicHostsOnly = false;
+        backend.setThumbnailLimits(limits);
+        QVERIFY(server.requests.isEmpty());
+        QVERIFY(!backend.articleThumbnail().isValid());
+
+        // The slow one is left before it arrives: it is dropped, so it never
+        // shows on the next, and is not cached either.
+        backend.selectArticle(0);
+        QTRY_COMPARE(server.requests.size(), 1);
+        backend.selectArticle(1);
+        const QUrl fast = QUrl::fromLocalFile(Thumbnails::cachePath(server.url("/fast.png")));
+        QTRY_COMPARE(backend.articleThumbnail(), fast);
+        QTest::qWait(900);
+        QCOMPARE(backend.articleThumbnail(), fast);
+        QVERIFY(!Thumbnails::cached(server.url("/slow.png")).isValid());
+
+        // Nor on an article without a video.
+        backend.selectArticle(2);
+        QVERIFY(!backend.articleThumbnail().isValid());
+        QVERIFY(!backend.articleIsVideo());
+        QCOMPARE(backend.articleDuration(), -1.0);
+        // Back on the first, it is asked for again; after that it comes from
+        // the cache at once.
+        const QUrl slow = QUrl::fromLocalFile(Thumbnails::cachePath(server.url("/slow.png")));
+        backend.selectArticle(0);
+        QTRY_COMPARE(backend.articleThumbnail(), slow);
+        QCOMPARE(backend.articleDuration(), 75.0);
+        backend.selectArticle(2);
+        const int asked = int(server.requests.size());
+        backend.selectArticle(0);
+        QCOMPARE(backend.articleThumbnail(), slow);
+        QCOMPARE(server.requests.size(), asked);
+        // Listing never fetched one: the slow one twice, as the first was
+        // dropped, and the fast one once.
+        QCOMPARE(asked, 3);
+
+        // A thumbnail that fails shows none, and says nothing.
+        Store store;
+        QVERIFY(store.open());
+        ParsedItem broken;
+        broken.guid = "broken";
+        broken.title = "Broken";
+        broken.mediaUrl = "https://cdn.example.com/c.mp4";
+        broken.thumbnailUrl = server.url("/missing.png").toString();
+        broken.published = QDateTime(QDate(2026, 1, 10), QTime(12, 0), QTimeZone::UTC);
+        QCOMPARE(store.saveItems(store.feeds().first().id, {broken}), 1);
+        backend.selectSource(0);
+        backend.selectArticle(0);
+        QCOMPARE(backend.articleTitle(), QString("Broken"));
+        QTRY_COMPARE(server.requests.size(), asked + 1);
+        QTest::qWait(100);
+        QVERIFY(!backend.articleThumbnail().isValid());
+        QVERIFY(!backend.statusError());
+    }
+
 private:
+
+    // A solid PNG of this size.
+    static QByteArray png(int width, int height)
+    {
+        QImage image(width, height, QImage::Format_RGB32);
+        image.fill(Qt::darkCyan);
+        QByteArray data;
+        QBuffer buffer(&data);
+        buffer.open(QIODevice::WriteOnly);
+        image.save(&buffer, "PNG");
+        return data;
+    }
+
+    // A solid JPEG of this size, progressive when asked.
+    static QByteArray jpeg(int width, int height, bool progressive = false)
+    {
+        QImage image(width, height, QImage::Format_RGB32);
+        image.fill(Qt::darkCyan);
+        QByteArray data;
+        QBuffer buffer(&data);
+        buffer.open(QIODevice::WriteOnly);
+        QImageWriter writer(&buffer, "jpeg");
+        writer.setProgressiveScanWrite(progressive);
+        if (!writer.write(image))
+            qFatal("cannot write the test JPEG: %s", qPrintable(writer.errorString()));
+        return data;
+    }
+
+    // `data` as bech32 with this prefix, as NIP-19 encodes it.
+    static QString bech32(const QByteArray &prefix, const QByteArray &data)
+    {
+        static const char charset[] = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+        const auto polymod = [](const QList<int> &values) {
+            static const quint32 generator[] = {0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3};
+            quint32 checksum = 1;
+            for (int value : values) {
+                const quint32 top = checksum >> 25;
+                checksum = ((checksum & 0x1ffffff) << 5) ^ quint32(value);
+                for (int i = 0; i < 5; ++i)
+                    if ((top >> i) & 1)
+                        checksum ^= generator[i];
+            }
+            return checksum;
+        };
+        QList<int> words;
+        quint32 accumulator = 0;
+        int bits = 0;
+        for (char c : data) {
+            accumulator = (accumulator << 8) | quint8(c);
+            bits += 8;
+            while (bits >= 5) {
+                bits -= 5;
+                words << int((accumulator >> bits) & 31);
+            }
+        }
+        if (bits)
+            words << int((accumulator << (5 - bits)) & 31);
+        QList<int> values;
+        for (char c : prefix)
+            values << (quint8(c) >> 5);
+        values << 0;
+        for (char c : prefix)
+            values << (quint8(c) & 31);
+        values << words << QList<int>(6, 0);
+        const quint32 checksum = polymod(values) ^ 1;
+        QString out = QString::fromLatin1(prefix) + '1';
+        for (int word : words)
+            out += QLatin1Char(charset[word]);
+        for (int i = 0; i < 6; ++i)
+            out += QLatin1Char(charset[(checksum >> (5 * (5 - i))) & 31]);
+        return out;
+    }
+
+    // Runs the queries and returns their results in order, as the headless
+    // commands do for an author's two.
+    static QList<NostrResult> queryAll(RelayPool &pool, const QList<NostrQuery> &queries)
+    {
+        QList<NostrResult> found(queries.size());
+        pool.queryEach(queries, [&found](qsizetype i, const NostrResult &result) { found[i] = result; });
+        return found;
+    }
+
+    // The tables and indexes of schema version 1, as phase 1 created them.
+    static QStringList versionOneSchema()
+    {
+        return {"CREATE TABLE categories (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)",
+                "CREATE TABLE feeds (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, url_key TEXT NOT NULL"
+                " UNIQUE, title TEXT NOT NULL DEFAULT '', site_url TEXT, description TEXT, category_id INTEGER"
+                " REFERENCES categories(id) ON DELETE SET NULL, etag TEXT, last_modified TEXT, last_fetched_at"
+                " INTEGER, last_error TEXT, created_at INTEGER NOT NULL)",
+                "CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, feed_id INTEGER NOT NULL REFERENCES"
+                " feeds(id) ON DELETE CASCADE, guid TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', url TEXT, author"
+                " TEXT, summary TEXT, content TEXT, published_at INTEGER, created_at INTEGER NOT NULL, is_read"
+                " INTEGER NOT NULL DEFAULT 0, is_starred INTEGER NOT NULL DEFAULT 0, UNIQUE(feed_id, guid))",
+                "CREATE INDEX items_by_date ON items(COALESCE(published_at, created_at) DESC, id DESC)",
+                "CREATE INDEX items_by_feed_unread ON items(feed_id, is_read)",
+                "CREATE INDEX items_starred ON items(is_starred) WHERE is_starred = 1",
+                "CREATE INDEX feeds_by_category ON feeds(category_id)"};
+    }
+
+    // A one-pixel PNG whose header claims this size, with a valid checksum,
+    // as a decompression bomb would.
+    static QByteArray pngClaiming(quint32 width, quint32 height)
+    {
+        QByteArray data = png(1, 1);
+        for (int i = 0; i < 4; ++i) {
+            data[16 + i] = char((width >> (24 - 8 * i)) & 0xff);
+            data[20 + i] = char((height >> (24 - 8 * i)) & 0xff);
+        }
+        quint32 crc = 0xffffffff;
+        for (int at = 12; at < 29; ++at) {
+            crc ^= quint8(data.at(at));
+            for (int bit = 0; bit < 8; ++bit)
+                crc = (crc >> 1) ^ (0xedb88320 & (0 - (crc & 1)));
+        }
+        crc ^= 0xffffffff;
+        for (int i = 0; i < 4; ++i)
+            data[29 + i] = char((crc >> (24 - 8 * i)) & 0xff);
+        return data;
+    }
+
+    // Waits for one fetch's file: URL, empty when it failed.
+    static QUrl fetchThumbnail(Thumbnails &thumbnails, const QUrl &url)
+    {
+        std::optional<QUrl> result;
+        thumbnails.fetch(url, [&result](const QUrl &file) { result = file; });
+        const QDeadlineTimer deadline(10000);
+        while (!result && !deadline.hasExpired())
+            QTest::qWait(10);
+        return result.value_or(QUrl());
+    }
+
+    // An author with three articles, newest first: the video "Slow" (75
+    // seconds, its thumbnail at `first`), the video "Fast" (at `second`),
+    // and the text "Text".
+    static void seedVideos(const QUrl &first, const QUrl &second)
+    {
+        Store store;
+        if (!store.open())
+            qFatal("cannot open the library: %s", qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed(Nip19::npub(QString(64, 'a')), "Ada");
+        auto item = [](const char *guid, const char *title, int day) {
+            ParsedItem item;
+            item.guid = guid;
+            item.title = title;
+            item.published = QDateTime(QDate(2026, 1, day), QTime(12, 0), QTimeZone::UTC);
+            return item;
+        };
+        ParsedItem slow = item("slow", "Slow", 3);
+        slow.mediaUrl = "https://cdn.example.com/a.mp4";
+        slow.thumbnailUrl = first.toString();
+        slow.duration = 75;
+        ParsedItem fast = item("fast", "Fast", 2);
+        fast.mediaUrl = "https://cdn.example.com/b.mp4";
+        fast.thumbnailUrl = second.toString();
+        ParsedItem text = item("text", "Text", 1);
+        text.content = "<p>Words.</p>";
+        if (store.saveItems(feed, {slow, fast, text}) != 3)
+            qFatal("cannot seed the videos: %s", qPrintable(store.lastError()));
+    }
     // A NIP-01 event signed with the secret key whose 32 bytes are all
     // `secretByte`, as a relay would send it.
     static QJsonObject signedEvent(int kind, const QString &content, const QList<QStringList> &tags,

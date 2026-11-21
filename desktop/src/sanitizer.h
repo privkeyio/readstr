@@ -5,7 +5,7 @@
 
 // Turns a feed's untrusted HTML into the small subset of HTML that Qt's rich
 // text shows, and nothing else: p, br, h1-h6, ul, ol, li, blockquote, pre,
-// code, em, i, strong, b, a (href only, http and https only, made absolute
+// code, em, i, strong, b, s, a (href only, http and https only, made absolute
 // against the article's URL), table, tr, td, th, and hr. Script, style,
 // iframe, object, embed, form, svg, math, and the like go with everything in
 // them; any other tag goes but keeps its text; every attribute but a's href
@@ -28,7 +28,17 @@ inline constexpr qsizetype maxInputLength = 512 * 1024;
 inline constexpr qsizetype maxOutputLength = 1024 * 1024;
 inline constexpr int maxDepth = 64;
 
-QString toRichText(const QString &html, const QUrl &base);
+struct Options {
+    // Input past this is cut off first.
+    qsizetype maxInputLength = Sanitizer::maxInputLength;
+    // The input is QTextDocument::toHtml()'s, which spells emphasis, code,
+    // and strikethrough as a span's style and a quote as a paragraph's
+    // margins: those few styles become em, strong, code, s, and blockquote.
+    // Every other style still goes.
+    bool qtStyles = false;
+};
+
+QString toRichText(const QString &html, const QUrl &base, const Options &options = {});
 // Plain text (a summary) as rich text: escaped, in one paragraph, without
 // the direction overrides and embeddings.
 QString plainToRichText(const QString &text);

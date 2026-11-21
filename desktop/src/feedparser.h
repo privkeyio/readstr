@@ -26,6 +26,11 @@ struct ParsedItem {
     // event's created_at) wins.
     QString address;
     qint64 revision = 0;
+    // A Nostr video's (NIP-71): what plays it, its still, and its length in
+    // seconds (negative when unknown). The URLs are http(s) only.
+    QString mediaUrl;
+    QString thumbnailUrl;
+    double duration = -1;
 };
 
 struct ParsedFeed {

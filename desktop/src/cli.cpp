@@ -238,7 +238,10 @@ int subscribe(const QString &command, const QStringList &arguments, QTextStream 
     bool discovered = false;
     if (author) {
         RelayPool relays;
-        subscription = Library::subscribeNostr(store, *author, relays.query(Library::nostrQuery(*author)));
+        const QList<NostrQuery> queries = Library::nostrQueries(*author);
+        QList<NostrResult> found(queries.size());
+        relays.queryEach(queries, [&found](qsizetype i, const NostrResult &result) { found[i] = result; });
+        subscription = Library::subscribeNostr(store, *author, found.at(0), found.at(1));
     } else {
         Fetcher fetcher;
         const Discovery::Result found = Discovery::discover(fetcher, url);
@@ -322,7 +325,7 @@ int refresh(const QString &command, const QStringList &arguments, QTextStream &o
         const Feed &feed = targets.at(i);
         if (Library::isNostrFeed(feed)) {
             nostr << i;
-            queries << Library::nostrQuery(feed);
+            queries << Library::nostrQueries(feed);
         } else {
             web << i;
             requests << FetchRequest{QUrl(feed.url), feed.etag, feed.lastModified};
@@ -336,9 +339,14 @@ int refresh(const QString &command, const QStringList &arguments, QTextStream &o
     fetcher.fetchEach(requests, [&](qsizetype i, const FetchResult &fetched) {
         rows[web.at(i)] = Library::apply(store, targets.at(web.at(i)), fetched);
     });
+    // A Nostr feed is saved once both its queries have answered.
     RelayPool relays;
+    Library::NostrPairs pairs;
     relays.queryEach(queries, [&](qsizetype i, const NostrResult &found) {
-        rows[nostr.at(i)] = Library::applyNostr(store, targets.at(nostr.at(i)), found);
+        if (const auto both = pairs.take(i, found)) {
+            const qsizetype row = nostr.at(i / 2);
+            rows[row] = Library::applyNostr(store, targets.at(row), both->first, both->second);
+        }
     });
 
     int code = 0;

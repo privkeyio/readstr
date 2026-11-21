@@ -1,6 +1,7 @@
 #include "fetcher.h"
 
 #include <QEventLoop>
+#include <QHostAddress>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPointer>
@@ -25,6 +26,53 @@ Fetcher::Fetcher(QObject *parent) : QObject(parent) {
 
 QByteArray Fetcher::userAgent() { return QByteArrayLiteral("readstr-desktop/" READSTR_VERSION); }
 
+bool Fetcher::isLocalHost(const QString &host) {
+    QString name = host.toLower();
+    // A trailing dot names the same host, so "localhost." is localhost.
+    if (name.endsWith('.'))
+        name.chop(1);
+    // A literal address first, since an IPv6 one has no dot; the name rules
+    // are for names.
+    QHostAddress address;
+    if (!address.setAddress(name))
+        return name == QLatin1String("localhost") || name.endsWith(QLatin1String(".localhost"))
+            || name.endsWith(QLatin1String(".local")) || name.endsWith(QLatin1String(".internal"))
+            || !name.contains('.');
+    if (address.protocol() == QAbstractSocket::IPv6Protocol) {
+        // The unspecified address reaches this machine, as 0.0.0.0 does.
+        if (address.isEqual(QHostAddress(QHostAddress::AnyIPv6)))
+            return true;
+        // An IPv6 address that carries an IPv4 one is judged by the IPv4
+        // one, since that is where it leads: IPv4-mapped (::ffff:a.b.c.d),
+        // IPv4-compatible (::a.b.c.d), NAT64 (64:ff9b::a.b.c.d), and 6to4
+        // (2002:aabb:ccdd::), whose address follows the prefix.
+        const Q_IPV6ADDR bytes = address.toIPv6Address();
+        const auto v4At = [&bytes](int at) {
+            return quint32(bytes[at]) << 24 | quint32(bytes[at + 1]) << 16 | quint32(bytes[at + 2]) << 8
+                | quint32(bytes[at + 3]);
+        };
+        bool mapped = false;
+        const quint32 v4 = address.toIPv4Address(&mapped);
+        if (mapped)
+            address = QHostAddress(v4);
+        else if (address.isInSubnet(QHostAddress(QStringLiteral("::")), 96)
+                 || address.isInSubnet(QHostAddress(QStringLiteral("64:ff9b::")), 96))
+            address = QHostAddress(v4At(12));
+        else if (address.isInSubnet(QHostAddress(QStringLiteral("2002::")), 16))
+            address = QHostAddress(v4At(2));
+    }
+    // Besides the private and special ranges Qt names: "this network"
+    // (0.0.0.0/8), carrier-grade NAT (100.64.0.0/10), benchmarking
+    // (198.18.0.0/15), and the reserved 240.0.0.0/4, which holds the
+    // broadcast address 255.255.255.255.
+    return address.isLoopback() || address.isPrivateUse() || address.isLinkLocal() || address.isSiteLocal()
+        || address.isUniqueLocalUnicast() || address.isMulticast() || address.isBroadcast() || address.isNull()
+        || address.isInSubnet(QHostAddress(QStringLiteral("0.0.0.0")), 8)
+        || address.isInSubnet(QHostAddress(QStringLiteral("100.64.0.0")), 10)
+        || address.isInSubnet(QHostAddress(QStringLiteral("198.18.0.0")), 15)
+        || address.isInSubnet(QHostAddress(QStringLiteral("240.0.0.0")), 4);
+}
+
 void Fetcher::fetch(const FetchRequest &request, std::function<void(const FetchResult &)> done) {
     fetchWithin(request, std::move(done), m_limits);
 }
@@ -33,8 +81,11 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
                           const Limits &limits) {
     FetchResult result;
     result.url = request.url;
-    if (!isWebUrl(request.url)) {
+    if (!isWebUrl(request.url))
         result.error = QStringLiteral("only http and https URLs can be fetched");
+    else if (limits.publicHostsOnly && isLocalHost(request.url.host()))
+        result.error = QStringLiteral("refused a host on this machine or the local network");
+    if (!result.error.isEmpty()) {
         QTimer::singleShot(0, this, [done, result] { done(result); });
         return;
     }
@@ -77,9 +128,11 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
         reply->abort();
     };
 
-    connect(reply, &QNetworkReply::redirected, reply, [reply, stop, state, request](const QUrl &target) {
+    connect(reply, &QNetworkReply::redirected, reply, [reply, stop, state, request, limits](const QUrl &target) {
         if (!isWebUrl(target))
             return stop(QStringLiteral("refused a redirect to a non-http(s) URL"));
+        if (limits.publicHostsOnly && isLocalHost(target.host()))
+            return stop(QStringLiteral("refused a redirect to this machine or the local network"));
         if (state->current.scheme().compare("https", Qt::CaseInsensitive) == 0
             && target.scheme().compare("http", Qt::CaseInsensitive) == 0)
             return stop(QStringLiteral("refused a redirect from https to http"));

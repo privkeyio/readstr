@@ -15,8 +15,8 @@ bool isDirectionOverride(QChar character) {
 }
 
 // Each of these is emitted as a bare tag (a keeps its checked href).
-const QSet<QString> kept{"p",  "h1", "h2", "h3",         "h4",  "h5",     "h6",   "ul", "ol", "li", "blockquote",
-                         "pre", "code", "em", "i", "strong", "b", "a", "table", "tr", "td", "th"};
+const QSet<QString> kept{"p",   "h1",   "h2", "h3", "h4",     "h5", "h6", "ul",    "ol", "li", "blockquote",
+                         "pre", "code", "em", "i",  "strong", "b",  "s",  "a", "table", "tr", "td", "th"};
 // HTML's void elements: they never have content or an end tag.
 const QSet<QString> voids{"area", "base", "br",   "col",   "embed", "hr",     "img", "input",
                           "link", "meta", "param", "source", "track", "wbr", "keygen"};
@@ -35,7 +35,7 @@ const QSet<QString> separating{"div",  "section", "article", "header", "footer",
 // Kept, but only one level deep and within the caps below.
 const QSet<QString> tableParts{"table", "tr", "td", "th"};
 // Kept tags that do not start a block of their own.
-const QSet<QString> inlines{"a", "code", "em", "i", "strong", "b"};
+const QSet<QString> inlines{"a", "code", "em", "i", "strong", "b", "s"};
 
 constexpr qsizetype maxAltLength = 200;
 // Qt lays out a table inside a table in time exponential in the depth (21
@@ -89,12 +89,56 @@ struct Tag {
     QString name;
     bool end = false;
     bool selfClosing = false;
-    QString href, src, dataSrc, alt;
+    QString href, src, dataSrc, alt, style;
 };
+
+Tag named(const QString &name) {
+    Tag tag;
+    tag.name = name;
+    return tag;
+}
+
+// What a style attribute from QTextDocument::toHtml() says that the window
+// shows as a tag. Qt writes the whole style itself, so a plain split reads it.
+struct QtStyle {
+    bool italic = false, bold = false, monospace = false, struck = false;
+    // A paragraph indented on both sides, as Qt lays out a Markdown quote.
+    bool quote = false;
+};
+
+QtStyle readQtStyle(const QString &style) {
+    QtStyle read;
+    int left = 0, right = 0;
+    for (const QStringView declaration : QStringView(style).split(';')) {
+        const qsizetype colon = declaration.indexOf(':');
+        if (colon < 0)
+            continue;
+        const QString name = declaration.left(colon).trimmed().toString().toLower();
+        const QString value = declaration.mid(colon + 1).trimmed().toString().toLower();
+        if (name == QLatin1String("font-style")) {
+            read.italic = value == QLatin1String("italic");
+        } else if (name == QLatin1String("font-weight")) {
+            bool numeric = false;
+            const int weight = value.toInt(&numeric);
+            read.bold = numeric ? weight >= 600 : value == QLatin1String("bold");
+        } else if (name == QLatin1String("font-family")) {
+            read.monospace = value.contains(QLatin1String("monospace"));
+        } else if (name == QLatin1String("text-decoration")) {
+            read.struck = value.contains(QLatin1String("line-through"));
+        } else if (name == QLatin1String("margin-left") || name == QLatin1String("margin-right")) {
+            QString number = value;
+            number.remove(QLatin1String("px"));
+            (name == QLatin1String("margin-left") ? left : right) = number.toInt();
+        }
+    }
+    // Qt indents a quote by 40 pixels a level on the left and 40 on the right.
+    read.quote = left >= 40 && right >= 40;
+    return read;
+}
 
 class Writer {
 public:
-    explicit Writer(const QUrl &base) : m_base(base) {}
+    Writer(const QUrl &base, bool qtStyles) : m_base(base), m_qtStyles(qtStyles) {}
 
     void text(QStringView raw) {
         if (raw.isEmpty())
@@ -157,6 +201,12 @@ public:
             boundary();
         } else if (name == QLatin1String("img")) {
             image(tag);
+        } else if (m_qtStyles && name == QLatin1String("span")) {
+            startSpan(tag);
+        } else if (m_qtStyles && name == QLatin1String("p") && readQtStyle(tag.style).quote) {
+            // Qt never nests paragraphs, so one flag is enough to close it.
+            open(named(QStringLiteral("blockquote")));
+            m_quoting = true;
         } else if (tableParts.contains(name)) {
             startTablePart(tag);
         } else if (separating.contains(name)) {
@@ -183,6 +233,11 @@ public:
                 m_flatOpen.clear();
                 close(name);
             }
+        } else if (m_qtStyles && name == QLatin1String("span")) {
+            endSpan();
+        } else if (m_qtStyles && m_quoting && name == QLatin1String("p")) {
+            m_quoting = false;
+            close(QStringLiteral("blockquote"));
         } else if (separating.contains(name)) {
             separate();
         } else if (kept.contains(name)) {
@@ -292,6 +347,38 @@ private:
             m_flatOpen.clear();
     }
 
+    // The tags a span's style stands for, opened in a fixed order and
+    // closed with it. Each span remembers where its tags begin, so its end
+    // closes them and whatever is still open inside them.
+    void startSpan(const Tag &tag) {
+        if (m_spans.size() >= Sanitizer::maxDepth) {
+            ++m_spanOverflow;
+            return;
+        }
+        m_spans << m_open.size();
+        const QtStyle style = readQtStyle(tag.style);
+        if (style.bold)
+            open(named(QStringLiteral("strong")));
+        if (style.italic)
+            open(named(QStringLiteral("em")));
+        if (style.struck)
+            open(named(QStringLiteral("s")));
+        if (style.monospace)
+            open(named(QStringLiteral("code")));
+    }
+
+    void endSpan() {
+        if (m_spanOverflow > 0) {
+            --m_spanOverflow;
+            return;
+        }
+        if (m_spans.isEmpty())
+            return;
+        const qsizetype start = m_spans.takeLast();
+        while (m_open.size() > start)
+            m_out += QLatin1String("</") + m_open.takeLast() + '>';
+    }
+
     // The checked, encoded address for a link or image, or empty.
     QString linkTarget(const QString &href) const {
         const QUrl url = Sanitizer::webUrl(href, m_base);
@@ -323,6 +410,10 @@ private:
     }
 
     QUrl m_base;
+    bool m_qtStyles = false;
+    bool m_quoting = false;
+    QList<qsizetype> m_spans;
+    int m_spanOverflow = 0;
     QString m_out;
     QStringList m_open;
     bool m_boundary = true;
@@ -395,11 +486,16 @@ qsizetype readTag(const QString &html, qsizetype i, Tag &tag) {
                           : name == QLatin1String("src")      ? 2
                           : name == QLatin1String("data-src") ? 4
                           : name == QLatin1String("alt")      ? 8
+                          : name == QLatin1String("style")    ? 16
                                                               : 0;
         if (which && !(seen & which)) {
             seen |= which;
             const QString decoded = FeedParser::decodeEntities(value);
-            (which == 1 ? tag.href : which == 2 ? tag.src : which == 4 ? tag.dataSrc : tag.alt) = decoded;
+            (which == 1   ? tag.href
+             : which == 2 ? tag.src
+             : which == 4 ? tag.dataSrc
+             : which == 8 ? tag.alt
+                          : tag.style) = decoded;
         }
     }
     return -1;
@@ -471,10 +567,10 @@ QString linesToRichText(const QString &text) {
     return out;
 }
 
-QString toRichText(const QString &input, const QUrl &base) {
-    const QString html = input.left(maxInputLength);
+QString toRichText(const QString &input, const QUrl &base, const Options &options) {
+    const QString html = input.left(options.maxInputLength);
     const qsizetype size = html.size();
-    Writer writer(base);
+    Writer writer(base, options.qtStyles);
     // Inside an element dropped with its content: its name and how deeply it
     // nests in itself.
     QString skipping;
@@ -485,7 +581,7 @@ QString toRichText(const QString &input, const QUrl &base) {
         if (skipping.isEmpty() && end > textStart)
             writer.text(QStringView(html).mid(textStart, end - textStart));
     };
-    bool cut = input.size() > maxInputLength;
+    bool cut = input.size() > options.maxInputLength;
     while (i < size) {
         // Every link and image carries a whole URL, so a few bytes of input
         // can become many of output; past the cap the rest goes.

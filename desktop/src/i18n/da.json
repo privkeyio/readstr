@@ -102,5 +102,13 @@
   "The desktop portal's file chooser is not available (is xdg-desktop-portal running?).": "Skrivebordsportalens filvælger er ikke tilgængelig (kører xdg-desktop-portal?).",
   "Could not listen for the file chooser's answer.": "Kunne ikke lytte efter filvælgerens svar.",
   "The file chooser failed: %1": "Filvælgeren fejlede: %1",
-  "The file chooser closed without a file.": "Filvælgeren lukkede uden en fil."
+  "The file chooser closed without a file.": "Filvælgeren lukkede uden en fil.",
+  "Play": "Afspil",
+  "Play the video in mpv (P)": "Afspil videoen i mpv (P)",
+  "Play the video in mpv": "Afspil videoen i mpv",
+  "This article has no video to play": "Denne artikel har ingen video at afspille",
+  "Playing %1 in mpv": "Afspiller %1 i mpv",
+  "Cannot play the video: mpv is not installed": "Kan ikke afspille videoen: mpv er ikke installeret",
+  "Cannot play the video: mpv did not start": "Kan ikke afspille videoen: mpv startede ikke",
+  "Cannot play the video: it is on this machine or the local network": "Kan ikke afspille videoen: den ligger på denne maskine eller det lokale netværk"
 }

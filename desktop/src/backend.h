@@ -18,6 +18,7 @@
 #include "relaypool.h"
 #include "sourcemodel.h"
 #include "store.h"
+#include "thumbnails.h"
 
 class FilePicker;
 class LibraryWorker;
@@ -57,6 +58,12 @@ class Backend : public QObject {
     Q_PROPERTY(QString articleHtml READ articleHtml NOTIFY articleChanged)
     Q_PROPERTY(bool articleRead READ articleRead NOTIFY articleChanged)
     Q_PROPERTY(bool articleStarred READ articleStarred NOTIFY articleChanged)
+    // A Nostr video's: whether there is one to play, its length in seconds
+    // (negative when unknown), and its thumbnail as a local file, empty
+    // until it is fetched and cached or when there is none.
+    Q_PROPERTY(bool articleIsVideo READ articleIsVideo NOTIFY articleChanged)
+    Q_PROPERTY(double articleDuration READ articleDuration NOTIFY articleChanged)
+    Q_PROPERTY(QUrl articleThumbnail READ articleThumbnail NOTIFY thumbnailChanged)
 
     Q_PROPERTY(bool refreshing READ refreshing NOTIFY refreshChanged)
     Q_PROPERTY(int refreshDone READ refreshDone NOTIFY refreshChanged)
@@ -97,6 +104,9 @@ public:
     QString articleHtml() const { return m_articleHtml; }
     bool articleRead() const { return m_article.read; }
     bool articleStarred() const { return m_article.starred; }
+    bool articleIsVideo() const { return !m_article.mediaUrl.isEmpty(); }
+    double articleDuration() const { return articleIsVideo() ? m_article.duration : -1; }
+    QUrl articleThumbnail() const { return m_thumbnail; }
 
     bool refreshing() const { return m_refreshing; }
     int refreshDone() const { return m_refreshDone; }
@@ -116,6 +126,9 @@ public:
     Q_INVOKABLE void toggleRead();
     Q_INVOKABLE void toggleStar();
     Q_INVOKABLE void openOriginal();
+    // Plays the open article's video in mpv, saying in the status bar when
+    // mpv is missing or does not start.
+    Q_INVOKABLE void playVideo();
     // Opens a link from an article, but only an http(s) one.
     Q_INVOKABLE bool openLink(const QString &link);
     Q_INVOKABLE void markViewRead();
@@ -146,6 +159,14 @@ public:
 
     // How links leave the app; tests replace it.
     void setUrlOpener(std::function<bool(const QUrl &)> opener) { m_openUrl = std::move(opener); }
+    enum class Launch { Started, Missing, Failed };
+    using Launcher = std::function<Launch(const QString &program, const QStringList &arguments)>;
+    // How a video reaches its player; tests replace it.
+    void setLauncher(Launcher launcher) { m_launch = std::move(launcher); }
+    // Starts `program` from PATH on its own, with no shell, or says that it
+    // is not there.
+    static Launch launchDetached(const QString &program, const QStringList &arguments);
+    void setThumbnailLimits(const Thumbnails::Limits &limits) { m_thumbnails->setLimits(limits); }
     void setFetchLimits(const Fetcher::Limits &limits) { m_fetcher->setLimits(limits); }
     void setRelayLimits(const RelayPool::Limits &limits) { m_relays->setLimits(limits); }
     void setRelays(const QStringList &relays) { m_relays->setRelays(relays); }
@@ -154,6 +175,7 @@ signals:
     void libraryChanged();
     void sourceChanged();
     void articleChanged();
+    void thumbnailChanged();
     void refreshChanged();
     void refreshFinished();
     void addChanged();
@@ -200,6 +222,10 @@ private:
     void loadArticles();
     ArticleFilter currentFilter() const;
     void showArticle(const Article &article);
+    // Shows the open video's thumbnail, from the cache or once it is
+    // fetched, when it is not the one already shown.
+    void updateThumbnail();
+    void setThumbnail(const QUrl &file);
     void setFlags(bool read, bool starred);
     // A local file path for a file: URL, or empty for anything else
     // (another host's file: URL included).
@@ -215,10 +241,12 @@ private:
     bool m_storeOpen = false;
     std::unique_ptr<Fetcher> m_fetcher;
     std::unique_ptr<RelayPool> m_relays;
+    std::unique_ptr<Thumbnails> m_thumbnails;
     QThread m_thread;
     LibraryWorker *m_worker = nullptr;
     FilePicker *m_picker = nullptr;
     std::function<bool(const QUrl &)> m_openUrl;
+    Launcher m_launch;
     bool m_closing = false;
     QList<std::shared_ptr<UserWrite>> m_userWrites;
     QHash<qint64, PendingFlags> m_pendingFlags;
@@ -230,6 +258,11 @@ private:
     int m_articleIndex = -1;
     Article m_article;
     QString m_articleHtml;
+    // The remote thumbnail asked for, what shows, and a count that tells a
+    // fetch for an article since left from the current one.
+    QString m_thumbnailSource;
+    QUrl m_thumbnail;
+    quint64 m_thumbnailRequest = 0;
     qint64 m_viewLastId = 0;
 
     bool m_refreshing = false;

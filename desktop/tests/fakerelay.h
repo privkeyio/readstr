@@ -7,10 +7,12 @@
 #include <QList>
 #include <QWebSocket>
 #include <QWebSocketServer>
+#include <algorithm>
 
 // A Nostr relay on 127.0.0.1 for tests. Every REQ gets the same stored
 // events (whatever the filter says, as a careless relay would), then EOSE,
-// unless the relay is told to stay silent or to close subscriptions.
+// unless the relay is told to stay silent, to close subscriptions, or to
+// honour filters.
 class FakeRelay : public QWebSocketServer {
 public:
     FakeRelay() : QWebSocketServer(QStringLiteral("fake-relay"), QWebSocketServer::NonSecureMode) {
@@ -31,6 +33,9 @@ public:
     QList<QJsonValue> events;
     bool silent = false;
     QString closeWith;
+    // Answers as an honest relay does instead: only the events of the
+    // filter's kinds, newest first, and no more than its limit.
+    bool honourFilters = false;
     // Closes the connection after answering this many REQs on it, once.
     int dropAfter = 0;
     // Closes the connection after the events of a REQ, before its EOSE.
@@ -57,7 +62,7 @@ private:
             send(socket, {"CLOSED", id, closeWith});
             return;
         }
-        for (const QJsonValue &event : std::as_const(events))
+        for (const QJsonValue &event : answer(message.at(2).toObject()))
             send(socket, {"EVENT", id, event});
         if (dropBeforeEose) {
             socket->close();
@@ -68,6 +73,27 @@ private:
             dropAfter = 0;
             socket->close();
         }
+    }
+
+    QList<QJsonValue> answer(const QJsonObject &filter) const {
+        if (!honourFilters)
+            return events;
+        QList<QJsonValue> matching;
+        const QJsonArray kinds = filter.value(QStringLiteral("kinds")).toArray();
+        for (const QJsonValue &event : events)
+            for (const QJsonValue &kind : kinds)
+                if (kind.toInt() == event.toObject().value(QStringLiteral("kind")).toInt(-1)) {
+                    matching << event;
+                    break;
+                }
+        std::stable_sort(matching.begin(), matching.end(), [](const QJsonValue &a, const QJsonValue &b) {
+            return a.toObject().value(QStringLiteral("created_at")).toInteger()
+                > b.toObject().value(QStringLiteral("created_at")).toInteger();
+        });
+        const int limit = filter.value(QStringLiteral("limit")).toInt(-1);
+        if (limit >= 0 && matching.size() > limit)
+            matching.resize(limit);
+        return matching;
     }
 
     static void send(QWebSocket *socket, const QJsonArray &message) {

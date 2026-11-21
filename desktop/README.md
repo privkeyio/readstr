@@ -7,16 +7,16 @@ and Qt Quick, following the Omarchy app conventions. See
 [`docs/OMARCHY_APP_PLAN.md`](../docs/OMARCHY_APP_PLAN.md) for the plan.
 
 It reads RSS, Atom, and JSON Feed, and Nostr long-form articles (NIP-23)
-by the authors you follow. The window has three panes (sources, articles,
-reader) driven from the keyboard, and the same engine (SQLite library,
-fetcher, feed parser, discovery, OPML, Nostr relays) runs headless from the
-command line. Markdown rendering, video, and sync come in later phases.
+and videos (NIP-71) by the authors you follow. The window has three panes
+(sources, articles, reader) driven from the keyboard, and the same engine
+(SQLite library, fetcher, feed parser, discovery, OPML, Nostr relays) runs
+headless from the command line. Sync comes in a later phase.
 
 ## Build, test, install
 
-Everything needed comes with Omarchy (`qmake6`, `make`, a C++ compiler, and
-Qt's base, declarative, SVG, and Wayland modules) except two packages for
-Nostr: `sudo pacman -S qt6-websockets libsecp256k1`. The open and save dialogs
+Everything needed comes with Omarchy (`qmake6`, `make`, a C++ compiler,
+Qt's base, declarative, SVG, and Wayland modules, and `mpv` for videos)
+except two packages for Nostr: `sudo pacman -S qt6-websockets libsecp256k1`. The open and save dialogs
 are the desktop's own, through `xdg-desktop-portal` over D-Bus.
 
 ```sh
@@ -55,9 +55,25 @@ link's address rather than the image's. `O` opens the whole article there.
 ## Nostr
 
 Add an author by their `npub` or `nprofile` (`Ctrl+N` in the window, or
-`readstr subscribe npub1…`) to follow their long-form articles. Each is
-listed under the author's profile name and opens on njump.me with `O`. Until
-Markdown rendering arrives, an article shows as its Markdown text.
+`readstr subscribe npub1…`) to follow their long-form articles and videos.
+Both are listed under the author's profile name and open on njump.me with
+`O`.
+
+An article's Markdown (GitHub's flavor) is shown through the same filter as
+a feed's HTML, so the same rules hold: images become `[image: …]` links and
+nothing loads inline. Raw HTML in the Markdown shows as the text it is,
+never as markup. A `nostr:` link to a valid `npub`, `nprofile`, `note`,
+`nevent`, or `naddr` opens its njump.me page; other links that are not http
+or https are dropped and keep their text.
+
+A video shows its description as plain text, its length, and its thumbnail,
+which is fetched only when you open that video (never from the list), from
+the public internet only, and kept in the cache directory. `P` (or the Play
+button, or a click on the thumbnail) plays it in `mpv`, which is started on
+its own with the video's address and no shell; the status bar says when mpv
+is missing or does not start. A video or thumbnail address that names this
+machine or the local network is never used, since someone else's event chose
+it; a public name that resolves to a local address is not caught.
 
 Readstr asks relay.damus.io, relay.primal.net, nos.lol, and relay.snort.social
 (plus an nprofile's own relay hints when you subscribe), only over `wss://`.
@@ -148,17 +164,33 @@ identifies you, use conditional GETs (ETag and Last-Modified), follow at most
 entities (billion laughs, external entities) is refused. OPML files are read
 up to 8 MiB, 5000 outlines, and 64 levels of folders.
 
+Markdown is read up to 128 KiB. One with more than 2000 list items, or with
+tables of more than 1000 rows, 64 columns, or 10,000 cells in all, is shown
+as its plain lines instead, since laying those out takes Qt time that grows
+with their square. A video thumbnail is fetched over http(s) from a host
+that is not this machine or the local network, within 2 MiB and 30 seconds,
+only as an `image/*` whose bytes are a PNG, JPEG, GIF, or WebP image (no
+other image reader ever sees it), of at most 8192 pixels a side and 128 MiB
+to decode, and a JPEG of at most 100 scans (16 megapixels when progressive or in several scans),
+and is kept at most 1280 pixels wide. Only the open video's thumbnail is
+fetched: leaving it drops the fetch. Media links longer than 8 KiB are
+dropped, and a video length past 10,000,000 seconds counts as unknown.
+
 Relays get 6 seconds to connect and 15 seconds to answer each request, and
-messages are cut off past 4 MiB. Each author's refresh keeps at most 200
-events and 16 MiB of text, asks for at most 100, and only for what is newer
-than a day before the last complete refresh (one that every relay answered
-and no cap cut off). A relay that fails or stays
+messages are cut off past 4 MiB. Each author's refresh is two requests, one
+for the profile and articles and one for videos, so that many videos cannot
+crowd the articles out. Each keeps at most 200 events and 16 MiB of text,
+asks for at most 100, and only for what is newer than a day before the last
+complete refresh (one where every relay answered both and no cap cut off). A relay that fails or stays
 silent is skipped, and a refresh fails only when none answers.
 
 ## Files
 
 The library lives in `$XDG_DATA_HOME/readstr/readstr.db` (SQLite, in a 0700
-directory, the file 0600). `READSTR_HOME` moves the data, config, and cache
+directory, the file 0600), and video thumbnails in
+`$XDG_CACHE_HOME/readstr/thumbnails/` (also 0700, each file 0600), as JPEG,
+named by the SHA-256 of their address; the oldest go once they are past
+64 MiB in all or 30 days old. `READSTR_HOME` moves the data, config, and cache
 directories under one directory (`data/`, `config/`, `cache/`), which is how
 tests avoid touching your real files.
 
@@ -177,6 +209,7 @@ carries over. Single keys do nothing while you type in a dialog.
 | `M` | Mark read or unread |
 | `S` | Star or unstar |
 | `O` | Open the original in the browser |
+| `P` | Play the video in mpv |
 | `Ctrl+R` | Refresh all feeds |
 | `Ctrl+N` | Add a feed (its address, a site's, or a Nostr npub) |
 | `Ctrl+Shift+A` | Mark everything in the view read |

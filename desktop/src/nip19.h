@@ -6,8 +6,8 @@
 #include <optional>
 
 // NIP-19 bech32 entities: npub and nprofile in (what people paste to follow
-// an author), npub and naddr out. Everything here is pure and bounded, since
-// what comes in is untrusted text.
+// an author), npub, naddr, and nevent out, and any entity checked for links.
+// Everything here is pure and bounded, since what comes in is untrusted text.
 namespace Nip19 {
 // Longer input is refused before decoding. An nprofile with a handful of
 // relay hints is a few hundred characters.
@@ -28,6 +28,14 @@ std::optional<Profile> decodeProfile(const QString &text);
 QString npub(const QString &pubkeyHex);
 // The naddr for a parameterized replaceable event (kind, author, d tag).
 QString naddr(int kind, const QString &pubkeyHex, const QString &identifier);
+// The nevent for an event id, with its author and kind, in the order
+// nostr-tools writes them, so the link is the one the web app makes.
+QString nevent(const QString &eventIdHex, const QString &authorHex, int kind);
+// The entity, lowercase, when `text` is a well-formed npub, nprofile, note,
+// nevent, or naddr (printable ASCII, its charset, checksum, and length within
+// maxLength, a key or id of 32 bytes for npub and note, and the TLV fields
+// nostr-tools requires for the others); empty for anything else.
+QString entity(const QString &text);
 
 // Lowercase hex of exactly `length` characters.
 bool isHex(const QString &text, int length);

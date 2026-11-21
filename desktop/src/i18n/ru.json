@@ -116,5 +116,13 @@
   "The desktop portal's file chooser is not available (is xdg-desktop-portal running?).": "Диалог выбора файлов портала рабочего стола недоступен (запущен ли xdg-desktop-portal?).",
   "Could not listen for the file chooser's answer.": "Не удалось дождаться ответа диалога выбора файлов.",
   "The file chooser failed: %1": "Ошибка диалога выбора файлов: %1",
-  "The file chooser closed without a file.": "Диалог выбора файлов закрылся без файла."
+  "The file chooser closed without a file.": "Диалог выбора файлов закрылся без файла.",
+  "Play": "Воспроизвести",
+  "Play the video in mpv (P)": "Воспроизвести видео в mpv (P)",
+  "Play the video in mpv": "Воспроизвести видео в mpv",
+  "This article has no video to play": "В этой статье нет видео для воспроизведения",
+  "Playing %1 in mpv": "Воспроизводится %1 в mpv",
+  "Cannot play the video: mpv is not installed": "Не удаётся воспроизвести видео: mpv не установлен",
+  "Cannot play the video: mpv did not start": "Не удаётся воспроизвести видео: mpv не запустился",
+  "Cannot play the video: it is on this machine or the local network": "Не удаётся воспроизвести видео: оно находится на этом компьютере или в локальной сети"
 }
