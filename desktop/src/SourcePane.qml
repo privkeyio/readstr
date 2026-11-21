@@ -4,7 +4,8 @@ import QtQuick.Controls.Material
 import QtQuick.Layouts
 
 // All articles, Unread, and Starred, then the feeds by category, with unread
-// counts and the last refresh error of each feed.
+// counts, a mark on Nostr authors, and the last refresh error of each feed
+// (or, for a Nostr author, a quieter note when the refresh missed something).
 Rectangle {
     id: pane
 
@@ -102,12 +103,14 @@ Rectangle {
                 required property int unread
                 required property string lastError
                 required property bool selectable
+                required property bool nostr
+                required property bool incomplete
 
                 readonly property bool selected: index === backend.sourceIndex
                 readonly property bool header: kind === "category"
 
                 width: ListView.view.width
-                height: header ? 36 : (lastError !== "" ? 50 : 34)
+                height: header ? 36 : (lastError !== "" || incomplete ? 50 : 34)
 
                 Rectangle {
                     anchors.fill: parent
@@ -163,6 +166,20 @@ Rectangle {
                             font.weight: row.kind === "feed" ? Font.Normal : Font.DemiBold
                         }
 
+                        Label {
+                            visible: row.nostr
+                            text: qsTr("Nostr")
+                            textFormat: Text.PlainText
+                            font.pixelSize: 10
+                            font.weight: Font.DemiBold
+                            opacity: 0.5
+                            ToolTip.visible: nostrHover.hovered
+                            ToolTip.delay: 500
+                            ToolTip.text: qsTr("A Nostr author's articles and videos")
+
+                            HoverHandler { id: nostrHover }
+                        }
+
                         Rectangle {
                             visible: row.lastError !== ""
                             Layout.preferredWidth: 8
@@ -202,6 +219,24 @@ Rectangle {
                         font.pixelSize: 11
                         color: pane.errorColor
                     }
+
+                    // Not an error: the refresh worked, but a relay was
+                    // silent or a limit cut the answers short.
+                    Label {
+                        visible: row.incomplete
+                        Layout.fillWidth: true
+                        text: qsTr("Refresh incomplete")
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        maximumLineCount: 1
+                        font.pixelSize: 11
+                        opacity: 0.6
+                        ToolTip.visible: incompleteHover.hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("The last refresh did not hear from every relay, or stopped at a limit, so some articles may be missing. The next refresh asks for them again.")
+
+                        HoverHandler { id: incompleteHover }
+                    }
                 }
 
                 HoverHandler { id: hover }
@@ -216,6 +251,7 @@ Rectangle {
                         if (mouse.button === Qt.RightButton && row.kind === "feed") {
                             feedMenu.feedId = row.feedId
                             feedMenu.feedTitle = row.title
+                            feedMenu.nostr = row.nostr
                             feedMenu.popup(row, mouse.x, mouse.y)
                         }
                     }
@@ -228,6 +264,7 @@ Rectangle {
         id: feedMenu
         property var feedId: 0
         property string feedTitle: ""
+        property bool nostr: false
         Material.roundedScale: theme.radius
         background: Rectangle {
             implicitWidth: 220
@@ -237,6 +274,9 @@ Rectangle {
             border.width: 1
         }
         MenuItem { text: qsTr("Refresh"); enabled: !backend.refreshing; onTriggered: backend.refreshFeed(feedMenu.feedId) }
+        // A hidden item still takes its place in a Menu unless its height goes too.
+        MenuItem { text: qsTr("Open profile"); visible: feedMenu.nostr; height: visible ? implicitHeight : 0; onTriggered: backend.openProfile(feedMenu.feedId) }
+        MenuItem { text: qsTr("Copy npub"); visible: feedMenu.nostr; height: visible ? implicitHeight : 0; onTriggered: backend.copyNpub(feedMenu.feedId) }
         MenuItem { text: qsTr("Unsubscribe…"); onTriggered: pane.unsubscribeRequested(feedMenu.feedId, feedMenu.feedTitle) }
     }
 }

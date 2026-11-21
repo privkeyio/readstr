@@ -1,6 +1,7 @@
 #include "articlemodel.h"
 
 #include "feedparser.h"
+#include "nip19.h"
 
 ArticleModel::ArticleModel(QObject *parent) : QAbstractListModel(parent) {}
 
@@ -22,8 +23,9 @@ QVariant ArticleModel::data(const QModelIndex &index, int role) const {
     switch (role) {
     case ArticleIdRole: return article.id;
     case FeedIdRole: return article.feedId;
-    // A feed name from OPML is stored as the file had it.
-    case FeedTitleRole: return FeedParser::cleanText(article.feedTitle);
+    // A feed name from OPML is stored as the file had it, and a Nostr
+    // author's npub, their name until the profile comes, is long.
+    case FeedTitleRole: return Nip19::shortNpub(FeedParser::cleanText(article.feedTitle), article.feedUrl);
     case TitleRole: return article.title;
     case UrlRole: return article.url;
     case AuthorRole: return article.author;

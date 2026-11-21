@@ -33,8 +33,9 @@ Sources on the left (All articles, Unread, Starred, then your feeds by
 category, with unread counts and a feed's last refresh error under it),
 the articles of the selected source in the middle, newest first, and the
 article itself on the right. Selecting an article marks it read. Right-click
-a feed to refresh it or unsubscribe; the `⋮` menu has refresh, mark the view
-read, and OPML import and export.
+a feed to refresh it or unsubscribe (and, for a Nostr author, to open their
+profile on njump.me or copy their npub); the `⋮` menu has refresh, mark the
+view read, and OPML import and export.
 
 Feeds refresh when the window opens and then about every 30 minutes (give or
 take 10%, so many readers don't all ask at once) for as long as it stays open;
@@ -57,7 +58,13 @@ link's address rather than the image's. `O` opens the whole article there.
 Add an author by their `npub` or `nprofile` (`Ctrl+N` in the window, or
 `readstr subscribe npub1…`) to follow their long-form articles and videos.
 Both are listed under the author's profile name and open on njump.me with
-`O`.
+`O`. Until the profile arrives the author goes by their npub, shortened to
+`npub1abcd…wxyz`; a name you gave them in OPML stays. A small "Nostr" next to
+the unread count marks an author's feed, and no profile picture is ever
+loaded. When the last refresh missed something (a relay did not answer, or a
+limit below cut the answers off), a quiet "Refresh incomplete" shows
+under the author instead of an error; the next refresh asks again for what
+was missed.
 
 An article's Markdown (GitHub's flavor) is shown through the same filter as
 a feed's HTML, so the same rules hold: images become `[image: …]` links and

@@ -254,6 +254,12 @@ QString entity(const QString &text) {
     return text.toLower();
 }
 
+QString shortNpub(const QString &title, const QString &feedUrl) {
+    if (title != feedUrl || !title.startsWith(QLatin1String("npub1")) || entity(title) != title)
+        return title;
+    return title.left(9) + QChar(0x2026) + title.right(4);
+}
+
 QString nevent(const QString &eventIdHex, const QString &authorHex, int kind) {
     const QByteArray id = keyBytes(eventIdHex);
     const QByteArray author = keyBytes(authorHex);

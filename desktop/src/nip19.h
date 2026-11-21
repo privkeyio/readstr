@@ -26,6 +26,14 @@ struct Profile {
 std::optional<Profile> decodeProfile(const QString &text);
 // The npub for a 64-character hex public key, or empty when it is not one.
 QString npub(const QString &pubkeyHex);
+// A feed's title as shown: when it is the feed's own npub (`feedUrl`), its
+// first 9 and last 4 characters around an ellipsis ("npub1abcd…wxyz"), and
+// otherwise as it is. A Nostr feed is titled with its npub until the
+// author's profile names it, and 63 characters of bech32 crowd out
+// everything else where titles show. Only the feed's own npub is shortened,
+// so a profile naming itself after someone else's npub shows in full rather
+// than as that other author's placeholder.
+QString shortNpub(const QString &title, const QString &feedUrl);
 // The naddr for a parameterized replaceable event (kind, author, d tag).
 QString naddr(int kind, const QString &pubkeyHex, const QString &identifier);
 // The nevent for an event id, with its author and kind, in the order

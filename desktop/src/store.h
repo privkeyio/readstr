@@ -27,6 +27,9 @@ struct Feed {
     QDateTime completeAt;
     int unread = 0;
     int total = 0;
+    // A Nostr author's last refresh that saved missed something: a relay
+    // did not answer, or a cap cut the answers off.
+    bool incomplete = false;
 };
 
 struct Article {
@@ -49,6 +52,9 @@ struct Article {
     QString mediaUrl;
     QString thumbnailUrl;
     double duration = -1;
+    // The feed's URL, an npub for a Nostr author, so its title can be shown
+    // as Nip19::shortNpub shows it.
+    QString feedUrl;
 };
 
 struct ArticleFilter {
@@ -107,6 +113,8 @@ public:
     bool setRelayHints(qint64 id, const QStringList &relays);
     // Every relay answered a refresh that started at `time`.
     bool recordComplete(qint64 id, const QDateTime &time);
+    // Whether the Nostr refresh just saved missed something (Feed::incomplete).
+    bool setIncomplete(qint64 id, bool incomplete);
     // Records a fetch attempt: validators on success, the reason on failure.
     bool recordFetch(qint64 id, const QString &etag, const QString &lastModified, const QString &error);
     // Adds new items and refreshes existing ones (same guid in the same feed)

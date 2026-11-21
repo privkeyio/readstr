@@ -117,5 +117,12 @@
   "Playing %1 in mpv": "A reproduzir %1 no mpv",
   "Cannot play the video: mpv is not installed": "Não é possível reproduzir o vídeo: o mpv não está instalado",
   "Cannot play the video: mpv did not start": "Não é possível reproduzir o vídeo: o mpv não arrancou",
-  "Cannot play the video: it is on this machine or the local network": "Não é possível reproduzir o vídeo: está nesta máquina ou na rede local"
+  "Cannot play the video: it is on this machine or the local network": "Não é possível reproduzir o vídeo: está nesta máquina ou na rede local",
+  "Nostr": "Nostr",
+  "A Nostr author's articles and videos": "Os artigos e vídeos de um autor do Nostr",
+  "Refresh incomplete": "Atualização incompleta",
+  "The last refresh did not hear from every relay, or stopped at a limit, so some articles may be missing. The next refresh asks for them again.": "A última atualização não obteve resposta de todos os relays, ou parou num limite, pelo que podem faltar alguns artigos. A próxima atualização volta a pedi-los.",
+  "Open profile": "Abrir perfil",
+  "Copy npub": "Copiar npub",
+  "Copied %1 to the clipboard": "%1 copiado para a área de transferência"
 }
