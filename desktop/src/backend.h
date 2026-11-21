@@ -327,6 +327,12 @@ private:
     std::optional<std::pair<QString, bool>> m_refreshStatus;
     SyncAccount m_syncAccount;
     bool m_syncing = false;
+    // A pull asked for while one was out, which the relays may already have
+    // answered without what changed since, so one more runs after it.
+    bool m_syncAgain = false;
+    // What the pulls a follow-up replaced changed, said with its own.
+    int m_syncAddedBefore = 0;
+    int m_syncMarkedBefore = 0;
     bool m_autoRefreshOn = false;
     QTimer m_autoRefresh;
 

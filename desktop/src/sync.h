@@ -69,7 +69,8 @@ struct Outcome {
 // relay. Like the web app's mergeViewLists, the merged views are cut to
 // maxViews with the remote ones first, so a full remote list drops the
 // views only here, and their mute words with them. A truncated result still
-// applies, but counts as a problem and is not recorded as the last sync.
+// applies, but counts as a problem and is not recorded as the last sync, and
+// neither is one with a payload refused, though the kinds that fit apply.
 // beforeWrites runs after the first freshness check and before any write;
 // tests use it to commit a competing write in between.
 Outcome apply(Store &store, const SyncAccount &account, const NostrResult &result,

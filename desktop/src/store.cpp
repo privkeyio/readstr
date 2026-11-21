@@ -109,11 +109,13 @@ const QList<QStringList> migrations = {
         " pubkey TEXT NOT NULL,"
         " relay_hints TEXT,"
         " synced_at INTEGER)",
-        // The created_at of the last event applied per d tag, so an older
-        // or repeated one is never applied again, as the web app keeps it.
+        // The created_at and id of the last event applied per d tag, so an
+        // older or repeated one is never applied again, as the web app keeps
+        // it. The id breaks a tie in created_at the way NIP-01 does.
         "CREATE TABLE sync_applied ("
         " d_tag TEXT PRIMARY KEY,"
-        " created_at INTEGER NOT NULL)",
+        " created_at INTEGER NOT NULL,"
+        " event_id TEXT NOT NULL)",
         // The read GUIDs of the last kind 30405 event applied (when the web
         // app publishes one; it does not yet), so articles that arrive later
         // are marked read too.
@@ -829,12 +831,14 @@ SyncAccount Store::syncAccount() {
     query.finish();
     if (account.pubkey.isEmpty())
         return account;
-    if (!query.exec(QStringLiteral("SELECT d_tag, created_at FROM sync_applied"))) {
+    if (!query.exec(QStringLiteral("SELECT d_tag, created_at, event_id FROM sync_applied"))) {
         fail(query.lastError().text());
         return {};
     }
-    while (query.next())
+    while (query.next()) {
         account.applied.insert(query.value(0).toString(), query.value(1).toLongLong());
+        account.appliedIds.insert(query.value(0).toString(), query.value(2).toString());
+    }
     return account;
 }
 
@@ -873,12 +877,16 @@ bool Store::clearSyncAccount() {
     return transaction([this] { return clearSyncState(); });
 }
 
-bool Store::setSyncApplied(const QString &dTag, qint64 createdAt) {
+bool Store::setSyncApplied(const QString &dTag, qint64 createdAt, const QString &eventId) {
     QSqlQuery query(m_db);
-    query.prepare(QStringLiteral("INSERT INTO sync_applied (d_tag, created_at) VALUES (?, ?) ON CONFLICT(d_tag)"
-                                 " DO UPDATE SET created_at = MAX(created_at, excluded.created_at)"));
+    query.prepare(QStringLiteral(
+        "INSERT INTO sync_applied (d_tag, created_at, event_id) VALUES (?, ?, ?) ON CONFLICT(d_tag)"
+        " DO UPDATE SET created_at = excluded.created_at, event_id = excluded.event_id"
+        " WHERE excluded.created_at > sync_applied.created_at OR (excluded.created_at = sync_applied.created_at"
+        " AND excluded.event_id < sync_applied.event_id)"));
     query.addBindValue(dTag);
     query.addBindValue(createdAt);
+    query.addBindValue(eventId);
     return query.exec() || fail(query.lastError().text());
 }
 

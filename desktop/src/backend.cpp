@@ -893,8 +893,10 @@ void Backend::stopSync() {
 }
 
 void Backend::sync() {
-    if (m_syncing)
+    if (m_syncing) {
+        m_syncAgain = true;
         return;
+    }
     if (!m_storeOpen || m_syncAccount.pubkey.isEmpty()) {
         m_refreshStatus.reset();
         return;
@@ -919,16 +921,31 @@ void Backend::syncApplied(const Sync::Outcome &outcome, const QString &pubkey) {
     m_syncing = false;
     emit syncChanged();
     reloadSyncAccount();
+    const bool again = std::exchange(m_syncAgain, false);
     // An npub set while the pull was out is pulled for now.
     if (!m_syncAccount.pubkey.isEmpty() && m_syncAccount.pubkey != pubkey) {
+        m_syncAddedBefore = m_syncMarkedBefore = 0;
         sync();
         return;
     }
     reloadLibrary();
-    const std::optional<std::pair<QString, bool>> refreshStatus = std::exchange(m_refreshStatus, std::nullopt);
     QStringList errors = outcome.problems;
     if (!outcome.error.isEmpty())
         errors.prepend(outcome.error);
+    const int added = std::exchange(m_syncAddedBefore, 0) + outcome.added;
+    const int markedRead = std::exchange(m_syncMarkedBefore, 0) + outcome.markedRead;
+    if (again && !m_syncAccount.pubkey.isEmpty()) {
+        // The follow-up says what both changed, and keeps the status of a
+        // refresh that finished while this one was out, which it was asked
+        // for. Its own problems are said there, if they persist.
+        for (const QString &error : std::as_const(errors))
+            qWarning("readstr: sync: %s", qPrintable(error));
+        m_syncAddedBefore = added;
+        m_syncMarkedBefore = markedRead;
+        sync();
+        return;
+    }
+    const std::optional<std::pair<QString, bool>> refreshStatus = std::exchange(m_refreshStatus, std::nullopt);
     // Anything said while the relays were asked is newer than the refresh's
     // message, so that comes back only over the syncing one.
     const bool stillSyncing = m_status == tr("Syncing with Nostr…");
@@ -943,16 +960,15 @@ void Backend::syncApplied(const Sync::Outcome &outcome, const QString &pubkey) {
         for (const QString &error : std::as_const(errors))
             qWarning("readstr: sync: %s", qPrintable(error));
         setStatus(tr("Cannot sync with Nostr: %1").arg(errors.join("; ")), true);
-    } else if (refreshStatus && stillSyncing && outcome.added == 0 && outcome.markedRead == 0) {
+    } else if (refreshStatus && stillSyncing && added == 0 && markedRead == 0) {
         // A sync that changed nothing would only hide what the refresh
         // before it said, such as a feed that cannot be refreshed.
         setStatus(refreshStatus->first, refreshStatus->second);
     } else {
-        setStatus(tr("Synced with Nostr: %n feeds added, %1 articles marked read", nullptr, outcome.added)
-                      .arg(outcome.markedRead));
+        setStatus(tr("Synced with Nostr: %n feeds added, %1 articles marked read", nullptr, added).arg(markedRead));
     }
     emit syncFinished();
-    if (outcome.added == 0)
+    if (added == 0)
         return;
     // The feeds the sync added have never been fetched.
     if (m_refreshing)

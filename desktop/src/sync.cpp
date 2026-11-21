@@ -311,9 +311,18 @@ QList<SavedView> mergeViews(const QList<SavedView> &local, const QList<SavedView
     return normalize(merged);
 }
 
+// Newer than the last event applied in the order the pool picks versions
+// by, so a tie in created_at goes to the lower id, and the same event
+// replayed is never newer than itself.
 bool isFresh(const SyncAccount &account, const char *dTag, const NostrEvent &event) {
-    const auto applied = account.applied.constFind(QString::fromLatin1(dTag));
-    return applied == account.applied.cend() || event.createdAt > *applied;
+    const QString key = QString::fromLatin1(dTag);
+    const auto applied = account.applied.constFind(key);
+    if (applied == account.applied.cend())
+        return true;
+    NostrEvent last;
+    last.createdAt = *applied;
+    last.id = account.appliedIds.value(key);
+    return event.isNewerThan(last);
 }
 
 QString tr(const char *text) { return QCoreApplication::translate("Sync", text); }
@@ -357,16 +366,27 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
     if (beforeWrites)
         beforeWrites();
 
+    bool refused = false;
+    const auto refuse = [&](int kind) {
+        refused = true;
+        if (kind == subscriptionsKind)
+            outcome.problems << tr("the subscription list does not fit the web app's format");
+        else if (kind == readStatusKind)
+            outcome.problems << tr("the read status does not fit the web app's format");
+        else
+            outcome.problems << tr("the saved views do not fit the web app's format");
+    };
+
     const auto storeFailed = [&] {
         outcome.error = store.lastError();
         return outcome;
     };
-    // `current` only saves parsing an event that is plainly stale. Another
-    // writer (the window and `readstr sync` on one library) may apply a
-    // newer event, or the account be stopped and set again, before this
-    // pull writes, so each write reads the account again inside its own
-    // transaction and goes ahead only if the event is still fresh for it.
-    // False on a store failure.
+    // Another writer (the window and `readstr sync` on one library) may
+    // apply a newer event, or the account be stopped and set again, while
+    // this pull runs, so each kind is judged against the account as it is
+    // now: once before its event is parsed, which also decides whether a
+    // payload that does not fit is reported, and again inside the write's
+    // own transaction. False on a store failure.
     bool changed = false;
     const auto stillFresh = [&](const char *dTag, const NostrEvent &event, bool emptyLibrary, bool *fresh) {
         const SyncAccount now = store.syncAccount();
@@ -383,7 +403,12 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
             return storeFailed();
         // An empty library has nothing for an old list to roll back, so it
         // takes the list whatever the watermark says, as the web app does.
-        if (feeds.isEmpty() || isFresh(current, subscriptionsTag, *subscriptions)) {
+        bool fresh = false;
+        if (!stillFresh(subscriptionsTag, *subscriptions, feeds.isEmpty(), &fresh))
+            return storeFailed();
+        if (changed)
+            return npubChanged();
+        if (fresh) {
             if (const auto list = parseSubscriptions(subscriptions->content)) {
                 // The web app adds what is missing and never applies the
                 // `deleted` list, so neither does this.
@@ -409,7 +434,8 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
                         || !stillFresh(subscriptionsTag, *subscriptions, now.isEmpty(), proceed))
                         return false;
                     return !*proceed
-                        || store.setSyncApplied(QString::fromLatin1(subscriptionsTag), subscriptions->createdAt);
+                        || store.setSyncApplied(QString::fromLatin1(subscriptionsTag), subscriptions->createdAt,
+                                                subscriptions->id);
                 });
                 if (!imported.error.isEmpty()) {
                     outcome.error = imported.error;
@@ -425,12 +451,21 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
             } else {
                 // Not marked applied, as on the web, so every sync says so
                 // until a list that fits replaces it.
-                outcome.problems << tr("the subscription list does not fit the web app's format");
+                refuse(subscriptionsKind);
             }
         }
     }
 
-    if (readStatus && isFresh(current, readStatusTag, *readStatus)) {
+    const auto freshNow = [&](const char *dTag, const NostrEvent *event, bool *fresh) {
+        *fresh = false;
+        return !event || stillFresh(dTag, *event, false, fresh);
+    };
+    bool readStatusFresh = false;
+    if (!freshNow(readStatusTag, readStatus, &readStatusFresh))
+        return storeFailed();
+    if (changed)
+        return npubChanged();
+    if (readStatusFresh) {
         if (const auto guids = parseReadStatus(readStatus->content)) {
             const bool saved = store.transaction([&] {
                 bool fresh = false;
@@ -440,7 +475,7 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
                     return true;
                 outcome.markedRead = store.applyReadGuids(*guids);
                 return outcome.markedRead >= 0
-                    && store.setSyncApplied(QString::fromLatin1(readStatusTag), readStatus->createdAt);
+                    && store.setSyncApplied(QString::fromLatin1(readStatusTag), readStatus->createdAt, readStatus->id);
             });
             if (!saved) {
                 outcome.markedRead = 0;
@@ -449,11 +484,16 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
             if (changed)
                 return npubChanged();
         } else {
-            outcome.problems << tr("the read status does not fit the web app's format");
+            refuse(readStatusKind);
         }
     }
 
-    if (views && isFresh(current, viewsTag, *views)) {
+    bool viewsFresh = false;
+    if (!freshNow(viewsTag, views, &viewsFresh))
+        return storeFailed();
+    if (changed)
+        return npubChanged();
+    if (viewsFresh) {
         if (const auto remote = parseViews(views->content)) {
             const bool saved = store.transaction([&] {
                 bool fresh = false;
@@ -463,16 +503,24 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
                     return true;
                 const QList<SavedView> local = store.savedViews();
                 return store.lastError().isEmpty() && store.replaceSavedViews(mergeViews(local, *remote))
-                    && store.setSyncApplied(QString::fromLatin1(viewsTag), views->createdAt);
+                    && store.setSyncApplied(QString::fromLatin1(viewsTag), views->createdAt, views->id);
             });
             if (!saved)
                 return storeFailed();
             if (changed)
                 return npubChanged();
         } else {
-            outcome.problems << tr("the saved views do not fit the web app's format");
+            refuse(viewsKind);
         }
     }
+
+    // A kind whose only versions were past the size cap is refused as one
+    // that does not fit, since the web app refuses it the same way.
+    for (const auto &[kind, dTag] : result.oversized)
+        if ((kind == subscriptionsKind && dTag == QLatin1String(subscriptionsTag))
+            || (kind == readStatusKind && dTag == QLatin1String(readStatusTag))
+            || (kind == viewsKind && dTag == QLatin1String(viewsTag)))
+            refuse(kind);
 
     // The pool stopped keeping events at its size cap, so a newer one may
     // be missing. What came is still applied, as the watermarks keep it from
@@ -488,7 +536,9 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
     if (!store.lastError().isEmpty())
         return storeFailed();
     outcome.views = int(saved.size());
-    if (!result.truncated) {
+    // A refused payload leaves its kind as it was, so the pull is not
+    // recorded as the last sync either, though what did fit stays applied.
+    if (!result.truncated && !refused) {
         // Under the same check, so a pull for an account stopped meanwhile
         // never dates the next one's.
         const bool recorded = store.transaction([&] {

@@ -127,8 +127,9 @@ Merging is close to the web app's and never removes anything here:
   carries them, and stay as they are here.
 
 Each event applies only when it is newer than the last one applied of its
-kind, so an old or replayed one never rolls anything back, and unsubscribing
-here is not undone by pulling the same list again. Readstr does not publish
+kind (in the same second, when its id is lower, as NIP-01 has relays keep),
+so an old or replayed one never rolls anything back, and unsubscribing here
+is not undone by pulling the same list again. Readstr does not publish
 yet, though, so a feed unsubscribed here comes back with the next newer
 subscription list the web app publishes, which still has it. (Like the web app, an empty library
 takes the subscription list whatever its age.) `readstr sync logout` or
@@ -255,9 +256,10 @@ at most 256 characters, URLs of at most 2048, 100 saved views, of which the
 first 50 are kept), or that event is refused whole and the pull says so. As
 on the web app, the merged views are cut to 50 with the remote ones first,
 so 50 remote views leave no room for views only here. A newer event past the
-size cap is passed over for the newest one that fits, and relay messages may
-be up to about 24 MiB for these. A pull cut short by the pool's size cap says
-so and is not recorded as the last sync.
+size cap is passed over for the newest one that fits, or refused when none
+does, and relay messages may be up to about 24 MiB for these. A pull cut
+short by the pool's size cap, or with an event refused, says so and is not
+recorded as the last sync; the events that fit still apply.
 
 ## Files
 

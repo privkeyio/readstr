@@ -23,16 +23,17 @@ struct NostrQuery {
     qint64 since = 0;
     // Relays to ask besides the pool's own, such as an nprofile's hints.
     QStringList extraRelays;
-    // When set, only events whose kind and d tag are one of these pairs. The
-    // "#d" filter can only ask for the d tags across every kind, so a kind
-    // carrying another kind's d tag, which would take up the query's byte
-    // cap, is dropped here.
+    // When set, only events whose kind and d tag are one of these pairs,
+    // asked for with one filter per pair. A careless relay may still send a
+    // kind carrying another kind's d tag, which would take up the query's
+    // byte cap, so that is dropped here.
     QList<std::pair<int, QString>> dTags;
     // When set, events whose content is longer are passed over rather than
     // kept, so a huge newer version cannot hide a smaller older one.
     qsizetype maxContentLength = 0;
 
-    QJsonObject filter() const;
+    // The NIP-01 filters of its REQ: one, or one per pair of dTags.
+    QList<QJsonObject> filters() const;
 };
 
 struct NostrResult {
@@ -49,6 +50,9 @@ struct NostrResult {
     QString error;
     // The events were cut off at the query's count or size cap.
     bool truncated = false;
+    // The kind and d tag of each replaceable event a relay sent only past
+    // the query's maxContentLength, so no version of it was kept.
+    QList<std::pair<int, QString>> oversized;
     // A relay hint was not asked, past the batch's connection cap.
     bool deferred = false;
     // When the query went out.

@@ -69,8 +69,9 @@ struct SyncAccount {
     QStringList relays;
     // When a pull last reached a relay and was merged, invalid until one has.
     QDateTime syncedAt;
-    // The created_at of the last event applied, by d tag.
+    // The created_at and the id of the last event applied, by d tag.
     QHash<QString, qint64> applied;
+    QHash<QString, QString> appliedIds;
 };
 
 // A saved view as kind 30406 carries it, without keywords.exclude, and the
@@ -165,8 +166,9 @@ public:
     // Forgets the account and what was pulled for it; subscriptions, read
     // marks, and saved views stay.
     bool clearSyncAccount();
-    // Moves the d tag's watermark up to `createdAt`, never down.
-    bool setSyncApplied(const QString &dTag, qint64 createdAt);
+    // Moves the d tag's watermark up to the event `createdAt` and
+    // `eventId`, never down, in NostrEvent::isNewerThan's order.
+    bool setSyncApplied(const QString &dTag, qint64 createdAt, const QString &eventId);
     bool recordSynced(const QDateTime &time);
     // Remembers `guids` in place of the last list and marks the unread
     // articles with any of them read, as saveItems() does for articles that
@@ -175,6 +177,8 @@ public:
     // The remembered read GUIDs no article has yet, or -1 on failure.
     int pendingReadCount();
     QList<SavedView> savedViews();
+    // Meant for inside transaction(), like applyReadGuids(), so a failure
+    // part way rolls the delete back with the rest.
     bool replaceSavedViews(const QList<SavedView> &views);
 
     // Runs `work` in one transaction that commits when it returns true and

@@ -15,21 +15,25 @@
 #include "feedparser.h"
 #include "fetcher.h"
 
-QJsonObject NostrQuery::filter() const {
+QList<QJsonObject> NostrQuery::filters() const {
     QJsonArray kindArray;
     for (int kind : kinds)
         kindArray << kind;
     QJsonObject object{{"authors", QJsonArray{author}}, {"kinds", kindArray}, {"limit", limit}};
     if (since > 0)
         object.insert("since", since);
-    if (!dTags.isEmpty()) {
-        QStringList values;
-        for (const auto &[kind, dTag] : dTags)
-            if (!values.contains(dTag))
-                values << dTag;
-        object.insert("#d", QJsonArray::fromStringList(values));
+    if (dTags.isEmpty())
+        return {object};
+    // One filter per pair, each with its own limit, so the old versions a
+    // relay keeps of one pair cannot use up the limit of another.
+    QList<QJsonObject> perPair;
+    for (const auto &[kind, dTag] : dTags) {
+        QJsonObject pair = object;
+        pair.insert("kinds", QJsonArray{kind});
+        pair.insert("#d", QJsonArray{dTag});
+        perPair << pair;
     }
-    return object;
+    return perPair;
 }
 
 namespace {
@@ -55,6 +59,9 @@ struct RelayPool::Batch {
         // By id, or for a replaceable event by its address, holding only
         // the newest version.
         QHash<QString, NostrEvent> events;
+        // The kind and d tag, by address, of verified events passed over for
+        // being past the query's maxContentLength.
+        QHash<QString, std::pair<int, QString>> oversized;
         qint64 bytes = 0;
         bool truncated = false;
         // A relay hint was left out at the connection cap.
@@ -198,7 +205,10 @@ private:
         });
         timer->start(m_limits.subscriptionTimeoutMs);
         m_subscriptions.insert(id, {query, timer});
-        send(QJsonArray{"REQ", id, m_batch->queries.at(query).query.filter()});
+        QJsonArray request{"REQ", id};
+        for (const QJsonObject &filter : m_batch->queries.at(query).query.filters())
+            request << filter;
+        send(request);
     }
 
     void send(const QJsonArray &message) {
@@ -477,10 +487,21 @@ bool RelayPool::accept(const std::shared_ptr<Batch> &batch, int queryIndex, cons
         || event.createdAt < state.query.since
         || event.createdAt > QDateTime::currentSecsSinceEpoch() + maxClockSkew
         || (!state.query.dTags.isEmpty()
-            && !state.query.dTags.contains(std::pair(event.kind, event.tag(QStringLiteral("d")))))
-        || (state.query.maxContentLength > 0 && event.content.size() > state.query.maxContentLength))
+            && !state.query.dTags.contains(std::pair(event.kind, event.tag(QStringLiteral("d"))))))
         return true;
     const QString address = replaceableKey(event);
+    if (state.query.maxContentLength > 0 && event.content.size() > state.query.maxContentLength) {
+        // Noted so the result can say it was refused, should no version of
+        // its address that fits come. Only the first one per address is
+        // verified, which is enough to keep a relay from claiming a refusal
+        // with a forged event without hashing every oversized copy.
+        if (address.isEmpty() || state.events.contains(address) || state.oversized.contains(address))
+            return true;
+        if (!event.verify())
+            return false;
+        state.oversized.insert(address, {event.kind, event.tag(QStringLiteral("d"))});
+        return true;
+    }
     const QString key = address.isEmpty() ? event.id : address;
     const auto existing = state.events.constFind(key);
     if (existing != state.events.cend() && (existing->id == event.id || !event.isNewerThan(*existing)))
@@ -544,6 +565,9 @@ void RelayPool::deliver(const std::shared_ptr<Batch> &batch, int queryIndex, con
     result.answered = state.answered;
     result.truncated = state.truncated;
     result.deferred = state.deferred;
+    for (auto it = state.oversized.cbegin(); it != state.oversized.cend(); ++it)
+        if (!state.events.contains(it.key()))
+            result.oversized << it.value();
     if (!error.isEmpty())
         result.error = error;
     else if (!state.answered)
