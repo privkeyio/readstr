@@ -62,7 +62,7 @@ Both are listed under the author's profile name and open on njump.me with
 `npub1abcd…wxyz`; a name you gave them in OPML stays. A small "Nostr" next to
 the unread count marks an author's feed, and no profile picture is ever
 loaded. When the last refresh missed something (a relay did not answer, or a
-limit below cut the answers off), a quiet "Some relays didn't answer" shows
+limit below cut the answers off), a quiet "Refresh incomplete" shows
 under the author instead of an error; the next refresh asks again for what
 was missed.
 

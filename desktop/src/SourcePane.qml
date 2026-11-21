@@ -225,7 +225,7 @@ Rectangle {
                     Label {
                         visible: row.incomplete
                         Layout.fillWidth: true
-                        text: qsTr("Some relays didn't answer")
+                        text: qsTr("Refresh incomplete")
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
                         maximumLineCount: 1

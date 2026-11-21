@@ -127,7 +127,7 @@
   "Cannot play the video: it is on this machine or the local network": "Не удаётся воспроизвести видео: оно находится на этом компьютере или в локальной сети",
   "Nostr": "Nostr",
   "A Nostr author's articles and videos": "Статьи и видео автора из Nostr",
-  "Some relays didn't answer": "Не все релеи ответили",
+  "Refresh incomplete": "Обновление неполное",
   "The last refresh did not hear from every relay, or stopped at a limit, so some articles may be missing. The next refresh asks for them again.": "Последнее обновление получило ответ не от всех релеев или остановилось на ограничении, поэтому некоторых статей может не хватать. Следующее обновление запросит их снова.",
   "Open profile": "Открыть профиль",
   "Copy npub": "Копировать npub",

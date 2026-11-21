@@ -48,7 +48,7 @@
   "Cannot play the video: mpv did not start": "Não é possível reproduzir o vídeo: o mpv não iniciou",
   "Nostr": "Nostr",
   "A Nostr author's articles and videos": "Os artigos e vídeos de um autor do Nostr",
-  "Some relays didn't answer": "Alguns relays não responderam",
+  "Refresh incomplete": "Atualização incompleta",
   "The last refresh did not hear from every relay, or stopped at a limit, so some articles may be missing. The next refresh asks for them again.": "A última atualização não teve resposta de todos os relays, ou parou em um limite, então alguns artigos podem estar faltando. A próxima atualização pede por eles de novo.",
   "Open profile": "Abrir perfil",
   "Copy npub": "Copiar npub",
