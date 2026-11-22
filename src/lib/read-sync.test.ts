@@ -331,6 +331,77 @@ describe('pullReadStatus', () => {
     await expect(pullReadStatus({ ...base(), npub: () => npub, markRead, fetchRemote })).resolves.toBe(false)
     expect(markRead).not.toHaveBeenCalled()
   })
+
+  // Sync turned off and on again while the pull is in flight: the withdrawal
+  // records [], and the older pulled list must not replace it.
+  async function withdrawMidPull(session: ReturnType<typeof newReadSyncSession>) {
+    setReadSyncEnabled(false)
+    await withdrawReadStatus({ canSign: () => true, npub: () => NPUB, session, signEvent, publish: ok(300) })
+    setReadSyncEnabled(true)
+  }
+
+  it('keeps a withdrawal made while a fresh event was being applied', async () => {
+    setReadSyncEnabled(true)
+    const session = newReadSyncSession(NPUB)
+    const markRead = vi.fn(async () => withdrawMidPull(session))
+    const opts = { ...base(session), markRead, fetchRemote: remote(['old'], 100, true, false) }
+    await expect(pullReadStatus(opts)).resolves.toBe(true)
+    expect(markRead).toHaveBeenCalledWith(['old'])
+    expect(session).toMatchObject({ pulled: true, remote: [] })
+  })
+
+  it('keeps a withdrawal made while fetching an event already applied here', async () => {
+    setReadSyncEnabled(true)
+    const session = newReadSyncSession(NPUB)
+    const fetchRemote = vi.fn(async (): Promise<ReadStatusFetchResult> => {
+      await withdrawMidPull(session)
+      return { success: true, found: true, data: { itemGuids: ['old'] }, createdAt: 100, fresh: false, complete: true }
+    })
+    await expect(pullReadStatus({ ...base(session), markRead: vi.fn(), fetchRemote })).resolves.toBe(true)
+    expect(session).toMatchObject({ pulled: true, remote: [] })
+  })
+
+  it('makes the next publish and withdrawal go after the newest pulled event', async () => {
+    setReadSyncEnabled(true)
+    storage.data.set(WATERMARK, '2000')
+    const markRead = vi.fn(async () => {})
+    // A stale event from a pull a relay did not fully answer counts as much as a complete one.
+    for (const fetchRemote of [remote(['a'], 1000, false, false), remote(['a'], 1000, true, true)]) {
+      const session = newReadSyncSession(NPUB)
+      await pullReadStatus({ ...base(session), markRead, fetchRemote })
+      expect(session.latestSeenAt).toBe(1000)
+      session.pulled = true
+      const publish = ok(1001)
+      await publishReadStatusIfChanged({ ...base(session), signEvent, publish, fetchLocal: async () => ['b'] })
+      expect(publish).toHaveBeenLastCalledWith(['b', 'a'], expect.any(Function), 1001)
+      setReadSyncEnabled(false)
+      await withdrawReadStatus({ ...base(session), signEvent, publish })
+      expect(publish).toHaveBeenLastCalledWith([], signEvent, 1002)
+      setReadSyncEnabled(true)
+    }
+  })
+
+  it('never lowers the publish floor when a pull finds an older event', async () => {
+    setReadSyncEnabled(true)
+    const session = pulledSession()
+    await publishReadStatusIfChanged({ ...base(session), signEvent, publish: ok(500), fetchLocal: async () => ['a'] })
+    await pullReadStatus({ ...base(session), markRead: vi.fn(async () => {}), fetchRemote: remote(['x'], 100, false) })
+    expect(session.latestSeenAt).toBe(500)
+    expect(newReadSyncSession(NPUB).latestSeenAt).toBeNull()
+  })
+
+  it('raises the publish floor from an event found just before the pull stopped', async () => {
+    setReadSyncEnabled(true)
+    const session = newReadSyncSession(NPUB)
+    const fetchRemote = vi.fn(async (): Promise<ReadStatusFetchResult> => {
+      setReadSyncEnabled(false)
+      return { success: true, found: true, data: { itemGuids: ['a'] }, createdAt: 900, fresh: true, complete: true }
+    })
+    await expect(pullReadStatus({ ...base(session), markRead: vi.fn(), fetchRemote })).resolves.toBe(false)
+    const publish = ok(901)
+    await withdrawReadStatus({ ...base(session), signEvent, publish })
+    expect(publish).toHaveBeenCalledWith([], signEvent, 901)
+  })
 })
 
 describe('publishReadStatusIfChanged', () => {
@@ -418,7 +489,7 @@ describe('publishReadStatusIfChanged', () => {
     await publishReadStatusIfChanged({ ...opts(session), publish, fetchLocal: async () => ['a'] })
     await publishReadStatusIfChanged({ ...opts(session), publish, fetchLocal: async () => ['a', 'b'] })
     expect(publish.mock.calls.map((call) => call[2])).toEqual([0, 501])
-    expect(session.lastPublishedAt).toBe(500)
+    expect(session.latestSeenAt).toBe(500)
   })
 
   it('re-checks the setting before signing a publish already past its gate', async () => {

@@ -136,15 +136,20 @@ export interface ReadSyncSession {
   // published here), or null when unknown. Publishes add to it rather than
   // drop its keys, and a list it already covers is not published again.
   remote: string[] | null
-  // created_at of the last event this session published, or null. The next
-  // publish goes strictly after it, so a withdrawal made within the same
-  // second still replaces the list it follows.
-  lastPublishedAt: number | null
+  // Bumped each time a publish or withdrawal records what the relays hold. A
+  // pull compares it with the value it saw at the start, so a result fetched
+  // before that publish does not overwrite the newer `remote`.
+  remoteVersion: number
+  // The greatest created_at this session has published or seen in a pulled
+  // event, or null. The next publish goes strictly after it, so it replaces
+  // that event even when made within the same second or under a clock that
+  // runs behind another device's.
+  latestSeenAt: number | null
   queue: Promise<void>
 }
 
 export function newReadSyncSession(npub: string | null = null): ReadSyncSession {
-  return { npub, pulled: false, remote: null, lastPublishedAt: null, queue: Promise.resolve() }
+  return { npub, pulled: false, remote: null, remoteVersion: 0, latestSeenAt: null, queue: Promise.resolve() }
 }
 
 // Retry delays for a pull that failed or that not every relay answered.
@@ -191,8 +196,24 @@ export async function pullReadStatus(opts: {
   const { session } = opts
   const live = () => !opts.isCancelled?.() && sessionAllowed(opts)
   if (!live()) return false
+  const remoteVersion = session.remoteVersion
+  // A publish or withdrawal that finished during the pull already set what the
+  // relays hold, after the pulled event, so the pulled list must not replace
+  // it. Publishing is then safe too, since that publish set the relay state.
+  const settle = (guids: string[], complete: boolean): boolean => {
+    if (session.remoteVersion !== remoteVersion) {
+      session.pulled = true
+      return true
+    }
+    session.remote = guids
+    session.pulled = complete
+    return complete
+  }
   try {
     const result = await (opts.fetchRemote ?? fetchReadStatus)(session.npub!)
+    // Raised even when the pull then stops, so a withdrawal made right after
+    // still goes after the event the relays hold.
+    if (result.success && result.found) raiseLatestSeenAt(session, result.createdAt)
     if (!live()) return false
     if (!result.success) {
       console.warn('Read status sync fetch failed:', result.error)
@@ -206,9 +227,7 @@ export async function pullReadStatus(opts: {
     if (!result.fresh || !isSyncEventFresh(READ_STATUS_D_TAG, result.createdAt)) {
       // Applied before, or published by this device: nothing to apply, but it
       // is what the relays hold, so publishes build on it.
-      session.remote = guids
-      session.pulled = result.complete
-      return result.complete
+      return settle(guids, result.complete)
     }
     for (const part of chunkGuidsForRequest(guids)) {
       if (!live()) return false
@@ -216,10 +235,8 @@ export async function pullReadStatus(opts: {
     }
     if (!live()) return false
     opts.onApplied()
-    session.remote = guids
-    session.pulled = result.complete
     advanceSyncWatermarkIfFresh(READ_STATUS_D_TAG, result.createdAt)
-    return result.complete
+    return settle(guids, result.complete)
   } catch (error) {
     console.error('Read status sync pull failed:', error)
     return false
@@ -228,9 +245,13 @@ export async function pullReadStatus(opts: {
 
 const turnedOff = () => new Error('Read status sync was turned off')
 
+function raiseLatestSeenAt(session: ReadSyncSession, createdAt: number): void {
+  if (session.latestSeenAt == null || createdAt > session.latestSeenAt) session.latestSeenAt = createdAt
+}
+
 // The lowest created_at the session's next event may have.
 function nextCreatedAt(session: ReadSyncSession): number {
-  return session.lastPublishedAt == null ? 0 : session.lastPublishedAt + 1
+  return session.latestSeenAt == null ? 0 : session.latestSeenAt + 1
 }
 
 // The watermark is shared by every account on this device, so it only moves
@@ -243,7 +264,8 @@ function recordPublished(
   npub: string | null | undefined
 ): void {
   session.remote = guids
-  if (createdAt != null) session.lastPublishedAt = createdAt
+  session.remoteVersion++
+  if (createdAt != null) raiseLatestSeenAt(session, createdAt)
   if (npub === session.npub) advanceSyncWatermarkIfFresh(READ_STATUS_D_TAG, createdAt)
 }
 

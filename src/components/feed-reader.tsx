@@ -1273,7 +1273,13 @@ export function FeedReader() {
         // changes meanwhile only add to the pending publish.
         if (publishAfter) readSyncPendingRef.current = true
         const { canSign: signer, npub } = readSyncDepsRef.current
-        if (!readSyncAllowed(signer, npub)) return
+        if (!readSyncAllowed(signer, npub)) {
+          // No retry is scheduled while sync is not allowed, so the effect
+          // must be free to pull again once signing or the account comes back.
+          // It re-runs only when its deps change, so this cannot loop.
+          hasPulledReadRef.current = false
+          return
+        }
         const delay = readSyncRetryDelayRef.current
         readSyncRetryDelayRef.current = nextReadSyncRetryDelay(delay)
         readSyncRetryTimerRef.current = setTimeout(() => {
