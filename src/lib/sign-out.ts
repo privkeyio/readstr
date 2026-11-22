@@ -1,7 +1,7 @@
 import { AI_CONFIG_KEY } from './ai/config'
 import { clearSummaryCache } from './ai/summary-cache'
 import { clearProfileCache } from './nostr-profile'
-import { APPLIED_CREATEDAT_PREFIX } from './nostr-sync'
+import { APPLIED_CREATEDAT_PREFIX, READ_SYNC_KEY } from './nostr-sync'
 import { clearHistory } from './reading-history'
 import { USER_STATE_CLEARED_EVENT } from './user-state-events'
 
@@ -31,6 +31,7 @@ export const USER_STORAGE_KEYS = [
   'readstr_profiles',
   'readstr_last_sync',
   'readstr_prefs_sync',
+  READ_SYNC_KEY, // read status sync publishes reading history; the next user opts in themselves
   'last_feed_refresh',
   RELAYS_KEY,
 ] as const

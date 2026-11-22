@@ -5,8 +5,6 @@ export const FALLBACK_RELAYS: readonly string[] = [
   'wss://relay.primal.net',
   'wss://nos.lol',
   'wss://relay.snort.social',
-  'wss://relay.nostr.band',
-  'wss://nostr-pub.wellorder.net',
 ]
 
 export const CONTROL_OR_SPACE = /[\u0000-\u0020\u007f-\u009f\s]/
@@ -46,12 +44,23 @@ export function getDefaultRelays(): string[] {
   return runtimeDefaultRelays ? [...runtimeDefaultRelays] : [...FALLBACK_RELAYS]
 }
 
+// Relays that no longer answer. Lists saved before they were dropped from the
+// defaults can still name them, and each one holds a query up until it times
+// out, so they are removed whenever a saved list is read.
+export const DEAD_RELAYS: readonly string[] = ['wss://relay.nostr.band', 'wss://nostr-pub.wellorder.net']
+
+export function isDeadRelay(url: string): boolean {
+  const normalized = url.trim().toLowerCase().replace(/\/+$/, '')
+  return DEAD_RELAYS.includes(normalized)
+}
+
 export function pickRelays(saved: string | null, defaults: string[]): string[] {
   if (!saved) return [...defaults]
   try {
     const parsed: unknown = JSON.parse(saved)
     if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((r) => typeof r === 'string')) {
-      return parsed as string[]
+      const live = (parsed as string[]).filter((r) => !isDeadRelay(r))
+      if (live.length > 0) return live
     }
   } catch {
     // fall through to defaults

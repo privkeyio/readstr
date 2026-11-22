@@ -3,7 +3,8 @@
     "lib": [
       "dom",
       "dom.iterable",
-      "es6"
+      "es6",
+      "es2021.promise"
     ],
     "allowJs": true,
     "skipLibCheck": true,

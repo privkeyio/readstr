@@ -122,6 +122,7 @@ model ReadItem {
     @@unique([userPubkey, itemId])
     @@index([userPubkey])
     @@index([userPubkey, syncedAt])
+    @@index([userPubkey, readAt])
 }
 
 model Favorite {

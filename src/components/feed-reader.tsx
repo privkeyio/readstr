@@ -40,7 +40,16 @@ import {
   fetchReadingPrefs,
   publishReadingPrefs,
   getPrefsSyncEnabled,
+  getSyncRelays,
 } from '@/lib/nostr-sync'
+import {
+  newReadSyncSession,
+  publishReadStatusIfChanged,
+  pullReadStatus,
+  readSyncAllowed,
+  READ_SYNC_PUBLISH_DELAY_MS,
+  withdrawReadStatus,
+} from '@/lib/read-sync'
 import type { UnsignedEvent } from 'nostr-tools'
 import { ArticlePane } from './reader/ArticlePane'
 import { ItemList } from './reader/ItemList'
@@ -134,6 +143,16 @@ export function FeedReader() {
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const feedDataRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingMarksRef = useRef(0)
+  const readSyncSessionRef = useRef(newReadSyncSession())
+  const readSyncUnmountedRef = useRef(false)
+  const readSyncPullingRef = useRef(false)
+  const hasPulledReadRef = useRef(false)
+  const readSyncReadyRef = useRef(false)
+  const readSyncPendingRef = useRef(false)
+  const readSyncPublishAfterPullRef = useRef(false)
+  const readSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const readSyncDepsRef = useRef({ canSign, npub: user?.npub, signEventOrThrow })
+  const [readSyncTick, setReadSyncTick] = useState(0)
   
   // Mobile responsive state
   const [showSidebar, setShowSidebar] = useState(false)
@@ -529,6 +548,88 @@ export function FeedReader() {
     if (feedDataRefreshTimerRef.current) clearTimeout(feedDataRefreshTimerRef.current)
   }, [])
 
+  // Read status sync (kind 30405): opt-in, signers only. Timers and the pull
+  // read auth from this ref, so a debounced publish sees the current signer.
+  useEffect(() => {
+    readSyncDepsRef.current = { canSign, npub: user?.npub, signEventOrThrow }
+  }, [canSign, user?.npub, signEventOrThrow])
+
+  // Sync state belongs to one account. On a switch, start over so the new
+  // account pulls before it publishes and never publishes the old one's list;
+  // work still queued for the old account sees the session's npub and stops.
+  useEffect(() => {
+    const npub = user?.npub ?? null
+    if (readSyncSessionRef.current.npub === npub) return
+    readSyncSessionRef.current = newReadSyncSession(npub)
+    hasPulledReadRef.current = false
+    readSyncPullingRef.current = false
+    readSyncReadyRef.current = false
+    readSyncPendingRef.current = false
+    readSyncPublishAfterPullRef.current = false
+    if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
+    readSyncTimerRef.current = null
+  }, [user?.npub])
+
+  const publishReadSyncNow = useCallback(() => {
+    if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
+    readSyncTimerRef.current = null
+    return publishReadStatusIfChanged({
+      canSign: () => readSyncDepsRef.current.canSign,
+      npub: () => readSyncDepsRef.current.npub,
+      session: readSyncSessionRef.current,
+      // cacheTime 0: the list can be megabytes and is only needed once.
+      fetchLocal: async () => (await utils.feed.getReadGuidsForSync.fetch(undefined, { cacheTime: 0 })).guids,
+      signEvent: (event) => readSyncDepsRef.current.signEventOrThrow(event),
+    })
+  }, [utils])
+
+  // Pull again before publishing when the session's last pull failed, so a
+  // publish never replaces a list this device has not applied. The pull
+  // publishes when it is done.
+  const retryReadSyncPull = () => {
+    hasPulledReadRef.current = false
+    readSyncReadyRef.current = false
+    readSyncPendingRef.current = true
+    setReadSyncTick((t) => t + 1)
+  }
+
+  // Called after every read change. Before the session's pull has finished,
+  // only note it, so the pull's publish carries it instead of racing it.
+  const scheduleReadSyncPublish = () => {
+    const { canSign: signer, npub } = readSyncDepsRef.current
+    if (!readSyncAllowed(signer, npub)) return
+    if (!readSyncReadyRef.current) {
+      readSyncPendingRef.current = true
+      return
+    }
+    if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
+    readSyncTimerRef.current = setTimeout(() => {
+      if (readSyncSessionRef.current.pulled) void publishReadSyncNow()
+      else {
+        readSyncTimerRef.current = null
+        retryReadSyncPull()
+      }
+    }, READ_SYNC_PUBLISH_DELAY_MS)
+  }
+
+  // Best effort: a page closing mid-debounce publishes now rather than never.
+  useEffect(() => {
+    const flush = () => {
+      if (readSyncTimerRef.current) void publishReadSyncNow()
+    }
+    window.addEventListener('pagehide', flush)
+    return () => window.removeEventListener('pagehide', flush)
+  }, [publishReadSyncNow])
+
+  // Set on mount too, since React's strict mode unmounts and remounts once.
+  useEffect(() => {
+    readSyncUnmountedRef.current = false
+    return () => {
+      readSyncUnmountedRef.current = true
+      if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
+    }
+  }, [])
+
   // Auto-refresh all feeds function
   const handleRefreshAllFeeds = useCallback(() => {
     if (isRefreshingAll || !user?.npub) return
@@ -621,6 +722,7 @@ export function FeedReader() {
         utils.feed.getFeeds.setData(undefined, context.previousFeeds)
       }
     },
+    onSuccess: () => scheduleReadSyncPublish(),
     onSettled: () => {
       pendingMarksRef.current = Math.max(0, pendingMarksRef.current - 1)
       scheduleFeedDataRefresh()
@@ -655,6 +757,7 @@ export function FeedReader() {
         utils.feed.getFeeds.setData(undefined, context.previousFeeds)
       }
     },
+    onSuccess: () => scheduleReadSyncPublish(),
     onSettled: () => {
       pendingMarksRef.current = Math.max(0, pendingMarksRef.current - 1)
       scheduleFeedDataRefresh()
@@ -664,8 +767,11 @@ export function FeedReader() {
   const markAllAsReadMutation = api.feed.markFeedAsRead.useMutation({
     onSuccess: () => {
       invalidateFeedData()
+      scheduleReadSyncPublish()
     },
   })
+
+  const markReadByGuidsMutation = api.feed.markReadByGuids.useMutation()
   
   const addFavoriteMutation = api.feed.addFavorite.useMutation({
     onSuccess: invalidateFeedData,
@@ -951,19 +1057,15 @@ export function FeedReader() {
 
       const signedEvent = await signEventOrThrow(unsignedEvent)
 
-      // Publish to relays
+      // Publish and wait for the first relay to accept. Promise.any, not
+      // race, so one relay refusing or being down does not fail the share.
       const pool = new SimplePool()
-      const relays = [
-        'wss://relay.damus.io',
-        'wss://nos.lol',
-        'wss://relay.nostr.band',
-        'wss://relay.snort.social',
-      ]
-
-      // Publish and wait for at least one relay to confirm
-      const publishPromises = pool.publish(relays, signedEvent)
-      await Promise.race(publishPromises)
-      pool.close(relays)
+      const relays = getSyncRelays()
+      try {
+        await Promise.any(pool.publish(relays, signedEvent))
+      } finally {
+        pool.close(relays)
+      }
 
       setShareSuccess(true)
       setTimeout(() => setShareSuccess(false), 3000)
@@ -1123,6 +1225,70 @@ export function FeedReader() {
       }
     }
   }, [])
+
+  // Pull read status once per session after feeds load, and again when the
+  // setting is turned on (readSyncTick), which then publishes once.
+  useEffect(() => {
+    if (hasPulledReadRef.current) return
+    if (!feedsLoaded || !readSyncAllowed(canSign, user?.npub)) return
+    const session = readSyncSessionRef.current
+    if (session.npub !== (user?.npub ?? null)) return
+    hasPulledReadRef.current = true
+    readSyncPullingRef.current = true
+    const publishAfter = readSyncPublishAfterPullRef.current
+    readSyncPublishAfterPullRef.current = false
+
+    void pullReadStatus({
+      canSign: () => readSyncDepsRef.current.canSign,
+      npub: () => readSyncDepsRef.current.npub,
+      isCancelled: () => readSyncUnmountedRef.current || readSyncSessionRef.current !== session,
+      session,
+      markRead: (guids) => markReadByGuidsMutation.mutateAsync({ guids }),
+      onApplied: () => {
+        invalidateFeedData()
+        void utils.feed.getCategoriesWithUnread.invalidate()
+      },
+    }).finally(() => {
+      if (readSyncSessionRef.current === session) readSyncPullingRef.current = false
+      // A pull for an account that is no longer signed in leaves the new
+      // session's state alone.
+      if (readSyncUnmountedRef.current || readSyncSessionRef.current !== session) return
+      readSyncReadyRef.current = true
+      if (publishAfter || readSyncPendingRef.current) {
+        readSyncPendingRef.current = false
+        void publishReadSyncNow()
+      }
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.npub, canSign, feedsLoaded, readSyncTick])
+
+  const handleReadSyncChange = (enabled: boolean) => {
+    if (enabled) {
+      // A pull still applying (the setting turned off and on again) carries on
+      // and publishes when it ends; a second one alongside would share batched
+      // requests past the body cap and spend the rate limit twice.
+      if (readSyncPullingRef.current) {
+        readSyncPendingRef.current = true
+        return
+      }
+      readSyncSessionRef.current.pulled = false
+      hasPulledReadRef.current = false
+      readSyncReadyRef.current = false
+      readSyncPublishAfterPullRef.current = true
+      setReadSyncTick((t) => t + 1)
+      return
+    }
+    if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
+    readSyncTimerRef.current = null
+    readSyncPendingRef.current = false
+    // Turning it off replaces the published list with an empty one.
+    void withdrawReadStatus({
+      canSign: () => readSyncDepsRef.current.canSign,
+      npub: () => readSyncDepsRef.current.npub,
+      session: readSyncSessionRef.current,
+      signEvent: (event) => readSyncDepsRef.current.signEventOrThrow(event),
+    })
+  }
 
   // Handle importing feeds from Nostr sync
   const handleImportFeeds = async (feedsToImport: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => {
@@ -1751,6 +1917,7 @@ export function FeedReader() {
         }))}
         userPubkey={user?.npub || user?.pubkey}
         onImportFeeds={handleImportFeeds}
+        onReadSyncChange={handleReadSyncChange}
       />
 
       {/* Sync Prompt Dialog */}

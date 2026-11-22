@@ -7,6 +7,13 @@ import { withRequestFetcher } from '@/lib/safe-relays'
 import { rateLimit } from '@/server/rate-limit'
 import { MAX_RELAY_URL_LENGTH, MAX_CLIENT_RELAYS } from '@/lib/relays'
 import { discoverFeed } from '@/lib/feed-discovery'
+import {
+  chunk,
+  GUID_QUERY_CHUNK,
+  readGuidsInputSchema,
+  readSyncKey,
+  ReadSyncGuidCollector,
+} from '@/server/read-sync'
 import { FeedType, type Prisma } from '@prisma/client'
 import { nip19 } from 'nostr-tools'
 import {
@@ -16,10 +23,8 @@ import {
   normalizeNpub
 } from '@/lib/nostr-sync'
 
-// Profile discovery opens up to MAX_REQUEST_RELAYS sockets and lookups per
-// call, so it gets its own per-user budget.
-function limitProfileDiscovery(name: string, pubkey: string) {
-  const limit = rateLimit(name, pubkey, 30, 60 * 1000)
+function limitPerUser(name: string, pubkey: string, max: number, windowMs: number) {
+  const limit = rateLimit(name, pubkey, max, windowMs)
   if (!limit.allowed) {
     throw new TRPCError({
       code: 'TOO_MANY_REQUESTS',
@@ -27,6 +32,19 @@ function limitProfileDiscovery(name: string, pubkey: string) {
     })
   }
 }
+
+// Profile discovery opens up to MAX_REQUEST_RELAYS sockets and lookups per
+// call, so it gets its own per-user budget.
+function limitProfileDiscovery(name: string, pubkey: string) {
+  limitPerUser(name, pubkey, 30, 60 * 1000)
+}
+
+// Read-status sync budgets. A publish fetches the list at most once per
+// 30-second debounce, plus a page close or a settings toggle, so a few a
+// minute is plenty. Applying an 8 MiB pulled list takes about 175 calls of
+// 48 KB each, so 250 per 10 minutes lets one full pull through.
+const READ_GUIDS_FOR_SYNC_PER_MINUTE = 6
+const MARK_READ_BY_GUIDS_PER_10_MIN = 250
 
 // Type for subscription with feed include
 type SubscriptionWithFeed = Prisma.SubscriptionGetPayload<{ include: { feed: true } }>
@@ -2020,5 +2038,72 @@ export const feedRouter = createTRPCRouter({
           guid: item.feedItem.guid!,
           readAt: item.readAt,
         }))
+    }),
+  // Read-status keys for the kind 30405 event, newest read first, from feeds
+  // the user still subscribes to, capped to what the web publishes (see
+  // ReadSyncGuidCollector). The cap also bounds the response and the pages read.
+  getReadGuidsForSync: subscribedProcedure
+    .query(async ({ ctx }) => {
+      limitPerUser('feed.getReadGuidsForSync', ctx.nostrPubkey, READ_GUIDS_FOR_SYNC_PER_MINUTE, 60 * 1000)
+      const subscriptions = await ctx.db.subscription.findMany({
+        where: { userPubkey: ctx.nostrPubkey, deletedAt: null },
+        select: { feedId: true },
+      })
+      const feedIds = subscriptions.map((sub: { feedId: string }) => sub.feedId)
+      if (feedIds.length === 0) return { guids: [] as string[] }
+
+      const PAGE_SIZE = 1000
+      const collector = new ReadSyncGuidCollector()
+      let cursor: string | undefined
+      while (!collector.full) {
+        const page = await ctx.db.readItem.findMany({
+          where: { userPubkey: ctx.nostrPubkey, feedItem: { feedId: { in: feedIds } } },
+          orderBy: [{ readAt: 'desc' }, { id: 'desc' }],
+          select: { id: true, feedItem: { select: { guid: true, url: true } } },
+          take: PAGE_SIZE,
+          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        })
+        for (const row of page) collector.add(readSyncKey(row.feedItem))
+        if (page.length < PAGE_SIZE) break
+        cursor = page[page.length - 1]!.id
+      }
+      return { guids: collector.guids }
+    }),
+
+  // Apply a pulled kind 30405 event: mark read the user's subscribed items whose
+  // key matches. Additive only, as on the desktop: a key missing from the list
+  // never marks anything unread.
+  markReadByGuids: subscribedProcedure
+    .input(readGuidsInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      limitPerUser('feed.markReadByGuids', ctx.nostrPubkey, MARK_READ_BY_GUIDS_PER_10_MIN, 10 * 60 * 1000)
+      const guids = [...new Set(input.guids)].filter(g => g.length > 0)
+      if (guids.length === 0) return { marked: 0 }
+
+      const subscriptions = await ctx.db.subscription.findMany({
+        where: { userPubkey: ctx.nostrPubkey, deletedAt: null },
+        select: { feedId: true },
+      })
+      const feedIds = subscriptions.map((sub: { feedId: string }) => sub.feedId)
+      if (feedIds.length === 0) return { marked: 0 }
+
+      let marked = 0
+      for (const part of chunk(guids, GUID_QUERY_CHUNK)) {
+        const items = await ctx.db.feedItem.findMany({
+          where: {
+            feedId: { in: feedIds },
+            OR: [{ guid: { in: part } }, { guid: null, url: { in: part } }],
+            readItems: { none: { userPubkey: ctx.nostrPubkey } },
+          },
+          select: { id: true },
+        })
+        if (items.length === 0) continue
+        const result = await ctx.db.readItem.createMany({
+          data: items.map((item: { id: string }) => ({ userPubkey: ctx.nostrPubkey, itemId: item.id })),
+          skipDuplicates: true,
+        })
+        marked += result.count
+      }
+      return { marked }
     }),
 })

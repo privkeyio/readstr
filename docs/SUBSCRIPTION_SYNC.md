@@ -23,6 +23,35 @@ Read status for feed items is synced using kind `30405`:
 - Syncs across all devices
 - Uses item GUIDs for identification
 
+How the web app handles it:
+
+- **Opt-in.** It is off by default. The "Sync read articles across devices"
+  setting (localStorage `readstr_read_sync`) turns it on, and only signed-in
+  users who can sign take part.
+- **Public.** The event is cleartext, so anyone can see which articles the
+  user read. Turning the setting off publishes an empty replacement list, best
+  effort; relays and other clients may keep older copies.
+- **Capped.** Common strfry relays refuse events over 64 KiB, so the web app
+  publishes only the newest reads that fit about 60,000 bytes of event JSON
+  (`MAX_PUBLISHED_READ_CONTENT`): its own reads from feeds the user still
+  subscribes to, newest first, then the guids of the last list it pulled that
+  no feed of its own has. It accepts pulled lists of up to 8 MiB and 100,000
+  guids of at most 256 UTF-16 units each, since other clients may publish
+  bigger ones.
+- **Additive.** A pulled list only marks items read; a guid missing from it
+  never marks anything unread. The web app pulls once per session before it
+  publishes, and publishes only after a pull applied the newest list, found it
+  already applied, or found that no relay has one. "No relay has one" needs an
+  answer from every relay that connected, so a relay that connects and then
+  times out cannot lead to a replacement that drops another device's reads.
+  A relay that is down when this device pulls, and that alone holds another
+  device's newest list, can still be missed, so this is best effort.
+- **Keys.** An item's key is its guid, trimmed, or its link when it has no
+  guid, as on the desktop. Stored guids are not trimmed, so a pulled key never
+  matches an item whose stored guid has leading or trailing whitespace. This
+  is a known, rare mismatch: trimming at ingest would change the identity of
+  existing items and create duplicates.
+
 ### Event Structure - Subscription List
 
 ```json
@@ -390,8 +419,6 @@ const SYNC_RELAYS = [
   'wss://relay.damus.io',
   'wss://nos.lol',
   'wss://relay.snort.social',
-  'wss://relay.nostr.band',
-  'wss://nostr-pub.wellorder.net',
 ]
 ```
 
@@ -561,7 +588,7 @@ check();
 
 ### Manual Event Inspection
 
-Use [nostr.band](https://nostr.band) or [njump.me](https://njump.me) to search for kind 30404 events.
+Use [njump.me](https://njump.me) to search for kind 30404 events.
 
 ## Security Considerations
 

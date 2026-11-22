@@ -1,5 +1,5 @@
 import { SimplePool, Event, nip19 } from 'nostr-tools'
-import type { UnsignedEvent } from 'nostr-tools'
+import type { Filter, UnsignedEvent } from 'nostr-tools'
 import { z } from 'zod'
 import { normalizeViews, type SavedView } from './saved-views'
 import { getDefaultRelays, getUserOrDefaultRelays } from './relays'
@@ -52,12 +52,12 @@ export interface ReadStatusList {
 // MAX_CONTENT_BYTES bounds event.content; getNewestReplaceableEvent skips frames
 // over the cap during selection so an oversized payload is never parsed. It
 // comfortably covers an honest max-size read-status list (~100k short guids).
-const MAX_CONTENT_BYTES = 8 * 1024 * 1024 // max raw event.content length before parsing
+export const MAX_CONTENT_BYTES = 8 * 1024 * 1024 // max raw event.content length before parsing
 const MAX_SYNC_FEEDS = 5000 // max rss/nostr/deleted entries, and tags/categories keys
-const MAX_READ_ITEMS = 100000 // max read itemGuids
+export const MAX_READ_ITEMS = 100000 // max read itemGuids
 const MAX_URL_LEN = 2048 // max length of a feed URL / npub
 const SYNC_QUERY_TIMEOUT_MS = 8000 // max time to wait for relays when fetching sync events
-const MAX_GUID_LEN = 256 // max length of a read-status itemGuid
+export const MAX_GUID_LEN = 256 // max length of a read-status itemGuid
 const MAX_TAGS_PER_FEED = 100 // max tags attached to a single feed
 const MAX_VIEWS_SYNC = 100 // max saved views accepted from a relay payload
 
@@ -86,8 +86,15 @@ const subscriptionListSchema: z.ZodType<SubscriptionList> = z.object({
   lastUpdated: z.number().int().nonnegative().optional(),
 })
 
-const readStatusListSchema: z.ZodType<ReadStatusList> = z.object({
-  itemGuids: z.array(z.string().max(MAX_GUID_LEN)).max(MAX_READ_ITEMS),
+// zod's string max counts code points, but both apps measure guids in UTF-16
+// units (string.length here, QString::size on the desktop), so the length is
+// checked directly to keep the cap identical on both sides.
+export const readGuidSchema = z.string().refine((s) => s.length <= MAX_GUID_LEN, {
+  message: `guid longer than ${MAX_GUID_LEN} UTF-16 units`,
+})
+
+export const readStatusListSchema: z.ZodType<ReadStatusList> = z.object({
+  itemGuids: z.array(readGuidSchema).max(MAX_READ_ITEMS),
   lastUpdated: z.number().int().nonnegative().optional(),
 })
 
@@ -207,7 +214,70 @@ async function getNewestReplaceableEvent(
     authors: [pubkeyHex],
     '#d': [dTag],
   }, { maxWait: SYNC_QUERY_TIMEOUT_MS })
+  return selectNewestEvent(events, pubkeyHex, kind, dTag)
+}
 
+/**
+ * Like pool.querySync, but also reports whether at least one relay sent EOSE.
+ * querySync resolves the same way when every relay times out or fails to
+ * connect as when they all answer with nothing, and a caller that publishes a
+ * replacement needs to tell "no event exists" from "no relay answered". Each
+ * subscription's own EOSE timeout is set past our deadline, so oneose fires
+ * only for a real EOSE. The caller closes the pool, which closes any
+ * subscription still open.
+ */
+async function queryTrackingEose(
+  pool: SimplePool,
+  relays: string[],
+  filter: Filter,
+  maxWait: number
+): Promise<{ events: Event[]; complete: boolean }> {
+  const events: Event[] = []
+  const subs: { close: () => void }[] = []
+  // A publish may have reached a single relay, so "no relay has it" needs an
+  // EOSE from every relay that connected; one that connected and then timed
+  // out or closed may hold the only copy. Relays that never connect cannot
+  // answer either way and are left out, so one dead relay does not block sync.
+  let connected = 0
+  let eosedCount = 0
+  let finished = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  await new Promise<void>((resolve) => {
+    let pending = relays.length
+    const settle = () => {
+      if (--pending <= 0) resolve()
+    }
+    timer = setTimeout(resolve, maxWait)
+    if (pending === 0) resolve()
+    for (const url of relays) {
+      pool.ensureRelay(url, { connectionTimeout: maxWait }).then((relay) => {
+        if (finished) return
+        connected++
+        let done = false
+        const finish = () => {
+          if (done) return
+          done = true
+          settle()
+        }
+        subs.push(relay.subscribe([filter], {
+          onevent: (event) => events.push(event),
+          oneose: () => {
+            if (!done) eosedCount++
+            finish()
+          },
+          onclose: finish,
+          eoseTimeout: maxWait * 2,
+        }))
+      }, settle)
+    }
+  })
+  finished = true
+  clearTimeout(timer)
+  for (const sub of subs) sub.close()
+  return { events, complete: eosedCount > 0 && eosedCount === connected }
+}
+
+function selectNewestEvent(events: Event[], pubkeyHex: string, kind: number, dTag: string): Event | null {
   let newest: Event | null = null
   let oversizedSkipped = 0
   for (const event of events) {
@@ -659,6 +729,30 @@ export function setPrefsSyncEnabled(v: boolean): void {
   }
 }
 
+export const READ_SYNC_KEY = 'readstr_read_sync'
+
+/**
+ * Whether read status is synced through Nostr (kind 30405). Opt-in, defaults to
+ * false: the event is cleartext, so it publishes the user's reading history.
+ */
+export function getReadSyncEnabled(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    return localStorage.getItem(READ_SYNC_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+export function setReadSyncEnabled(v: boolean): void {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.setItem(READ_SYNC_KEY, v ? 'true' : 'false')
+  } catch {
+    // Storage disabled: the setting stays off.
+  }
+}
+
 export const APPLIED_CREATEDAT_PREFIX = 'readstr_applied_createdat:'
 
 /**
@@ -708,7 +802,7 @@ export function advanceSyncWatermarkIfFresh(dTag: string, createdAt?: number): v
 export async function publishReadStatus(
   readItemGuids: string[],
   signEvent: (event: UnsignedEvent) => Promise<Event>
-): Promise<{ success: boolean; eventId?: string; error?: string }> {
+): Promise<{ success: boolean; eventId?: string; createdAt?: number; error?: string }> {
   const pool = new SimplePool()
   const relays = getSyncRelays()
   
@@ -728,12 +822,13 @@ export async function publishReadStatus(
     }
 
     const signedEvent = await signEvent(unsignedEvent)
-    const publishPromises = pool.publish(relays, signedEvent)
-    await Promise.race(publishPromises)
+    // Promise.any, not race: the publish succeeds once any relay accepts it,
+    // so one relay refusing or being down does not fail it.
+    await Promise.any(pool.publish(relays, signedEvent))
     
     debugLog('Published read status to Nostr:', signedEvent.id)
     
-    return { success: true, eventId: signedEvent.id }
+    return { success: true, eventId: signedEvent.id, createdAt: signedEvent.created_at }
   } catch (error) {
     console.error('Failed to publish read status:', error)
     return { 
@@ -746,55 +841,56 @@ export async function publishReadStatus(
 }
 
 /**
+ * Result of fetching the newest kind 30405 event. `found: false` means at
+ * least one relay answered (EOSE) and no relay had an event, which is the only
+ * case where "nothing published" is known rather than guessed. A timeout on
+ * every relay, a malformed payload and other errors are `success: false`, so a
+ * caller never mistakes them for an empty list it may publish over.
+ */
+export type ReadStatusFetchResult =
+  | { success: true; found: false }
+  | { success: true; found: true; data: ReadStatusList; createdAt: number; fresh: boolean }
+  | { success: false; error: string }
+
+/**
  * Fetch read status from Nostr relays
  */
-export async function fetchReadStatus(
-  userPubkey: string
-): Promise<{ success: boolean; data?: ReadStatusList; createdAt?: number; error?: string }> {
+export async function fetchReadStatus(userPubkey: string): Promise<ReadStatusFetchResult> {
   const pool = new SimplePool()
   const relays = getSyncRelays()
   
   try {
     const pubkeyHex = getPubkeyHex(userPubkey)
-
-    const event = await getNewestReplaceableEvent(
+    const { events, complete } = await queryTrackingEose(
       pool,
       relays,
-      pubkeyHex,
-      READ_STATUS_KIND,
-      'readstr-read-status'
+      { kinds: [READ_STATUS_KIND], authors: [pubkeyHex], '#d': ['readstr-read-status'] },
+      SYNC_QUERY_TIMEOUT_MS
     )
+    const event = selectNewestEvent(events, pubkeyHex, READ_STATUS_KIND, 'readstr-read-status')
 
     if (!event) {
-      return {
-        success: true,
-        data: { itemGuids: [] },
-      }
+      return complete
+        ? { success: true, found: false }
+        : { success: false, error: 'Not every connected relay answered' }
     }
     
     const parsed = readStatusListSchema.safeParse(JSON.parse(event.content))
     if (!parsed.success) {
       console.error('Rejected malformed read status payload:', parsed.error.message)
-      return {
-        success: true,
-        data: { itemGuids: [] },
-      }
+      return { success: false, error: 'Malformed read status payload' }
     }
 
-    // Defense-in-depth: drop stale/replayed events so a relay can't roll back
-    // read status. The caller advances the watermark on apply (mirrors the
-    // subscription path), so it isn't persisted here.
-    if (!isSyncEventFresh('readstr-read-status', event.created_at)) {
-      return {
-        success: true,
-        data: { itemGuids: [] },
-      }
-    }
-
+    // Defense-in-depth: `fresh` is false for a stale or replayed event, which
+    // the caller must not apply, so a relay can't roll back read status. The
+    // caller advances the watermark on apply (mirrors the subscription path),
+    // so it isn't persisted here.
     return {
       success: true,
+      found: true,
       data: parsed.data,
       createdAt: event.created_at,
+      fresh: isSyncEventFresh('readstr-read-status', event.created_at),
     }
   } catch (error) {
     console.error('Failed to fetch read status:', error)
