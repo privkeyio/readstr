@@ -287,6 +287,24 @@ describe('feed.markReadByGuids', () => {
     expect(db.feedItem.findMany).not.toHaveBeenCalled()
   })
 
+  it('with feedIds, skips feeds already covered, since a stale browser may still list them; a full pull covers both', async () => {
+    const db = fakeDb(['feed-1', sub('feed-2', { readListAppliedAt: new Date(1) })])
+    const caller = feedRouter.createCaller(ctx(db))
+    await expect(caller.markReadByGuids({ guids: ['a'], feedIds: ['feed-1', 'feed-2'] })).resolves.toEqual({ marked: 1 })
+    expect(db.readItem.createMany).toHaveBeenCalledOnce()
+    expect(db.readItem.createMany).toHaveBeenCalledWith({ data: [{ userPubkey: PUBKEY, itemId: 'feed-1-a' }], skipDuplicates: true })
+
+    db.readItem.createMany.mockClear()
+    await expect(caller.markReadByGuids({ guids: ['a'] })).resolves.toEqual({ marked: 2 })
+    expect(db.readItem.createMany).toHaveBeenCalledWith({
+      data: [
+        { userPubkey: PUBKEY, itemId: 'feed-1-a' },
+        { userPubkey: PUBKEY, itemId: 'feed-2-a' },
+      ],
+      skipDuplicates: true,
+    })
+  })
+
   it('is rate limited per user, with room for a full pull and a separate budget for covering new feeds', async () => {
     const caller = feedRouter.createCaller(ctx(fakeDb(['feed-1'])))
     for (let i = 0; i < 250; i++) await caller.markReadByGuids({ guids: ['a'] })

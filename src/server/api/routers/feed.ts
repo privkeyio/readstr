@@ -2100,11 +2100,14 @@ export const feedRouter = createTRPCRouter({
       const guids = [...new Set(input.guids)].filter(g => g.length > 0)
       if (guids.length === 0) return { marked: 0 }
 
+      // A cover call may come from a browser holding an older list of uncovered
+      // feeds, so it skips feeds another browser has covered since: applying the
+      // list there again would re-read items the user has marked unread.
       const subscriptions = await ctx.db.subscription.findMany({
         where: {
           userPubkey: ctx.nostrPubkey,
           deletedAt: null,
-          ...(input.feedIds ? { feedId: { in: [...new Set(input.feedIds)] } } : {}),
+          ...(input.feedIds ? { feedId: { in: [...new Set(input.feedIds)] }, readListAppliedAt: null } : {}),
         },
         select: { feedId: true },
       })
