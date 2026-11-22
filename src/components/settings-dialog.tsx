@@ -14,6 +14,8 @@ import {
   advanceSyncWatermarkIfFresh,
   getPrefsSyncEnabled,
   setPrefsSyncEnabled,
+  getReadSyncEnabled,
+  setReadSyncEnabled,
   type SubscriptionList,
 } from '@/lib/nostr-sync'
 import { parseOpml, buildOpml, planOpmlImport, MAX_CONTENT_BYTES } from '@/lib/opml'
@@ -93,8 +95,6 @@ const POPULAR_RELAYS = [
   { url: 'wss://relay.damus.io', name: 'Damus' },
   { url: 'wss://nos.lol', name: 'nos.lol' },
   { url: 'wss://relay.snort.social', name: 'Snort' },
-  { url: 'wss://relay.nostr.band', name: 'Nostr Band' },
-  { url: 'wss://nostr-pub.wellorder.net', name: 'Wellorder' },
   { url: 'wss://relay.primal.net', name: 'Primal' },
   { url: 'wss://relay.nostr.bg', name: 'Nostr BG' },
   { url: 'wss://nostr.wine', name: 'Nostr Wine' },
@@ -223,6 +223,7 @@ interface SettingsDialogProps {
   onRenameView?: (id: string, name: string) => void
   onDeleteView?: (id: string) => void
   onMoveView?: (index: number, direction: -1 | 1) => void
+  onReadSyncChange?: (enabled: boolean) => void
 }
 
 // Default category colors/icons
@@ -239,7 +240,7 @@ const CATEGORY_COLORS = [
 
 const CATEGORY_ICONS = ['📁', '📰', '🎬', '🎵', '💼', '🎮', '📚', '🔬', '💡', '🌍', '⚡', '🎯']
 
-export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, layoutMode, onChangeLayoutMode, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds, onFilterRulesChange, views = [], onRenameView, onDeleteView, onMoveView }: SettingsDialogProps) {
+export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMarkReadBehavior, layoutMode, onChangeLayoutMode, organizationMode, onChangeOrganizationMode, feeds = [], userPubkey, onImportFeeds, onFilterRulesChange, views = [], onRenameView, onDeleteView, onMoveView, onReadSyncChange }: SettingsDialogProps) {
   const { user, canSign, signEventOrThrow } = useNostrAuth()
   const { readingPrefs, setReadingPref, resetReading } = useTheme()
   const { config: aiConfig, setConfig: setAiConfig } = useAiConfig()
@@ -252,6 +253,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
     lastSync: null,
   })
   const [prefsSyncEnabled, setPrefsSyncEnabledState] = useState(false)
+  const [readSyncEnabled, setReadSyncEnabledState] = useState(false)
 
   // Category management state
   const [newCategoryName, setNewCategoryName] = useState('')
@@ -430,6 +432,7 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
     }
 
     setPrefsSyncEnabledState(getPrefsSyncEnabled())
+    setReadSyncEnabledState(getReadSyncEnabled())
   }, [])
 
   // Save relays to localStorage whenever they change
@@ -1862,6 +1865,30 @@ export function SettingsDialog({ isOpen, onClose, markReadBehavior, onChangeMark
                     When on, your reading and theme preferences are published to your
                     Nostr relays (public, kind 30407) and applied on your other devices.
                     Local-only when off.
+                  </p>
+                </div>
+
+                <div className="mt-6">
+                  <label className="flex items-center gap-3 text-sm font-medium text-theme-secondary cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={readSyncEnabled}
+                      onChange={(e) => {
+                        const next = e.target.checked
+                        setReadSyncEnabled(next)
+                        setReadSyncEnabledState(next)
+                        onReadSyncChange?.(next)
+                      }}
+                      className="accent-[rgb(var(--color-accent))]"
+                    />
+                    Sync read articles across devices
+                  </label>
+                  <p className="text-xs text-theme-tertiary mt-2">
+                    When on, your most recently read articles are published publicly on
+                    your Nostr relays (kind 30405), tied to your npub, so other apps such as
+                    Readstr desktop can sync them. Anyone can see the list, and syncing only
+                    marks articles read, never unread. Turning this off replaces the published
+                    list with an empty one; relays and other apps may keep older copies.
                   </p>
                 </div>
               </div>

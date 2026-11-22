@@ -100,8 +100,9 @@ version replaces the older one in place, keeping its read and starred marks.
 Give Readstr your npub (or an nprofile, whose relay hints are asked too)
 with "Sync with Nostr…" in the `⋮` menu or `readstr sync login npub1…`, and
 it pulls what the Readstr web app publishes for it: the subscription list
-(kind 30404), the read articles (kind 30405, once the web app publishes it;
-it does not yet), and the saved views (kind 30406). Only the public key is kept; nothing is ever signed or published,
+(kind 30404), the read articles (kind 30405, which the web app publishes only
+when its read-sync setting is on, and then only its most recent reads), and
+the saved views (kind 30406). Only the public key is kept; nothing is ever signed or published,
 which is why no signer is needed: the web app publishes these events in
 cleartext, so anyone can read them. The window pulls right after you log in
 and after every refresh of all feeds, so read marks find the articles it

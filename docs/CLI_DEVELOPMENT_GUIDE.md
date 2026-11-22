@@ -265,8 +265,6 @@ var DefaultRelays = []string{
     "wss://relay.damus.io",
     "wss://nos.lol",
     "wss://relay.snort.social",
-    "wss://relay.nostr.band",
-    "wss://nostr-pub.wellorder.net",
 }
 ```
 

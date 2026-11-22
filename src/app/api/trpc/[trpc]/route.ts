@@ -5,20 +5,9 @@ import { buildRequestContext, type RequestLike } from '@/server/auth/request-con
 import { readBodyWithLimit, type ReadBodyResult } from '@/server/http/read-body'
 import { countTrpcCalls } from '@/server/http/trpc-batch'
 import { clientIpFromRequest, rateLimit } from '@/server/rate-limit'
-import { MAX_TRPC_BATCH_SIZE } from '@/trpc/batch-limits'
+import { MAX_TRPC_BATCH_SIZE, MAX_TRPC_BODY_BYTES } from '@/trpc/batch-limits'
 
 const TRPC_ENDPOINT = '/api/trpc'
-
-/**
- * Largest tRPC request body accepted. Only mutations send a body; queries such
- * as getFeedItems carry their input in the GET URL. The biggest real body is a
- * batch of markAsRead calls (~45 bytes each, so ~1,400 fit); most calls are
- * well under 1 KB. The cap keeps zod v3's per-element parsing of hostile arrays
- * (~150x heap amplification, GHSA-mrhx-c7xc-m3w5) to roughly 10 MB per
- * request, and runs before NIP-98 auth and any procedure's rate limit, so it
- * also protects public mutations.
- */
-const MAX_TRPC_BODY_BYTES = 64_000
 
 /**
  * Per-IP budget of procedure calls per minute, charged one unit per call in a

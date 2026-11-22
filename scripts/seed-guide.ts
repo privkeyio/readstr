@@ -12,8 +12,6 @@ const DEFAULT_RELAYS = [
   'wss://relay.damus.io',
   'wss://nos.lol',
   'wss://relay.snort.social',
-  'wss://relay.nostr.band',
-  'wss://nostr-pub.wellorder.net'
 ]
 
 // Popular Nostr long-form content creators with relevant tags

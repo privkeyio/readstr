@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -103,6 +105,32 @@ describe('resolveDefaultRelays', () => {
     const relays = resolveDefaultRelays(undefined)
     relays.push('wss://mutated.example')
     expect(FALLBACK_RELAYS).not.toContain('wss://mutated.example')
+  })
+})
+
+describe('dead relays', () => {
+  const DEAD = ['wss://relay.nostr.band', 'wss://nostr-pub.wellorder.net']
+
+  it('are not in the fallback list', () => {
+    expect(FALLBACK_RELAYS).toEqual([
+      'wss://relay.damus.io',
+      'wss://relay.primal.net',
+      'wss://nos.lol',
+      'wss://relay.snort.social',
+    ])
+  })
+
+  it('are dropped from a list saved before they were removed', () => {
+    const saved = JSON.stringify(['wss://relay.nostr.band', 'wss://ok.example', 'WSS://nostr-pub.wellorder.net/'])
+    expect(pickRelays(saved, ['wss://default.example'])).toEqual(['wss://ok.example'])
+    expect(pickRelays(JSON.stringify(DEAD), ['wss://default.example'])).toEqual(['wss://default.example'])
+  })
+
+  it('are not suggested in settings or used for sharing', () => {
+    for (const file of ['../components/settings-dialog.tsx', '../components/feed-reader.tsx']) {
+      const source = readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf8')
+      for (const relay of DEAD) expect(source, file).not.toContain(relay)
+    }
   })
 })
 

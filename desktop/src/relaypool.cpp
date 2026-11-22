@@ -349,9 +349,7 @@ RelayPool::~RelayPool() {
 }
 
 QStringList RelayPool::defaultRelays() {
-    // The web app's fallback relays, less relay.nostr.band and
-    // nostr-pub.wellorder.net, which no longer answer and would hold every
-    // refresh up until they time out.
+    // The web app's fallback relays.
     return {QStringLiteral("wss://relay.damus.io"), QStringLiteral("wss://relay.primal.net"),
             QStringLiteral("wss://nos.lol"), QStringLiteral("wss://relay.snort.social")};
 }
