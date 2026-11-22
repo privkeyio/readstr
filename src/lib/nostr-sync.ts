@@ -214,7 +214,7 @@ async function getNewestReplaceableEvent(
     authors: [pubkeyHex],
     '#d': [dTag],
   }, { maxWait: SYNC_QUERY_TIMEOUT_MS })
-  return selectNewestEvent(events, pubkeyHex, kind, dTag)
+  return selectNewestEvent(events, pubkeyHex, kind, dTag).newest
 }
 
 /**
@@ -277,7 +277,15 @@ async function queryTrackingEose(
   return { events, complete: eosedCount > 0 && eosedCount === connected }
 }
 
-function selectNewestEvent(events: Event[], pubkeyHex: string, kind: number, dTag: string): Event | null {
+// Also reports how many events from the expected author, kind and d-tag were
+// skipped for size, so a caller can tell "nothing published" from "the only
+// copy was too large to read".
+function selectNewestEvent(
+  events: Event[],
+  pubkeyHex: string,
+  kind: number,
+  dTag: string
+): { newest: Event | null; oversizedSkipped: number } {
   let newest: Event | null = null
   let oversizedSkipped = 0
   for (const event of events) {
@@ -293,7 +301,7 @@ function selectNewestEvent(events: Event[], pubkeyHex: string, kind: number, dTa
   if (oversizedSkipped > 0) {
     console.error(`Skipped ${oversizedSkipped} oversized replaceable event payload(s)`)
   }
-  return newest
+  return { newest, oversizedSkipped }
 }
 
 /**
@@ -735,8 +743,13 @@ export const READ_SYNC_KEY = 'readstr_read_sync'
  * Whether read status is synced through Nostr (kind 30405). Opt-in, defaults to
  * false: the event is cleartext, so it publishes the user's reading history.
  */
+// Set when the setting could not be saved. Sync then reads as off for the
+// rest of the page session, so turning it off takes effect even when storage
+// still holds 'true'.
+let readSyncOffOverride = false
+
 export function getReadSyncEnabled(): boolean {
-  if (typeof window === 'undefined') return false
+  if (typeof window === 'undefined' || readSyncOffOverride) return false
   try {
     return localStorage.getItem(READ_SYNC_KEY) === 'true'
   } catch {
@@ -748,8 +761,11 @@ export function setReadSyncEnabled(v: boolean): void {
   if (typeof window === 'undefined') return
   try {
     localStorage.setItem(READ_SYNC_KEY, v ? 'true' : 'false')
-  } catch {
+    readSyncOffOverride = false
+  } catch (error) {
     // Storage disabled: the setting stays off.
+    readSyncOffOverride = true
+    console.warn('Could not save the read status sync setting, so sync stays off:', error)
   }
 }
 
@@ -797,11 +813,15 @@ export function advanceSyncWatermarkIfFresh(dTag: string, createdAt?: number): v
 }
 
 /**
- * Publish read status to Nostr relays using kind 30405
+ * Publish read status to Nostr relays using kind 30405. The event's created_at
+ * is at least minCreatedAt, so a caller can keep its own events in order
+ * within one second: relays keep only the newest replaceable event, and of
+ * two with the same created_at they may keep either.
  */
 export async function publishReadStatus(
   readItemGuids: string[],
-  signEvent: (event: UnsignedEvent) => Promise<Event>
+  signEvent: (event: UnsignedEvent) => Promise<Event>,
+  minCreatedAt = 0
 ): Promise<{ success: boolean; eventId?: string; createdAt?: number; error?: string }> {
   const pool = new SimplePool()
   const relays = getSyncRelays()
@@ -809,7 +829,7 @@ export async function publishReadStatus(
   try {
     const unsignedEvent: UnsignedEvent = {
       kind: READ_STATUS_KIND,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: Math.max(Math.floor(Date.now() / 1000), minCreatedAt),
       tags: [
         ['d', 'readstr-read-status'],
         ['client', 'readstr'],
@@ -841,15 +861,18 @@ export async function publishReadStatus(
 }
 
 /**
- * Result of fetching the newest kind 30405 event. `found: false` means at
- * least one relay answered (EOSE) and no relay had an event, which is the only
- * case where "nothing published" is known rather than guessed. A timeout on
- * every relay, a malformed payload and other errors are `success: false`, so a
- * caller never mistakes them for an empty list it may publish over.
+ * Result of fetching the newest kind 30405 event. `found: false` means every
+ * relay that connected answered (EOSE) and none had an event, which is the
+ * only case where "nothing published" is known rather than guessed. A timeout,
+ * a malformed or oversized payload and other errors are `success: false`, so a
+ * caller never mistakes them for an empty list it may publish over. A found
+ * event has `complete: false` when some connected relay did not answer: a
+ * newer event may sit there, so the caller may apply this one but must not
+ * publish a replacement on the strength of it.
  */
 export type ReadStatusFetchResult =
   | { success: true; found: false }
-  | { success: true; found: true; data: ReadStatusList; createdAt: number; fresh: boolean }
+  | { success: true; found: true; data: ReadStatusList; createdAt: number; fresh: boolean; complete: boolean }
   | { success: false; error: string }
 
 /**
@@ -867,9 +890,12 @@ export async function fetchReadStatus(userPubkey: string): Promise<ReadStatusFet
       { kinds: [READ_STATUS_KIND], authors: [pubkeyHex], '#d': ['readstr-read-status'] },
       SYNC_QUERY_TIMEOUT_MS
     )
-    const event = selectNewestEvent(events, pubkeyHex, READ_STATUS_KIND, 'readstr-read-status')
+    const { newest: event, oversizedSkipped } = selectNewestEvent(events, pubkeyHex, READ_STATUS_KIND, 'readstr-read-status')
 
     if (!event) {
+      // An event exists but cannot be read, so publishing over it would drop
+      // whatever it holds.
+      if (oversizedSkipped > 0) return { success: false, error: 'Read status event is too large' }
       return complete
         ? { success: true, found: false }
         : { success: false, error: 'Not every connected relay answered' }
@@ -891,6 +917,7 @@ export async function fetchReadStatus(userPubkey: string): Promise<ReadStatusFet
       data: parsed.data,
       createdAt: event.created_at,
       fresh: isSyncEventFresh('readstr-read-status', event.created_at),
+      complete,
     }
   } catch (error) {
     console.error('Failed to fetch read status:', error)

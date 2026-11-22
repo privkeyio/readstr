@@ -44,10 +44,12 @@ import {
 } from '@/lib/nostr-sync'
 import {
   newReadSyncSession,
+  nextReadSyncRetryDelay,
   publishReadStatusIfChanged,
   pullReadStatus,
   readSyncAllowed,
   READ_SYNC_PUBLISH_DELAY_MS,
+  READ_SYNC_RETRY_MIN_MS,
   withdrawReadStatus,
 } from '@/lib/read-sync'
 import type { UnsignedEvent } from 'nostr-tools'
@@ -151,6 +153,8 @@ export function FeedReader() {
   const readSyncPendingRef = useRef(false)
   const readSyncPublishAfterPullRef = useRef(false)
   const readSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const readSyncRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const readSyncRetryDelayRef = useRef(READ_SYNC_RETRY_MIN_MS)
   const readSyncDepsRef = useRef({ canSign, npub: user?.npub, signEventOrThrow })
   const [readSyncTick, setReadSyncTick] = useState(0)
   
@@ -554,6 +558,11 @@ export function FeedReader() {
     readSyncDepsRef.current = { canSign, npub: user?.npub, signEventOrThrow }
   }, [canSign, user?.npub, signEventOrThrow])
 
+  const clearReadSyncRetry = () => {
+    if (readSyncRetryTimerRef.current) clearTimeout(readSyncRetryTimerRef.current)
+    readSyncRetryTimerRef.current = null
+  }
+
   // Sync state belongs to one account. On a switch, start over so the new
   // account pulls before it publishes and never publishes the old one's list;
   // work still queued for the old account sees the session's npub and stops.
@@ -568,6 +577,8 @@ export function FeedReader() {
     readSyncPublishAfterPullRef.current = false
     if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
     readSyncTimerRef.current = null
+    clearReadSyncRetry()
+    readSyncRetryDelayRef.current = READ_SYNC_RETRY_MIN_MS
   }, [user?.npub])
 
   const publishReadSyncNow = useCallback(() => {
@@ -627,6 +638,8 @@ export function FeedReader() {
     return () => {
       readSyncUnmountedRef.current = true
       if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
+      if (readSyncRetryTimerRef.current) clearTimeout(readSyncRetryTimerRef.current)
+      readSyncRetryTimerRef.current = null
     }
   }, [])
 
@@ -1235,6 +1248,7 @@ export function FeedReader() {
     if (session.npub !== (user?.npub ?? null)) return
     hasPulledReadRef.current = true
     readSyncPullingRef.current = true
+    clearReadSyncRetry()
     const publishAfter = readSyncPublishAfterPullRef.current
     readSyncPublishAfterPullRef.current = false
 
@@ -1248,11 +1262,29 @@ export function FeedReader() {
         invalidateFeedData()
         void utils.feed.getCategoriesWithUnread.invalidate()
       },
-    }).finally(() => {
+    }).then((pulled) => {
       if (readSyncSessionRef.current === session) readSyncPullingRef.current = false
       // A pull for an account that is no longer signed in leaves the new
       // session's state alone.
       if (readSyncUnmountedRef.current || readSyncSessionRef.current !== session) return
+      if (!pulled) {
+        // Publishing now could replace reads this device has not seen, so the
+        // publish stays pending and the pull is retried with backoff. Read
+        // changes meanwhile only add to the pending publish.
+        if (publishAfter) readSyncPendingRef.current = true
+        const { canSign: signer, npub } = readSyncDepsRef.current
+        if (!readSyncAllowed(signer, npub)) return
+        const delay = readSyncRetryDelayRef.current
+        readSyncRetryDelayRef.current = nextReadSyncRetryDelay(delay)
+        readSyncRetryTimerRef.current = setTimeout(() => {
+          readSyncRetryTimerRef.current = null
+          if (readSyncUnmountedRef.current || readSyncSessionRef.current !== session) return
+          hasPulledReadRef.current = false
+          setReadSyncTick((t) => t + 1)
+        }, delay)
+        return
+      }
+      readSyncRetryDelayRef.current = READ_SYNC_RETRY_MIN_MS
       readSyncReadyRef.current = true
       if (publishAfter || readSyncPendingRef.current) {
         readSyncPendingRef.current = false
@@ -1280,6 +1312,7 @@ export function FeedReader() {
     }
     if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
     readSyncTimerRef.current = null
+    clearReadSyncRetry()
     readSyncPendingRef.current = false
     // Turning it off replaces the published list with an empty one.
     void withdrawReadStatus({

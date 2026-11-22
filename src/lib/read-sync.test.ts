@@ -19,9 +19,12 @@ import {
   MARK_READ_REQUEST_BYTES,
   MAX_PUBLISHED_READ_CONTENT,
   newReadSyncSession,
+  nextReadSyncRetryDelay,
   publishReadStatusIfChanged,
   pullReadStatus,
   READ_STATUS_D_TAG,
+  READ_SYNC_RETRY_MAX_MS,
+  READ_SYNC_RETRY_MIN_MS,
   readSyncAllowed,
   withdrawReadStatus,
 } from './read-sync'
@@ -71,6 +74,33 @@ describe('read sync setting', () => {
     expect(getReadSyncEnabled()).toBe(false)
     vi.stubGlobal('window', undefined)
     expect(getReadSyncEnabled()).toBe(false)
+  })
+
+  it('stays off for the page session when turning it off cannot be saved', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    setReadSyncEnabled(true)
+    storage.setItem = () => {
+      throw new Error('QuotaExceededError')
+    }
+    setReadSyncEnabled(false)
+    expect(storage.data.get(READ_SYNC_KEY)).toBe('true')
+    expect(getReadSyncEnabled()).toBe(false)
+    expect(warn).toHaveBeenCalled()
+    setReadSyncEnabled(true)
+    expect(getReadSyncEnabled()).toBe(false)
+    // Saving works again, so the stored setting counts once more.
+    storage.setItem = (k: string, v: string) => void storage.data.set(k, v)
+    setReadSyncEnabled(true)
+    expect(getReadSyncEnabled()).toBe(true)
+  })
+})
+
+describe('nextReadSyncRetryDelay', () => {
+  it('doubles from 30 seconds up to 10 minutes', () => {
+    const delays = [READ_SYNC_RETRY_MIN_MS]
+    for (let i = 0; i < 6; i++) delays.push(nextReadSyncRetryDelay(delays.at(-1)!))
+    expect(delays).toEqual([30_000, 60_000, 120_000, 240_000, 480_000, 600_000, 600_000])
+    expect(READ_SYNC_RETRY_MAX_MS).toBe(600_000)
   })
 })
 
@@ -151,7 +181,7 @@ describe('buildPublishedReadList', () => {
 })
 
 const ok = (createdAt = 200) =>
-  vi.fn(async (_guids: string[], sign: (event: UnsignedEvent) => Promise<Event>) => {
+  vi.fn(async (_guids: string[], sign: (event: UnsignedEvent) => Promise<Event>, _minCreatedAt?: number) => {
     await sign({} as UnsignedEvent)
     return { success: true, createdAt }
   })
@@ -162,8 +192,8 @@ function pulledSession(remote: string[] | null = null) {
 }
 
 describe('pullReadStatus', () => {
-  const remote = (itemGuids: string[], createdAt = 100, fresh = true) =>
-    vi.fn(async (): Promise<ReadStatusFetchResult> => ({ success: true, found: true, data: { itemGuids }, createdAt, fresh }))
+  const remote = (itemGuids: string[], createdAt = 100, fresh = true, complete = true) =>
+    vi.fn(async (): Promise<ReadStatusFetchResult> => ({ success: true, found: true, data: { itemGuids }, createdAt, fresh, complete }))
   const base = (session = newReadSyncSession(NPUB)) => ({
     canSign: () => true,
     npub: () => NPUB,
@@ -205,6 +235,24 @@ describe('pullReadStatus', () => {
     }
     expect(markRead).not.toHaveBeenCalled()
     expect(storage.data.get(WATERMARK)).toBe('100')
+  })
+
+  it('applies an event found while a relay did not answer, but keeps publishing locked', async () => {
+    setReadSyncEnabled(true)
+    const markRead = vi.fn(async () => {})
+    const session = newReadSyncSession(NPUB)
+    const opts = { ...base(session), markRead, fetchRemote: remote(['a'], 100, true, false) }
+    await expect(pullReadStatus(opts)).resolves.toBe(false)
+    expect(markRead).toHaveBeenCalledWith(['a'])
+    expect(session).toMatchObject({ pulled: false, remote: ['a'] })
+    const publish = ok()
+    await publishReadStatusIfChanged({ ...base(session), fetchLocal: async () => ['a', 'b'], signEvent, publish })
+    expect(publish).not.toHaveBeenCalled()
+
+    // The same for an event already applied here.
+    const stale = newReadSyncSession(NPUB)
+    await expect(pullReadStatus({ ...base(stale), markRead, fetchRemote: remote(['c'], 100, true, false) })).resolves.toBe(false)
+    expect(stale).toMatchObject({ pulled: false, remote: ['c'] })
   })
 
   it('unlocks publishing when no relay has an event', async () => {
@@ -278,7 +326,7 @@ describe('pullReadStatus', () => {
     const markRead = vi.fn()
     const fetchRemote = vi.fn(async (): Promise<ReadStatusFetchResult> => {
       npub = 'npub1other'
-      return { success: true, found: true, data: { itemGuids: ['a'] }, createdAt: 100, fresh: true }
+      return { success: true, found: true, data: { itemGuids: ['a'] }, createdAt: 100, fresh: true, complete: true }
     })
     await expect(pullReadStatus({ ...base(), npub: () => npub, markRead, fetchRemote })).resolves.toBe(false)
     expect(markRead).not.toHaveBeenCalled()
@@ -315,7 +363,7 @@ describe('publishReadStatusIfChanged', () => {
     await publishReadStatusIfChanged({ ...opts(session), publish, fetchLocal: async () => ['a', 'b'] })
     await publishReadStatusIfChanged({ ...opts(session), publish, fetchLocal: async () => ['b', 'a'] })
     expect(publish).toHaveBeenCalledOnce()
-    expect(publish).toHaveBeenCalledWith(['a', 'b'], expect.any(Function))
+    expect(publish).toHaveBeenCalledWith(['a', 'b'], expect.any(Function), 0)
 
     // Echo guard: right after a pull applied the list, the server's list adds nothing.
     const pulled = pulledSession(['c', 'd'])
@@ -329,7 +377,7 @@ describe('publishReadStatusIfChanged', () => {
     const session = pulledSession(['old', 'elsewhere'])
     const publish = ok()
     await publishReadStatusIfChanged({ ...opts(session), publish, fetchLocal: async () => ['new', 'old'] })
-    expect(publish).toHaveBeenCalledWith(['new', 'old', 'elsewhere'], expect.any(Function))
+    expect(publish).toHaveBeenCalledWith(['new', 'old', 'elsewhere'], expect.any(Function), 0)
     expect(session.remote).toEqual(['new', 'old', 'elsewhere'])
   })
 
@@ -347,6 +395,30 @@ describe('publishReadStatusIfChanged', () => {
     storage.data.set(WATERMARK, '100')
     await publishReadStatusIfChanged({ ...opts(), publish: ok(250), fetchLocal: async () => ['a'] })
     expect(storage.data.get(WATERMARK)).toBe('250')
+  })
+
+  it('does not advance the shared watermark once the account changed during the publish', async () => {
+    setReadSyncEnabled(true)
+    storage.data.set(WATERMARK, '100')
+    let npub = NPUB
+    const session = pulledSession()
+    const publish = vi.fn(async () => {
+      npub = 'npub1other'
+      return { success: true, createdAt: 250 }
+    })
+    await publishReadStatusIfChanged({ ...opts(session), npub: () => npub, publish, fetchLocal: async () => ['a'] })
+    expect(storage.data.get(WATERMARK)).toBe('100')
+    expect(session.remote).toEqual(['a'])
+  })
+
+  it('gives each publish a created_at after the last one this session published', async () => {
+    setReadSyncEnabled(true)
+    const session = pulledSession()
+    const publish = ok(500)
+    await publishReadStatusIfChanged({ ...opts(session), publish, fetchLocal: async () => ['a'] })
+    await publishReadStatusIfChanged({ ...opts(session), publish, fetchLocal: async () => ['a', 'b'] })
+    expect(publish.mock.calls.map((call) => call[2])).toEqual([0, 501])
+    expect(session.lastPublishedAt).toBe(500)
   })
 
   it('re-checks the setting before signing a publish already past its gate', async () => {
@@ -428,9 +500,22 @@ describe('withdrawReadStatus', () => {
     const session = pulledSession(['a'])
     const publish = ok(300)
     await withdrawReadStatus({ ...opts(session), publish })
-    expect(publish).toHaveBeenCalledWith([], signEvent)
+    expect(publish).toHaveBeenCalledWith([], signEvent, 0)
     expect(session.remote).toEqual([])
     expect(storage.data.get(WATERMARK)).toBe('300')
+  })
+
+  it('does not advance the shared watermark once the account changed during the withdrawal', async () => {
+    storage.data.set(WATERMARK, '100')
+    let npub = NPUB
+    const session = pulledSession(['a'])
+    const publish = vi.fn(async () => {
+      npub = 'npub1other'
+      return { success: true, createdAt: 300 }
+    })
+    await withdrawReadStatus({ ...opts(session), npub: () => npub, publish })
+    expect(publish).toHaveBeenCalledOnce()
+    expect(storage.data.get(WATERMARK)).toBe('100')
   })
 
   it('skips when the setting is back on, the user cannot sign or the account changed', async () => {
@@ -460,5 +545,15 @@ describe('withdrawReadStatus', () => {
     setReadSyncEnabled(false)
     await Promise.all([queued, withdrawReadStatus({ ...opts(session), publish })])
     expect(calls).toEqual([[]])
+  })
+
+  it('goes after a list this session published in the same second', async () => {
+    setReadSyncEnabled(true)
+    const session = pulledSession()
+    const publish = ok(400)
+    await publishReadStatusIfChanged({ ...opts(session), publish, fetchLocal: async () => ['a'] })
+    setReadSyncEnabled(false)
+    await withdrawReadStatus({ ...opts(session), publish })
+    expect(publish).toHaveBeenLastCalledWith([], signEvent, 401)
   })
 })

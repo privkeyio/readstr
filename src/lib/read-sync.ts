@@ -127,20 +127,33 @@ export function cleanPulledGuids(guids: string[]): string[] {
 export interface ReadSyncSession {
   // The account this state belongs to. Work queued for another account stops.
   npub: string | null
-  // True once a pull applied the newest event, or found that it was already
-  // applied here, or that none exists. Publishing waits for it: a publish
-  // replaces the event, so one made after a failed pull could drop reads
-  // another device published.
+  // True once a pull that every connected relay answered applied the newest
+  // event, or found that it was already applied here, or that none exists.
+  // Publishing waits for it: a publish replaces the event, so one made after a
+  // failed or partial pull could drop reads another device published.
   pulled: boolean
   // The guids of the newest event known to be on the relays (pulled or
   // published here), or null when unknown. Publishes add to it rather than
   // drop its keys, and a list it already covers is not published again.
   remote: string[] | null
+  // created_at of the last event this session published, or null. The next
+  // publish goes strictly after it, so a withdrawal made within the same
+  // second still replaces the list it follows.
+  lastPublishedAt: number | null
   queue: Promise<void>
 }
 
 export function newReadSyncSession(npub: string | null = null): ReadSyncSession {
-  return { npub, pulled: false, remote: null, queue: Promise.resolve() }
+  return { npub, pulled: false, remote: null, lastPublishedAt: null, queue: Promise.resolve() }
+}
+
+// Retry delays for a pull that failed or that not every relay answered.
+export const READ_SYNC_RETRY_MIN_MS = 30_000
+export const READ_SYNC_RETRY_MAX_MS = 10 * 60_000
+
+/** The delay after `delay` when a retried pull fails again: doubled, capped. */
+export function nextReadSyncRetryDelay(delay: number): number {
+  return Math.min(delay * 2, READ_SYNC_RETRY_MAX_MS)
 }
 
 type SignEvent = (event: UnsignedEvent) => Promise<Event>
@@ -161,7 +174,9 @@ function sessionAllowed(opts: {
  * Additive only. The pull stops between chunks once it is cancelled, the
  * setting is turned off or the account changes. The watermark advances only
  * once every chunk is applied, so a failed or stopped apply is retried on the
- * next pull. Returns whether publishing is now safe (see ReadSyncSession.pulled).
+ * next pull. A pull that not every connected relay answered still applies
+ * what it found, but leaves publishing locked. Returns whether publishing is
+ * now safe (see ReadSyncSession.pulled), so false means "retry the pull".
  * Never throws.
  */
 export async function pullReadStatus(opts: {
@@ -192,8 +207,8 @@ export async function pullReadStatus(opts: {
       // Applied before, or published by this device: nothing to apply, but it
       // is what the relays hold, so publishes build on it.
       session.remote = guids
-      session.pulled = true
-      return true
+      session.pulled = result.complete
+      return result.complete
     }
     for (const part of chunkGuidsForRequest(guids)) {
       if (!live()) return false
@@ -202,9 +217,9 @@ export async function pullReadStatus(opts: {
     if (!live()) return false
     opts.onApplied()
     session.remote = guids
-    session.pulled = true
+    session.pulled = result.complete
     advanceSyncWatermarkIfFresh(READ_STATUS_D_TAG, result.createdAt)
-    return true
+    return result.complete
   } catch (error) {
     console.error('Read status sync pull failed:', error)
     return false
@@ -212,6 +227,25 @@ export async function pullReadStatus(opts: {
 }
 
 const turnedOff = () => new Error('Read status sync was turned off')
+
+// The lowest created_at the session's next event may have.
+function nextCreatedAt(session: ReadSyncSession): number {
+  return session.lastPublishedAt == null ? 0 : session.lastPublishedAt + 1
+}
+
+// The watermark is shared by every account on this device, so it only moves
+// while the session's account is still the signed-in one; otherwise one
+// account's publish could make the next account skip its own newer event.
+function recordPublished(
+  session: ReadSyncSession,
+  guids: string[],
+  createdAt: number | undefined,
+  npub: string | null | undefined
+): void {
+  session.remote = guids
+  if (createdAt != null) session.lastPublishedAt = createdAt
+  if (npub === session.npub) advanceSyncWatermarkIfFresh(READ_STATUS_D_TAG, createdAt)
+}
 
 /**
  * Publish the union of the server's read guids and the last list seen on the
@@ -240,16 +274,18 @@ export function publishReadStatusIfChanged(opts: {
       if (guids.every((guid) => remote.has(guid))) return
       // Checked again around signing, so turning the setting off while this
       // run waits on the server or the signer stops it before it publishes.
-      const result = await (opts.publish ?? publishReadStatus)(guids, async (event) => {
-        if (!allowed()) throw turnedOff()
-        const signed = await opts.signEvent(event)
-        if (!allowed()) throw turnedOff()
-        return signed
-      })
-      if (result.success) {
-        session.remote = guids
-        advanceSyncWatermarkIfFresh(READ_STATUS_D_TAG, result.createdAt)
-      } else {
+      const result = await (opts.publish ?? publishReadStatus)(
+        guids,
+        async (event) => {
+          if (!allowed()) throw turnedOff()
+          const signed = await opts.signEvent(event)
+          if (!allowed()) throw turnedOff()
+          return signed
+        },
+        nextCreatedAt(session)
+      )
+      if (result.success) recordPublished(session, guids, result.createdAt, opts.npub())
+      else {
         console.warn('Read status auto-export failed:', result.error)
       }
     } catch (error) {
@@ -278,11 +314,10 @@ export function withdrawReadStatus(opts: {
     try {
       const npub = opts.npub()
       if (getReadSyncEnabled() || !opts.canSign() || !npub || npub !== session.npub) return
-      const result = await (opts.publish ?? publishReadStatus)([], opts.signEvent)
-      if (result.success) {
-        session.remote = []
-        advanceSyncWatermarkIfFresh(READ_STATUS_D_TAG, result.createdAt)
-      } else {
+      const result = await (opts.publish ?? publishReadStatus)([], opts.signEvent, nextCreatedAt(session))
+      // npub is read again: the account may have changed while signing.
+      if (result.success) recordPublished(session, [], result.createdAt, opts.npub())
+      else {
         console.warn('Read status withdraw failed:', result.error)
       }
     } catch (error) {
