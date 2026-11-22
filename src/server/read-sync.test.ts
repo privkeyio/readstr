@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MAX_GUID_LEN, MAX_READ_ITEMS, readStatusListSchema } from '@/lib/nostr-sync'
-import { MAX_PUBLISHED_READ_CONTENT } from '@/lib/read-sync'
+import { MAX_PUBLISHED_READ_CONTENT, READ_SYNC_FEED_IDS_MAX } from '@/lib/read-sync'
 import { feedRouter } from '@/server/api/routers/feed'
 import { __resetRateLimitForTests } from '@/server/rate-limit'
 import type { SubscriptionLookups } from '@/server/paywall'
@@ -169,13 +169,58 @@ describe('feed.getReadGuidsForSync', () => {
   })
 })
 
+// Subscriptions as rows, so the where clauses the procedures build are
+// evaluated rather than only inspected: a row matches every filter the clause
+// gives, and a filter the clause leaves out matches anything.
+type SubRow = { userPubkey: string; feedId: string; deletedAt: Date | null; readListAppliedAt: Date | null; createdAt: Date; hasItems: boolean }
+type SubWhere = {
+  userPubkey?: string
+  deletedAt?: null
+  readListAppliedAt?: null
+  feedId?: { in: string[] }
+  feed?: { items: { some: Record<string, never> } }
+}
+const OTHER = 'f'.repeat(64)
+
+function sub(feedId: string, extra: Partial<SubRow> = {}): SubRow {
+  return { userPubkey: PUBKEY, feedId, deletedAt: null, readListAppliedAt: null, createdAt: new Date(0), hasItems: true, ...extra }
+}
+
+function matches(row: SubRow, where: SubWhere): boolean {
+  return (
+    (where.userPubkey === undefined || row.userPubkey === where.userPubkey) &&
+    (where.deletedAt === undefined || row.deletedAt === null) &&
+    (where.readListAppliedAt === undefined || row.readListAppliedAt === null) &&
+    (where.feedId === undefined || where.feedId.in.includes(row.feedId)) &&
+    (where.feed === undefined || row.hasItems)
+  )
+}
+
+function fakeSubscriptions(rows: SubRow[]) {
+  return {
+    rows,
+    findMany: vi.fn(async (args: { where: SubWhere; take?: number }) =>
+      rows
+        .filter((row) => matches(row, args.where))
+        .sort((x, y) => x.createdAt.getTime() - y.createdAt.getTime())
+        .slice(0, args.take ?? Infinity)
+        .map((row) => ({ feedId: row.feedId }))
+    ),
+    updateMany: vi.fn(async (args: { where: SubWhere; data: { readListAppliedAt: Date } }) => {
+      const hit = rows.filter((row) => matches(row, args.where))
+      for (const row of hit) row.readListAppliedAt = args.data.readListAppliedAt
+      return { count: hit.length }
+    }),
+  }
+}
+
 describe('feed.markReadByGuids', () => {
   type ItemArgs = { where: { feedId: { in: string[] }; OR: [{ guid: { in: string[] } }, unknown] } }
 
-  // Every guid exists in feed-1 and feed-2; the lookup honours the feedId filter.
-  function fakeDb(feedIds: string[], itemFeeds = ['feed-1', 'feed-2']) {
+  // Every guid exists in feed-1, feed-2 and feed-3; the lookup honours the feedId filter.
+  function fakeDb(subscriptions: Array<string | SubRow>, itemFeeds = ['feed-1', 'feed-2', 'feed-3']) {
     return {
-      subscription: { findMany: vi.fn(async () => feedIds.map((feedId) => ({ feedId }))) },
+      subscription: fakeSubscriptions(subscriptions.map((row) => (typeof row === 'string' ? sub(row) : row))),
       feedItem: {
         findMany: vi.fn(async (args: ItemArgs) =>
           itemFeeds
@@ -210,8 +255,8 @@ describe('feed.markReadByGuids', () => {
     expect(db.readItem.deleteMany).not.toHaveBeenCalled()
   })
 
-  it('marks only items in the user\'s subscribed feeds', async () => {
-    const db = fakeDb(['feed-2'])
+  it('marks only items in the user\'s active subscribed feeds', async () => {
+    const db = fakeDb(['feed-2', sub('feed-1', { deletedAt: new Date(1) }), sub('feed-3', { userPubkey: OTHER })])
     await expect(feedRouter.createCaller(ctx(db)).markReadByGuids({ guids: ['a', 'b'] })).resolves.toEqual({ marked: 2 })
     expect(db.readItem.createMany).toHaveBeenCalledWith({
       data: [
@@ -222,13 +267,36 @@ describe('feed.markReadByGuids', () => {
     })
   })
 
-  it('is rate limited per user, with room for a full pull', async () => {
+  it('with feedIds, touches only those of the caller\'s active subscriptions, so covered feeds keep their unreads', async () => {
+    const db = fakeDb([
+      'feed-1',
+      'feed-2',
+      sub('feed-3', { deletedAt: new Date(1) }),
+      sub('feed-4', { userPubkey: OTHER }),
+    ], ['feed-1', 'feed-2', 'feed-3', 'feed-4'])
+    const caller = feedRouter.createCaller(ctx(db))
+    await expect(caller.markReadByGuids({ guids: ['a'], feedIds: ['feed-2', 'feed-3', 'feed-4', 'feed-9', 'feed-2'] })).resolves.toEqual({
+      marked: 1,
+    })
+    expect(db.readItem.createMany).toHaveBeenCalledOnce()
+    expect(db.readItem.createMany).toHaveBeenCalledWith({ data: [{ userPubkey: PUBKEY, itemId: 'feed-2-a' }], skipDuplicates: true })
+
+    // Only foreign, unsubscribed or unknown feeds: nothing is looked up.
+    db.feedItem.findMany.mockClear()
+    await expect(caller.markReadByGuids({ guids: ['a'], feedIds: ['feed-3', 'feed-4', 'feed-9'] })).resolves.toEqual({ marked: 0 })
+    expect(db.feedItem.findMany).not.toHaveBeenCalled()
+  })
+
+  it('is rate limited per user, with room for a full pull and a separate budget for covering new feeds', async () => {
     const caller = feedRouter.createCaller(ctx(fakeDb(['feed-1'])))
     for (let i = 0; i < 250; i++) await caller.markReadByGuids({ guids: ['a'] })
     await expect(caller.markReadByGuids({ guids: ['a'] })).rejects.toMatchObject({ code: 'TOO_MANY_REQUESTS' })
+    // The pull's budget is spent, yet the cover run still has all of its own.
+    for (let i = 0; i < 250; i++) await caller.markReadByGuids({ guids: ['a'], feedIds: ['feed-1'] })
+    await expect(caller.markReadByGuids({ guids: ['a'], feedIds: ['feed-1'] })).rejects.toMatchObject({ code: 'TOO_MANY_REQUESTS' })
   })
 
-  it('skips the item lookup without subscriptions or guids', async () => {
+  it('skips the lookups without subscriptions or guids', async () => {
     for (const [feeds, guids] of [[[], ['a']], [['feed-1'], []]] as [string[], string[]][]) {
       const db = fakeDb(feeds)
       await expect(feedRouter.createCaller(ctx(db)).markReadByGuids({ guids })).resolves.toEqual({ marked: 0 })
@@ -239,8 +307,87 @@ describe('feed.markReadByGuids', () => {
   it('rejects input past the caps', async () => {
     const db = fakeDb(['feed-1'])
     const caller = feedRouter.createCaller(ctx(db))
-    await expect(caller.markReadByGuids({ guids: ['g'.repeat(MAX_GUID_LEN + 1)] })).rejects.toMatchObject({ code: 'BAD_REQUEST' })
-    await expect(caller.markReadByGuids({ guids: Array(MAX_READ_ITEMS + 1).fill('g') })).rejects.toMatchObject({ code: 'BAD_REQUEST' })
+    const bad = { code: 'BAD_REQUEST' }
+    await expect(caller.markReadByGuids({ guids: ['g'.repeat(MAX_GUID_LEN + 1)] })).rejects.toMatchObject(bad)
+    await expect(caller.markReadByGuids({ guids: Array(MAX_READ_ITEMS + 1).fill('g') })).rejects.toMatchObject(bad)
+    await expect(caller.markReadByGuids({ guids: ['a'], feedIds: Array(READ_SYNC_FEED_IDS_MAX + 1).fill('feed-1') })).rejects.toMatchObject(bad)
+    await expect(caller.markReadByGuids({ guids: ['a'], feedIds: [] })).rejects.toMatchObject(bad)
+    for (const feedId of ['', 'x'.repeat(65), 'feed 1', "feed'1", 'feed/1']) {
+      await expect(caller.markReadByGuids({ guids: ['a'], feedIds: [feedId] })).rejects.toMatchObject(bad)
+    }
+    await expect(caller.markReadByGuids({ guids: ['a'], feedIds: 'feed-1' as never })).rejects.toMatchObject(bad)
     expect(db.subscription.findMany).not.toHaveBeenCalled()
+    await expect(caller.markReadByGuids({ guids: ['a'], feedIds: Array(READ_SYNC_FEED_IDS_MAX).fill('x'.repeat(64)) })).resolves.toEqual({ marked: 0 })
+  })
+})
+
+describe('feed.getReadSyncUncoveredFeeds', () => {
+  it('lists the caller\'s active subscriptions the read list was never applied to, oldest first', async () => {
+    const subscription = fakeSubscriptions([
+      sub('feed-new', { createdAt: new Date(3) }),
+      sub('feed-covered', { readListAppliedAt: new Date(1) }),
+      sub('feed-gone', { deletedAt: new Date(1) }),
+      sub('feed-old', { createdAt: new Date(1) }),
+      sub('feed-foreign', { userPubkey: OTHER }),
+      sub('feed-empty', { createdAt: new Date(2), hasItems: false }),
+    ])
+    const caller = feedRouter.createCaller(ctx({ subscription }))
+    await expect(caller.getReadSyncUncoveredFeeds()).resolves.toEqual({ feedIds: ['feed-old', 'feed-new'], more: false })
+  })
+
+  it('returns at most READ_SYNC_FEED_IDS_MAX and says when more remain', async () => {
+    const rows = Array.from({ length: READ_SYNC_FEED_IDS_MAX + 1 }, (_, i) => sub(`feed-${i}`, { createdAt: new Date(i) }))
+    const caller = feedRouter.createCaller(ctx({ subscription: fakeSubscriptions(rows) }))
+    const first = await caller.getReadSyncUncoveredFeeds()
+    expect(first.feedIds).toEqual(rows.slice(0, READ_SYNC_FEED_IDS_MAX).map((row) => row.feedId))
+    expect(first.more).toBe(true)
+    rows.pop()
+    await expect(caller.getReadSyncUncoveredFeeds()).resolves.toMatchObject({ more: false })
+  })
+
+  it('is rate limited per user', async () => {
+    const caller = feedRouter.createCaller(ctx({ subscription: fakeSubscriptions([]) }))
+    for (let i = 0; i < 120; i++) await caller.getReadSyncUncoveredFeeds()
+    await expect(caller.getReadSyncUncoveredFeeds()).rejects.toMatchObject({ code: 'TOO_MANY_REQUESTS' })
+  })
+})
+
+describe('feed.markReadListApplied', () => {
+  it('marks only the given feeds among the caller\'s active, uncovered subscriptions', async () => {
+    const earlier = new Date(5)
+    const subscription = fakeSubscriptions([
+      sub('feed-1'),
+      sub('feed-2'),
+      sub('feed-covered', { readListAppliedAt: earlier }),
+      sub('feed-gone', { deletedAt: new Date(1) }),
+      sub('feed-foreign', { userPubkey: OTHER }),
+    ])
+    const caller = feedRouter.createCaller(ctx({ subscription }))
+    await expect(
+      caller.markReadListApplied({ feedIds: ['feed-1', 'feed-covered', 'feed-gone', 'feed-foreign', 'feed-9', 'feed-1'] })
+    ).resolves.toEqual({ updated: 1 })
+    const applied = Object.fromEntries(subscription.rows.map((row) => [`${row.userPubkey === PUBKEY ? '' : 'other:'}${row.feedId}`, row.readListAppliedAt]))
+    expect(applied['feed-1']).toBeInstanceOf(Date)
+    expect(applied['feed-2']).toBeNull()
+    expect(applied['feed-covered']).toBe(earlier)
+    expect(applied['feed-gone']).toBeNull()
+    expect(applied['other:feed-foreign']).toBeNull()
+  })
+
+  it('needs feedIds within the caps', async () => {
+    const subscription = fakeSubscriptions([sub('feed-1')])
+    const caller = feedRouter.createCaller(ctx({ subscription }))
+    const bad = { code: 'BAD_REQUEST' }
+    await expect(caller.markReadListApplied({} as never)).rejects.toMatchObject(bad)
+    await expect(caller.markReadListApplied({ feedIds: [] })).rejects.toMatchObject(bad)
+    await expect(caller.markReadListApplied({ feedIds: Array(READ_SYNC_FEED_IDS_MAX + 1).fill('feed-1') })).rejects.toMatchObject(bad)
+    await expect(caller.markReadListApplied({ feedIds: ['feed;1'] })).rejects.toMatchObject(bad)
+    expect(subscription.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('is rate limited per user', async () => {
+    const caller = feedRouter.createCaller(ctx({ subscription: fakeSubscriptions([]) }))
+    for (let i = 0; i < 60; i++) await caller.markReadListApplied({ feedIds: ['feed-1'] })
+    await expect(caller.markReadListApplied({ feedIds: ['feed-1'] })).rejects.toMatchObject({ code: 'TOO_MANY_REQUESTS' })
   })
 })

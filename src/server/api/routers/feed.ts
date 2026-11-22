@@ -7,10 +7,12 @@ import { withRequestFetcher } from '@/lib/safe-relays'
 import { rateLimit } from '@/server/rate-limit'
 import { MAX_RELAY_URL_LENGTH, MAX_CLIENT_RELAYS } from '@/lib/relays'
 import { discoverFeed } from '@/lib/feed-discovery'
+import { READ_SYNC_FEED_IDS_MAX } from '@/lib/read-sync'
 import {
   chunk,
   GUID_QUERY_CHUNK,
-  readGuidsInputSchema,
+  markReadByGuidsInputSchema,
+  markReadListAppliedInputSchema,
   readSyncKey,
   ReadSyncGuidCollector,
 } from '@/server/read-sync'
@@ -42,9 +44,20 @@ function limitProfileDiscovery(name: string, pubkey: string) {
 // Read-status sync budgets. A publish fetches the list at most once per
 // 30-second debounce, plus a page close or a settings toggle, so a few a
 // minute is plenty. Applying an 8 MiB pulled list takes about 175 calls of
-// 48 KB each, so 250 per 10 minutes lets one full pull through.
+// 48 KB each, so 250 per 10 minutes lets one full pull through. Applying the
+// list to newly subscribed feeds (calls scoped with feedIds) sends the whole
+// list again, so those calls get a budget of their own: a pull and a cover
+// run in the same window then both fit, and neither starves the other. For
+// the largest lists that is about one cover run per window: a second feed
+// added within it waits for the retry after the window. The cover check runs
+// at most once a minute from feeds refetches plus once per subscribe, import
+// or pull, and marking feeds applied once per cover run, so those two budgets
+// only stop a runaway client.
 const READ_GUIDS_FOR_SYNC_PER_MINUTE = 6
 const MARK_READ_BY_GUIDS_PER_10_MIN = 250
+const MARK_READ_BY_GUIDS_COVER_PER_10_MIN = 250
+const READ_SYNC_UNCOVERED_PER_10_MIN = 120
+const MARK_READ_LIST_APPLIED_PER_10_MIN = 60
 
 // Type for subscription with feed include
 type SubscriptionWithFeed = Prisma.SubscriptionGetPayload<{ include: { feed: true } }>
@@ -2072,16 +2085,27 @@ export const feedRouter = createTRPCRouter({
 
   // Apply a pulled kind 30405 event: mark read the user's subscribed items whose
   // key matches. Additive only, as on the desktop: a key missing from the list
-  // never marks anything unread.
+  // never marks anything unread. With feedIds, only the caller's active
+  // subscriptions among them are touched, so the list can be applied to newly
+  // subscribed feeds without being applied again to feeds that already had it;
+  // ids of feeds the caller does not subscribe to are ignored.
   markReadByGuids: subscribedProcedure
-    .input(readGuidsInputSchema)
+    .input(markReadByGuidsInputSchema)
     .mutation(async ({ ctx, input }) => {
-      limitPerUser('feed.markReadByGuids', ctx.nostrPubkey, MARK_READ_BY_GUIDS_PER_10_MIN, 10 * 60 * 1000)
+      if (input.feedIds) {
+        limitPerUser('feed.markReadByGuids.cover', ctx.nostrPubkey, MARK_READ_BY_GUIDS_COVER_PER_10_MIN, 10 * 60 * 1000)
+      } else {
+        limitPerUser('feed.markReadByGuids', ctx.nostrPubkey, MARK_READ_BY_GUIDS_PER_10_MIN, 10 * 60 * 1000)
+      }
       const guids = [...new Set(input.guids)].filter(g => g.length > 0)
       if (guids.length === 0) return { marked: 0 }
 
       const subscriptions = await ctx.db.subscription.findMany({
-        where: { userPubkey: ctx.nostrPubkey, deletedAt: null },
+        where: {
+          userPubkey: ctx.nostrPubkey,
+          deletedAt: null,
+          ...(input.feedIds ? { feedId: { in: [...new Set(input.feedIds)] } } : {}),
+        },
         select: { feedId: true },
       })
       const feedIds = subscriptions.map((sub: { feedId: string }) => sub.feedId)
@@ -2105,5 +2129,44 @@ export const feedRouter = createTRPCRouter({
         marked += result.count
       }
       return { marked }
+    }),
+
+  // The caller's active subscriptions the pulled read list has not been applied
+  // to yet (see Subscription.readListAppliedAt), at most READ_SYNC_FEED_IDS_MAX
+  // of them; `more` says whether others remain. The server decides, not the
+  // client's feed list, which may be filtered by category or tag.
+  getReadSyncUncoveredFeeds: subscribedProcedure
+    .query(async ({ ctx }) => {
+      limitPerUser('feed.getReadSyncUncoveredFeeds', ctx.nostrPubkey, READ_SYNC_UNCOVERED_PER_10_MIN, 10 * 60 * 1000)
+      const rows = await ctx.db.subscription.findMany({
+        // A feed whose first fetch stored no items has nothing to match yet.
+        // Marking it applied now would leave the items its next refresh
+        // brings without the list, so it stays uncovered until it has some.
+        where: { userPubkey: ctx.nostrPubkey, deletedAt: null, readListAppliedAt: null, feed: { items: { some: {} } } },
+        select: { feedId: true },
+        orderBy: { createdAt: 'asc' },
+        take: READ_SYNC_FEED_IDS_MAX + 1,
+      })
+      const feedIds = rows.slice(0, READ_SYNC_FEED_IDS_MAX).map((row: { feedId: string }) => row.feedId)
+      return { feedIds, more: rows.length > READ_SYNC_FEED_IDS_MAX }
+    }),
+
+  // Record that the pulled read list has been applied to these feeds, so no
+  // browser applies it to them again. Only the caller's active subscriptions
+  // not yet marked are touched, which keeps the first time it was applied.
+  markReadListApplied: subscribedProcedure
+    .input(markReadListAppliedInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      limitPerUser('feed.markReadListApplied', ctx.nostrPubkey, MARK_READ_LIST_APPLIED_PER_10_MIN, 10 * 60 * 1000)
+      const result = await ctx.db.subscription.updateMany({
+        where: {
+          userPubkey: ctx.nostrPubkey,
+          deletedAt: null,
+          readListAppliedAt: null,
+          feedId: { in: [...new Set(input.feedIds)] },
+        },
+        data: { readListAppliedAt: new Date() },
+      })
+      return { updated: result.count }
     }),
 })

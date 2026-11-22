@@ -20,6 +20,12 @@ export const READ_SYNC_PUBLISH_DELAY_MS = 30_000
 // leaves room for the tRPC envelope and small mutations batched alongside.
 export const MARK_READ_REQUEST_BYTES = 48_000
 
+// Most feed ids one getReadSyncUncoveredFeeds answer, scoped markReadByGuids
+// call or markReadListApplied call carries. At the schema's 64 characters per
+// id that is about 33 KB, so a scoped call still fits MARK_READ_REQUEST_BYTES
+// once its guids are chunked to the bytes left (see applyReadListChunks).
+export const READ_SYNC_FEED_IDS_MAX = 500
+
 // Common strfry relays (damus, nos.lol) refuse events over 64 KiB of JSON, so a
 // bigger list would fail to publish without any error. The web publishes only
 // the newest reads that fit this budget. Pulls still accept lists up to
@@ -146,10 +152,27 @@ export interface ReadSyncSession {
   // runs behind another device's.
   latestSeenAt: number | null
   queue: Promise<void>
+  // Whether coverNewFeedsWithReadList is running, and whether it was asked to
+  // run again meanwhile, so two runs never overlap.
+  covering: boolean
+  coverAgain: boolean
+  // How long to wait before retrying the next failed cover run. Doubled on
+  // each failure and reset by a run that finishes, so a 429 is not hammered.
+  coverRetryDelay: number
 }
 
 export function newReadSyncSession(npub: string | null = null): ReadSyncSession {
-  return { npub, pulled: false, remote: null, remoteVersion: 0, latestSeenAt: null, queue: Promise.resolve() }
+  return {
+    npub,
+    pulled: false,
+    remote: null,
+    remoteVersion: 0,
+    latestSeenAt: null,
+    queue: Promise.resolve(),
+    covering: false,
+    coverAgain: false,
+    coverRetryDelay: READ_SYNC_RETRY_MIN_MS,
+  }
 }
 
 // Retry delays for a pull that failed or that not every relay answered.
@@ -162,6 +185,42 @@ export function nextReadSyncRetryDelay(delay: number): number {
 }
 
 type SignEvent = (event: UnsignedEvent) => Promise<Event>
+
+/** What getReadSyncUncoveredFeeds answers. */
+export interface ReadSyncUncoveredFeeds {
+  feedIds: string[]
+  more: boolean
+}
+
+/**
+ * The server calls the pull and the cover run share. markRead without feedIds
+ * applies guids to every active subscription, with them only to those feeds.
+ */
+export interface ReadListServer {
+  markRead: (guids: string[], feedIds?: string[]) => Promise<unknown>
+  getUncovered: () => Promise<ReadSyncUncoveredFeeds>
+  markApplied: (feedIds: string[]) => Promise<unknown>
+  onApplied: () => void
+}
+
+/**
+ * Send `guids` in request-sized chunks, re-checking `live` before each one.
+ * `reservedBytes` is what the rest of each call's input (a feedIds scope)
+ * takes from the request budget. Returns false when it stopped early, true
+ * when every chunk was sent and the run is still live.
+ */
+async function applyReadListChunks(
+  guids: string[],
+  send: (part: string[]) => Promise<unknown>,
+  live: () => boolean,
+  reservedBytes = 0
+): Promise<boolean> {
+  for (const part of chunkGuidsForRequest(guids, MARK_READ_REQUEST_BYTES - reservedBytes)) {
+    if (!live()) return false
+    await send(part)
+  }
+  return live()
+}
 
 // Sync is allowed and the signed-in account is still the session's, so work
 // queued for an earlier account stops.
@@ -179,23 +238,22 @@ function sessionAllowed(opts: {
  * Additive only. The pull stops between chunks once it is cancelled, the
  * setting is turned off or the account changes. The watermark advances only
  * once every chunk is applied, so a failed or stopped apply is retried on the
- * next pull. A pull that not every connected relay answered still applies
- * what it found, but leaves publishing locked. Returns whether publishing is
- * now safe (see ReadSyncSession.pulled), so false means "retry the pull".
- * Never throws.
+ * next pull. A fresh event is applied to every feed, and the feeds it had
+ * never been applied to when the pull started are then marked applied, so the
+ * cover run does not send it to them again. A pull that not every connected
+ * relay answered still applies what it found, but leaves publishing locked.
+ * Returns whether publishing is now safe (see ReadSyncSession.pulled), so
+ * false means "retry the pull". Never throws.
  */
-export async function pullReadStatus(opts: {
+export async function pullReadStatus(opts: ReadListServer & {
   canSign: () => boolean
   npub: () => string | null | undefined
   isCancelled?: () => boolean
   session: ReadSyncSession
-  markRead: (guids: string[]) => Promise<unknown>
-  onApplied: () => void
   fetchRemote?: typeof fetchReadStatus
 }): Promise<boolean> {
   const { session } = opts
   const live = () => !opts.isCancelled?.() && sessionAllowed(opts)
-  if (!live()) return false
   const remoteVersion = session.remoteVersion
   // A publish or withdrawal that finished during the pull already set what the
   // relays hold, after the pulled event, so the pulled list must not replace
@@ -210,6 +268,7 @@ export async function pullReadStatus(opts: {
     return complete
   }
   try {
+    if (!live()) return false
     const result = await (opts.fetchRemote ?? fetchReadStatus)(session.npub!)
     // Raised even when the pull then stops, so a withdrawal made right after
     // still goes after the event the relays hold.
@@ -229,17 +288,98 @@ export async function pullReadStatus(opts: {
       // is what the relays hold, so publishes build on it.
       return settle(guids, result.complete)
     }
-    for (const part of chunkGuidsForRequest(guids)) {
-      if (!live()) return false
-      await opts.markRead(part)
+    // The feeds the list was never applied to, taken before the first chunk:
+    // they get every chunk, so they can be marked applied once it is done. A
+    // feed subscribed during the pull missed the earlier chunks and is not in
+    // this snapshot, so it stays uncovered and the cover run applies the list
+    // to it. Best effort: without the snapshot they stay uncovered too, and the
+    // cover run applies the list to them once more. The snapshot is one page,
+    // so past READ_SYNC_FEED_IDS_MAX uncovered feeds the rest get the list a
+    // second time from the cover run, which only marks read again.
+    let uncovered: string[] = []
+    try {
+      uncovered = (await opts.getUncovered()).feedIds
+    } catch (error) {
+      console.warn('Read status sync could not list the feeds still to cover:', error)
     }
-    if (!live()) return false
+    if (!(await applyReadListChunks(guids, (part) => opts.markRead(part), live))) return false
+    if (uncovered.length > 0) {
+      try {
+        await opts.markApplied(uncovered)
+      } catch (error) {
+        console.warn('Read status sync could not record the covered feeds:', error)
+      }
+      if (!live()) return false
+    }
     opts.onApplied()
     advanceSyncWatermarkIfFresh(READ_STATUS_D_TAG, result.createdAt)
     return settle(guids, result.complete)
   } catch (error) {
     console.error('Read status sync pull failed:', error)
     return false
+  }
+}
+
+/**
+ * Apply the known remote list to the account's feeds it was never applied to,
+ * which the server tracks per subscription (readListAppliedAt), so a key whose
+ * feed was not subscribed at pull time still gets marked read once it is. The
+ * server picks the feeds, since the client's feed list may be filtered by
+ * category or tag, and since another browser may already have covered them:
+ * a covered feed never gets the list again, so items the user marked unread
+ * there stay unread. Each round snapshots the uncovered feeds, applies the
+ * list scoped to them, then marks them applied. A feed subscribed during the
+ * round is not in the snapshot and is picked up by the next run. With no
+ * remote list (none published, or an empty one) the feeds are still marked
+ * applied: there is nothing to give them, and a key this browser publishes
+ * later must not be applied to a feed where the user since marked it unread.
+ *
+ * Runs only after the session's pull. A run asked for while one is going runs
+ * again after it. Stops when cancelled, turned off or the account changes.
+ * Returns null when no retry is needed, else the delay before retrying, which
+ * doubles on each failure. A failure leaves the snapshot uncovered, so a retry
+ * applies again the chunks sent before it failed; within that retry window an
+ * item the user marked unread in a feed subscribed moments ago can be marked
+ * read again, which is accepted. Never throws.
+ */
+export async function coverNewFeedsWithReadList(opts: ReadListServer & {
+  canSign: () => boolean
+  npub: () => string | null | undefined
+  isCancelled?: () => boolean
+  session: ReadSyncSession
+}): Promise<number | null> {
+  const { session } = opts
+  if (session.covering) {
+    session.coverAgain = true
+    return null
+  }
+  session.covering = true
+  try {
+    const live = () => !opts.isCancelled?.() && sessionAllowed(opts) && session.pulled
+    do {
+      session.coverAgain = false
+      if (!live()) return null
+      const { feedIds, more } = await opts.getUncovered()
+      if (feedIds.length === 0) continue
+      const scope = feedIds.slice(0, READ_SYNC_FEED_IDS_MAX)
+      const remote = session.remote ?? []
+      const send = (part: string[]) => opts.markRead(part, scope)
+      const scopeBytes = utf8.encode(JSON.stringify(scope)).length
+      if (!(await applyReadListChunks(remote, send, live, scopeBytes))) return null
+      await opts.markApplied(scope)
+      if (!live()) return null
+      if (remote.length > 0) opts.onApplied()
+      if (more || feedIds.length > scope.length) session.coverAgain = true
+    } while (session.coverAgain)
+    session.coverRetryDelay = READ_SYNC_RETRY_MIN_MS
+    return null
+  } catch (error) {
+    console.error('Read status sync for new feeds failed:', error)
+    const delay = session.coverRetryDelay
+    session.coverRetryDelay = nextReadSyncRetryDelay(delay)
+    return delay
+  } finally {
+    session.covering = false
   }
 }
 

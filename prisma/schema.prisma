@@ -65,8 +65,15 @@ model Subscription {
     createdAt  DateTime @default(now())
     updatedAt  DateTime @updatedAt
     deletedAt  DateTime? // Soft delete for sync tracking
-    
-    // Relations  
+    // When the pulled read-status list (kind 30405) was first applied to this
+    // feed, or null while it has not been. It is kept per account, not per
+    // browser, so no browser applies the list again to a feed where the user
+    // may have marked items unread on purpose. Resubscribing a soft-deleted
+    // subscription is a no-op today (readstr-3ze); the fix for that should
+    // clear this field too, so the resubscribed feed gets the list again.
+    readListAppliedAt DateTime?
+
+    // Relations
     feed     Feed      @relation(fields: [feedId], references: [id], onDelete: Cascade)
     category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
     

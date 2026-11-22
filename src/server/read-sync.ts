@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { MAX_READ_ITEMS, readGuidSchema } from '@/lib/nostr-sync'
+import { READ_SYNC_FEED_IDS_MAX } from '@/lib/read-sync'
 
 export { ReadSyncGuidCollector } from '@/lib/read-sync'
 
@@ -8,6 +9,20 @@ export const GUID_QUERY_CHUNK = 1000
 
 export const readGuidsInputSchema = z.object({
   guids: z.array(readGuidSchema).max(MAX_READ_ITEMS),
+})
+
+// Feed ids are cuids. The charset and length bound keep a hostile list from
+// building a huge `in` query, and the count bound keeps a scoped
+// markReadByGuids call under the request body cap (see READ_SYNC_FEED_IDS_MAX).
+const feedIdSchema = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/)
+export const readSyncFeedIdsSchema = z.array(feedIdSchema).min(1).max(READ_SYNC_FEED_IDS_MAX)
+
+export const markReadByGuidsInputSchema = readGuidsInputSchema.extend({
+  feedIds: readSyncFeedIdsSchema.optional(),
+})
+
+export const markReadListAppliedInputSchema = z.object({
+  feedIds: readSyncFeedIdsSchema,
 })
 
 /**
