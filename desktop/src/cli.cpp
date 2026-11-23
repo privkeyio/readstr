@@ -109,6 +109,17 @@ int fail(const QString &command, const QString &message, QTextStream &err) {
     return 1;
 }
 
+// A subscription changed here is marked for the sync account, so the window
+// publishes it when it next starts. Best effort while a window is open: a
+// publish it has under way, built before this change, clears the mark, and
+// the change then goes out with the next subscription change.
+void markSubscriptionsPending(const QString &command, Store &store, QTextStream &err) {
+    const QString pubkey = store.syncAccount().pubkey;
+    if (!pubkey.isEmpty() && !store.markPublishPending(pubkey, publishBit(Sync::subscriptionsKind), true))
+        err << "readstr " << command << ": cannot remember the change to publish: " << printable(store.lastError())
+            << "\n";
+}
+
 void printJson(const QJsonValue &value, QTextStream &out) {
     const QJsonDocument document =
         value.isArray() ? QJsonDocument(value.toArray()) : QJsonDocument(value.toObject());
@@ -258,6 +269,8 @@ int subscribe(const QString &command, const QStringList &arguments, QTextStream 
         return fail(command, subscription.error, err);
     const bool created = subscription.created;
     const int added = subscription.added;
+    if (created)
+        markSubscriptionsPending(command, store, err);
     const std::optional<Feed> feed = store.feed(subscription.id);
     if (!feed)
         return fail(command, store.lastError(), err);
@@ -293,6 +306,7 @@ int unsubscribe(const QString &command, const QStringList &arguments, QTextStrea
     const std::optional<Feed> feed = store.feed(id);
     if (!feed || !store.removeFeed(id))
         return fail(command, store.lastError(), err);
+    markSubscriptionsPending(command, store, err);
     out << "Unsubscribed from " << printable(feed->title) << "\n";
     return 0;
 }
@@ -424,6 +438,8 @@ int importOpml(const QString &command, const QStringList &arguments, QTextStream
     const Library::Import imported = Library::importOutlines(store, *outlines);
     if (!imported.error.isEmpty())
         return fail(command, imported.error, err);
+    if (imported.added > 0)
+        markSubscriptionsPending(command, store, err);
 
     if (options.json)
         printJson(QJsonObject{{"added", imported.added}, {"skipped", imported.skipped}, {"unsupported", imported.unsupported}},

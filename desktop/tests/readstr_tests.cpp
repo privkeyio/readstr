@@ -131,6 +131,13 @@ protected:
     void closeRequest(const QString &path) override { closed << path; }
 };
 
+// Drops the queued calls to the object it filters, as a window that closes
+// before its worker's results arrive never runs them.
+class QueuedCallDropper : public QObject {
+protected:
+    bool eventFilter(QObject *, QEvent *event) override { return event->type() == QEvent::MetaCall; }
+};
+
 // A keyring in memory, so no test ever reaches the real one. Each answer
 // comes from the event loop, as the real one's does, and `error` makes every
 // call fail that way. With `hold`, calls wait, as for a prompt the user has
@@ -1782,6 +1789,43 @@ private slots:
         out.clear();
         QCOMPARE(run({"feeds", "--json"}, out, err), 0);
         QCOMPARE(out, QString("[]\n"));
+    }
+
+    // A subscription changed from the command line goes out when the window
+    // next starts.
+    void cliMarksSubscriptionChangesToPublish()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", (dir.path() + "/home").toUtf8());
+        FakeHttpServer server;
+        server.serve("/feed.xml", fixture("rss2.xml"));
+        write(dir.path() + "/in.opml", fixture("import.opml"));
+        QString out, err;
+        QCOMPARE(run({"subscribe", server.url("/feed.xml").toString()}, out, err), 0);
+        seedSyncAccount();
+        const int bit = publishBit(Sync::subscriptionsKind);
+        const auto pending = [bit] {
+            Store store;
+            return store.open() && (store.syncAccount().publishPending & bit);
+        };
+        const auto clear = [bit] {
+            Store store;
+            return store.open() && store.markPublishPending(syncPubkey(), bit, false);
+        };
+        QCOMPARE(run({"subscribe", server.url("/feed.xml").toString()}, out, err), 0);
+        QVERIFY(!pending());
+        QCOMPARE(run({"import", dir.path() + "/in.opml"}, out, err), 0);
+        QVERIFY(pending());
+        QVERIFY(clear());
+        QCOMPARE(run({"import", dir.path() + "/in.opml"}, out, err), 0);
+        QVERIFY(!pending());
+        QCOMPARE(run({"unsubscribe", "1"}, out, err), 0);
+        QVERIFY(pending());
+        QVERIFY(clear());
+        QCOMPARE(run({"subscribe", server.url("/feed.xml").toString()}, out, err), 0);
+        QVERIFY(pending());
+        QVERIFY2(err.isEmpty(), qPrintable(err));
     }
 
     void cliExportsAndImportsOpml()
@@ -10729,6 +10773,111 @@ private slots:
         QVERIFY(store.syncAccount().publishPending & publishBit(Sync::readStatusKind));
     }
 
+    // Each subscription change marks its kind in its own write, so one
+    // saved as the window closes, before the window heard back, still goes
+    // out after a restart.
+    void backendPublishesAnUnsubscribeSavedAsTheWindowCloses()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount(true);
+        QList<qint64> ids;
+        {
+            Store store;
+            QVERIFY(store.open());
+            for (const char *name : {"a", "b"})
+                ids << store.addFeed(QStringLiteral("https://%1.invalid/feed").arg(name), name);
+        }
+        FakeKeyStore keys;
+        keys.keys.insert(syncNpub(), QByteArray(32, '\1'));
+        {
+            Backend backend;
+            backend.setRelays({relay.url()});
+            backend.setKeyStore(&keys);
+            QVERIFY(backend.unsubscribe(ids[0]));
+        }
+        {
+            Store store;
+            QVERIFY(store.open());
+            QCOMPARE(store.feeds().size(), 1);
+            QVERIFY(store.syncAccount().publishPending & publishBit(Sync::subscriptionsKind));
+        }
+        publishesSubscriptionsAfterARestart(relay, keys, {"https://b.invalid/feed"});
+    }
+
+    void backendPublishesASubscribeSavedAsTheWindowCloses()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        FakeHttpServer server;
+        server.serve("/feed.xml", fixture("rss2.xml"));
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount(true);
+        FakeKeyStore keys;
+        keys.keys.insert(syncNpub(), QByteArray(32, '\1'));
+        {
+            Backend backend;
+            backend.setRelays({relay.url()});
+            backend.setKeyStore(&keys);
+            QTRY_VERIFY(backend.signingKeyStored());
+            QueuedCallDropper dropper;
+            backend.installEventFilter(&dropper);
+            backend.addFeed(server.url("/feed.xml").toString());
+            Store store;
+            QVERIFY(store.open());
+            QTRY_COMPARE_WITH_TIMEOUT(store.feeds().size(), 1, 20000);
+            QVERIFY(backend.adding());
+        }
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.syncAccount().publishPending & publishBit(Sync::subscriptionsKind));
+        }
+        // The list leaves out a feed on this machine, but still goes out.
+        publishesSubscriptionsAfterARestart(relay, keys, QJsonArray());
+    }
+
+    void backendPublishesAnImportSavedAsTheWindowCloses()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", (dir.path() + "/home").toUtf8());
+        seedSyncAccount(true);
+        write(dir.path() + "/in.opml",
+              "<opml version=\"2.0\"><body>"
+              "<outline type=\"rss\" text=\"A\" xmlUrl=\"https://a.invalid/feed\"/>"
+              "</body></opml>");
+        FakeKeyStore keys;
+        keys.keys.insert(syncNpub(), QByteArray(32, '\1'));
+        {
+            Backend backend;
+            backend.setRelays({relay.url()});
+            backend.setKeyStore(&keys);
+            QTRY_VERIFY(backend.signingKeyStored());
+            QueuedCallDropper dropper;
+            backend.installEventFilter(&dropper);
+            QSignalSpy imported(&backend, &Backend::imported);
+            backend.importFrom(QUrl::fromLocalFile(dir.path() + "/in.opml"));
+            Store store;
+            QVERIFY(store.open());
+            QTRY_COMPARE_WITH_TIMEOUT(store.feeds().size(), 1, 20000);
+            QVERIFY(imported.isEmpty());
+        }
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.syncAccount().publishPending & publishBit(Sync::subscriptionsKind));
+        }
+        publishesSubscriptionsAfterARestart(relay, keys, {"https://a.invalid/feed"});
+    }
+
     // A published list a newer one overtook before it was recorded may lack
     // feeds only this machine has, so the kind stays marked and is built
     // again on the winning list after the next pull.
@@ -11162,6 +11311,29 @@ private:
         QList<const char *> m_names;
         QList<std::optional<QByteArray>> m_values;
     };
+
+    // A new window publishes the subscription list left marked, as `rss`,
+    // after its first pull.
+    static void publishesSubscriptionsAfterARestart(FakeRelay &relay, FakeKeyStore &keys, const QJsonArray &rss)
+    {
+        QVERIFY(relay.published.isEmpty());
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setPublishDelays(30, 30);
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+        QVERIFY(backend.setSyncNpub(syncNpub()));
+        QTRY_COMPARE_WITH_TIMEOUT(relay.published.size(), 1, 10000);
+        QTRY_VERIFY(!backend.publishing());
+        QVERIFY2(backend.publishError().isEmpty(), qPrintable(backend.publishError()));
+        QCOMPARE(relay.published.first().value("kind").toInt(), Sync::subscriptionsKind);
+        const QJsonObject list =
+            QJsonDocument::fromJson(relay.published.first().value("content").toString().toUtf8()).object();
+        QCOMPARE(list.value("rss").toArray(), rss);
+        Store store;
+        QVERIFY(store.open());
+        QTRY_COMPARE(store.syncAccount().publishPending, 0);
+    }
 
     static int run(const QStringList &arguments, QString &out, QString &err)
     {

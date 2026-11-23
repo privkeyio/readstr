@@ -464,7 +464,7 @@ void Backend::saveFlags(const Article &before, bool read, bool starred, const QS
          readsPending = readChanged ? readsPublishedFor() : QString()](Store &store) {
             if ((readChanged && !store.setRead(id, read)) || (starredChanged && !store.setStarred(id, starred)))
                 return -1;
-            markReadsPending(store, readsPending);
+            markPending(store, readsPending, Sync::readStatusKind);
             return 1;
         },
         failure,
@@ -567,7 +567,7 @@ void Backend::markViewRead() {
         [filter, upToId, readsPending = readsPublishedFor()](Store &store) {
             const int marked = store.markRead(filter, upToId);
             if (marked > 0)
-                markReadsPending(store, readsPending);
+                markPending(store, readsPending, Sync::readStatusKind);
             return marked;
         },
         failure,
@@ -625,8 +625,13 @@ void Backend::addFeed(const QString &address) {
                 return;
             }
             onWorker<Library::Subscription>(
-                [profile, articles = both->first, videos = both->second](Store &store) {
-                    return Library::subscribeNostr(store, profile, articles, videos);
+                [profile, articles = both->first, videos = both->second,
+                 pending = subscriptionsPublishedFor()](Store &store) {
+                    const Library::Subscription subscription =
+                        Library::subscribeNostr(store, profile, articles, videos);
+                    if (subscription.created)
+                        markPending(store, pending, Sync::subscriptionsKind);
+                    return subscription;
                 },
                 [this, release](const Library::Subscription &subscription) {
                     release();
@@ -653,12 +658,15 @@ void Backend::searchRound(const std::shared_ptr<Discovery::Search> &search) {
             if (m_closing)
                 return;
             onWorker<SearchStep>(
-                [search, results](Store &store) {
+                [search, results, pending = subscriptionsPublishedFor()](Store &store) {
                     SearchStep step;
                     search->examine(*results);
                     step.finished = search->finished();
-                    if (step.finished)
+                    if (step.finished) {
                         step.subscription = Library::subscribe(store, search->result());
+                        if (step.subscription.created)
+                            markPending(store, pending, Sync::subscriptionsKind);
+                    }
                     return step;
                 },
                 [this, search](const SearchStep &step) {
@@ -712,19 +720,26 @@ bool Backend::unsubscribe(qint64 feedId) {
     m_unsubscribed.insert(feedId);
     reloadLibrary();
     const QString failure = tr("Cannot unsubscribe: %1");
-    writeOnWorker([feedId](Store &store) { return store.removeFeed(feedId) ? 1 : -1; }, failure,
-                  [this, feedId, title = Nip19::shortNpub(feed->title, feed->url), failure](const WriteResult &result) {
-                      m_removing.remove(feedId);
-                      if (!result.error.isEmpty()) {
-                          // Still subscribed, so its refresh errors count again.
-                          m_unsubscribed.remove(feedId);
-                          setStatus(failure.arg(result.error), true);
-                      } else {
-                          setStatus(tr("Unsubscribed from %1").arg(title));
-                          schedulePublish(Sync::subscriptionsKind);
-                      }
-                      reloadLibrary();
-                  });
+    writeOnWorker(
+        [feedId, pending = subscriptionsPublishedFor()](Store &store) {
+            if (!store.removeFeed(feedId))
+                return -1;
+            markPending(store, pending, Sync::subscriptionsKind);
+            return 1;
+        },
+        failure,
+        [this, feedId, title = Nip19::shortNpub(feed->title, feed->url), failure](const WriteResult &result) {
+            m_removing.remove(feedId);
+            if (!result.error.isEmpty()) {
+                // Still subscribed, so its refresh errors count again.
+                m_unsubscribed.remove(feedId);
+                setStatus(failure.arg(result.error), true);
+            } else {
+                setStatus(tr("Unsubscribed from %1").arg(title));
+                schedulePublish(Sync::subscriptionsKind);
+            }
+            reloadLibrary();
+        });
     return true;
 }
 
@@ -1874,12 +1889,16 @@ QString Backend::readsPublishedFor() const {
     return m_storeOpen && m_syncAccount.publishReads ? m_syncAccount.pubkey : QString();
 }
 
-void Backend::markReadsPending(Store &store, const QString &pubkey) {
-    // Failing only when the account changed meanwhile, as then the read is
+QString Backend::subscriptionsPublishedFor() const {
+    return m_storeOpen ? m_syncAccount.pubkey : QString();
+}
+
+void Backend::markPending(Store &store, const QString &pubkey, int kind) {
+    // Failing only when the account changed meanwhile, as then the change is
     // not this account's to publish, or with the library, which the window
     // says when it marks the kind again.
     if (!pubkey.isEmpty())
-        store.markPublishPending(pubkey, publishBit(Sync::readStatusKind), true);
+        store.markPublishPending(pubkey, publishBit(kind), true);
 }
 
 void Backend::schedulePublish(int kind) {
@@ -2204,28 +2223,34 @@ void Backend::importFrom(const QUrl &url) {
     if (!m_storeOpen)
         return;
     setStatus(tr("Importing %1…").arg(QFileInfo(path).fileName()));
-    onWorker<Library::Import>([path](Store &store) { return Library::importFile(store, path); },
-                              [this](const Library::Import &result) {
-                                  // The import is one transaction, so a failed
-                                  // one added nothing to reload or fetch.
-                                  if (!result.error.isEmpty()) {
-                                      setStatus(tr("Cannot import: %1").arg(result.error), true);
-                                      return;
-                                  }
-                                  reloadLibrary();
-                                  setStatus(tr("Imported %n feeds (%1 already subscribed, %2 not supported yet)",
-                                               nullptr, result.added)
-                                                .arg(result.skipped)
-                                                .arg(result.unsupported));
-                                  emit imported();
-                                  if (result.added == 0)
-                                      return;
-                                  schedulePublish(Sync::subscriptionsKind);
-                                  if (m_refreshing)
-                                      m_fetchNewFeeds = true;
-                                  else
-                                      refreshAll();
-                              });
+    onWorker<Library::Import>(
+        [path, pending = subscriptionsPublishedFor()](Store &store) {
+            const Library::Import result = Library::importFile(store, path);
+            if (result.error.isEmpty() && result.added > 0)
+                markPending(store, pending, Sync::subscriptionsKind);
+            return result;
+        },
+        [this](const Library::Import &result) {
+            // The import is one transaction, so a failed one added nothing to
+            // reload or fetch.
+            if (!result.error.isEmpty()) {
+                setStatus(tr("Cannot import: %1").arg(result.error), true);
+                return;
+            }
+            reloadLibrary();
+            setStatus(tr("Imported %n feeds (%1 already subscribed, %2 not supported yet)",
+                         nullptr, result.added)
+                          .arg(result.skipped)
+                          .arg(result.unsupported));
+            emit imported();
+            if (result.added == 0)
+                return;
+            schedulePublish(Sync::subscriptionsKind);
+            if (m_refreshing)
+                m_fetchNewFeeds = true;
+            else
+                refreshAll();
+        });
 }
 
 void Backend::exportTo(const QUrl &url) {
