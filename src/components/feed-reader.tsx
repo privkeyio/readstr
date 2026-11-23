@@ -43,6 +43,7 @@ import {
   getSyncRelays,
 } from '@/lib/nostr-sync'
 import {
+  coverNewFeedsWithReadList,
   newReadSyncSession,
   nextReadSyncRetryDelay,
   publishReadStatusIfChanged,
@@ -50,6 +51,7 @@ import {
   readSyncAllowed,
   READ_SYNC_PUBLISH_DELAY_MS,
   READ_SYNC_RETRY_MIN_MS,
+  type ReadListServer,
   withdrawReadStatus,
 } from '@/lib/read-sync'
 import type { UnsignedEvent } from 'nostr-tools'
@@ -67,6 +69,15 @@ const MAX_AUTO_MARK_ATTEMPTS = 3
 const AUTO_MARK_RETRY_FALLBACK_MS = 60_000
 // Quiet period after the last mark read/unread before refetching feed data.
 const FEED_DATA_REFRESH_DELAY_MS = 400
+
+// Quiet spell before checking for feeds the pulled read list was never
+// applied to. Feeds refetch in bursts (an import, a run of reads), and one
+// check per burst is enough.
+const READ_SYNC_COVER_DELAY_MS = 3_000
+// Every read refetches the feeds, so a refetch asks for a check at most this
+// often; a subscribe, an import or a pull asks directly. This keeps an active
+// reader well inside the server's budget for the check.
+const READ_SYNC_COVER_REFETCH_MIN_MS = 60_000
 
 // The tRPC route's 429 is plain JSON, so the TRPCClientError carries no code,
 // but its meta keeps the raw Response and with it the Retry-After header.
@@ -156,6 +167,13 @@ export function FeedReader() {
   const readSyncRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const readSyncRetryDelayRef = useRef(READ_SYNC_RETRY_MIN_MS)
   const readSyncDepsRef = useRef({ canSign, npub: user?.npub, signEventOrThrow })
+  // One timer serves the debounced cover check and its retry. While it is a
+  // retry (backoff), feeds refetches do not move it earlier.
+  const readSyncCoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const readSyncCoverBackoffRef = useRef(false)
+  // Imports in progress: each feed they subscribe refetches the feeds, and one
+  // cover check after the import is cheaper than one per feed.
+  const readSyncImportingRef = useRef(0)
   const [readSyncTick, setReadSyncTick] = useState(0)
   
   // Mobile responsive state
@@ -267,7 +285,7 @@ export function FeedReader() {
     return undefined
   }, [organizationMode, selectedCategoryId, selectedTags])
   
-  const { data: feedsData = [], isLoading: isFeedsLoading, isFetched: isFeedsFetched, error: feedsQueryError } = api.feed.getFeeds.useQuery(
+  const { data: feedsData = [], dataUpdatedAt: feedsUpdatedAt, isLoading: isFeedsLoading, isFetched: isFeedsFetched, error: feedsQueryError } = api.feed.getFeeds.useQuery(
     getFeedsInput,
     {
       enabled: !!user && !!user.npub,
@@ -448,6 +466,7 @@ export function FeedReader() {
   const subscribeFeedMutation = api.feed.subscribeFeed.useMutation({
     onSuccess: () => {
       invalidateFeedData()
+      scheduleReadSyncCover()
       setShowAddFeed(false)
       setFeedError('')
       // Auto-export after adding a feed
@@ -563,6 +582,12 @@ export function FeedReader() {
     readSyncRetryTimerRef.current = null
   }
 
+  const clearReadSyncCover = () => {
+    if (readSyncCoverTimerRef.current) clearTimeout(readSyncCoverTimerRef.current)
+    readSyncCoverTimerRef.current = null
+    readSyncCoverBackoffRef.current = false
+  }
+
   // Sync state belongs to one account. On a switch, start over so the new
   // account pulls before it publishes and never publishes the old one's list;
   // work still queued for the old account sees the session's npub and stops.
@@ -578,6 +603,7 @@ export function FeedReader() {
     if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
     readSyncTimerRef.current = null
     clearReadSyncRetry()
+    clearReadSyncCover()
     readSyncRetryDelayRef.current = READ_SYNC_RETRY_MIN_MS
   }, [user?.npub])
 
@@ -640,6 +666,9 @@ export function FeedReader() {
       if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
       if (readSyncRetryTimerRef.current) clearTimeout(readSyncRetryTimerRef.current)
       readSyncRetryTimerRef.current = null
+      if (readSyncCoverTimerRef.current) clearTimeout(readSyncCoverTimerRef.current)
+      readSyncCoverTimerRef.current = null
+      readSyncCoverBackoffRef.current = false
     }
   }, [])
 
@@ -785,6 +814,7 @@ export function FeedReader() {
   })
 
   const markReadByGuidsMutation = api.feed.markReadByGuids.useMutation()
+  const markReadListAppliedMutation = api.feed.markReadListApplied.useMutation()
   
   const addFavoriteMutation = api.feed.addFavorite.useMutation({
     onSuccess: invalidateFeedData,
@@ -1239,6 +1269,70 @@ export function FeedReader() {
     }
   }, [])
 
+  // What the pull and the cover run share: the signed-in account, read
+  // through the ref so a run sees the current signer, and the server calls.
+  const readSyncAuth = () => ({
+    canSign: () => readSyncDepsRef.current.canSign,
+    npub: () => readSyncDepsRef.current.npub,
+  })
+  const readSyncServer = (): ReadListServer => ({
+    markRead: (guids, feedIds) => markReadByGuidsMutation.mutateAsync(feedIds ? { guids, feedIds } : { guids }),
+    // Never from the cache: the answer changes as feeds are covered.
+    getUncovered: () => utils.feed.getReadSyncUncoveredFeeds.fetch(undefined, { staleTime: 0, cacheTime: 0 }),
+    markApplied: (feedIds) => markReadListAppliedMutation.mutateAsync({ feedIds }),
+    onApplied: () => {
+      invalidateFeedData()
+      void utils.feed.getCategoriesWithUnread.invalidate()
+    },
+  })
+
+  // A pulled key whose feed was not subscribed yet matched nothing, so the
+  // list is applied to feeds subscribed since, wherever they were added (add
+  // feed, OPML or Nostr import, the subscription sync inside getFeeds, another
+  // browser). The server says which feeds are uncovered, so this needs neither
+  // the filtered feed list nor any state in this browser. It waits for the
+  // session's pull, and a pull starting cancels it, since the pull applies the
+  // list to every feed and checks again when it is done.
+  const runReadSyncCover = () => {
+    readSyncCoverTimerRef.current = null
+    readSyncCoverBackoffRef.current = false
+    if (!readSyncReadyRef.current) return
+    const session = readSyncSessionRef.current
+    void coverNewFeedsWithReadList({
+      ...readSyncAuth(),
+      ...readSyncServer(),
+      isCancelled: () =>
+        readSyncUnmountedRef.current || readSyncSessionRef.current !== session || readSyncPullingRef.current,
+      session,
+    }).then((retryIn) => {
+      if (retryIn == null || readSyncUnmountedRef.current || readSyncSessionRef.current !== session) return
+      const { canSign: signer, npub } = readSyncDepsRef.current
+      if (!readSyncAllowed(signer, npub)) return
+      if (readSyncCoverTimerRef.current) clearTimeout(readSyncCoverTimerRef.current)
+      readSyncCoverBackoffRef.current = true
+      readSyncCoverTimerRef.current = setTimeout(runReadSyncCover, retryIn)
+    })
+  }
+
+  // Before the session's pull there is nothing to check: the pull applies the
+  // list to every feed and schedules a check when it is done.
+  const scheduleReadSyncCover = (delay = READ_SYNC_COVER_DELAY_MS) => {
+    if (!readSyncReadyRef.current || readSyncCoverBackoffRef.current || readSyncImportingRef.current > 0) return
+    if (readSyncCoverTimerRef.current) clearTimeout(readSyncCoverTimerRef.current)
+    readSyncCoverTimerRef.current = setTimeout(runReadSyncCover, delay)
+  }
+
+  // Every feeds fetch may bring a new subscription (getFeeds also syncs the
+  // subscription list), so it asks for a check; only its timing is used, not
+  // the filtered feeds it returned.
+  const readSyncCoverRefetchAtRef = useRef(0)
+  useEffect(() => {
+    if (!feedsUpdatedAt || feedsUpdatedAt - readSyncCoverRefetchAtRef.current < READ_SYNC_COVER_REFETCH_MIN_MS) return
+    readSyncCoverRefetchAtRef.current = feedsUpdatedAt
+    scheduleReadSyncCover()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [feedsUpdatedAt])
+
   // Pull read status once per session after feeds load, and again when the
   // setting is turned on (readSyncTick), which then publishes once.
   useEffect(() => {
@@ -1253,15 +1347,10 @@ export function FeedReader() {
     readSyncPublishAfterPullRef.current = false
 
     void pullReadStatus({
-      canSign: () => readSyncDepsRef.current.canSign,
-      npub: () => readSyncDepsRef.current.npub,
+      ...readSyncAuth(),
+      ...readSyncServer(),
       isCancelled: () => readSyncUnmountedRef.current || readSyncSessionRef.current !== session,
       session,
-      markRead: (guids) => markReadByGuidsMutation.mutateAsync({ guids }),
-      onApplied: () => {
-        invalidateFeedData()
-        void utils.feed.getCategoriesWithUnread.invalidate()
-      },
     }).then((pulled) => {
       if (readSyncSessionRef.current === session) readSyncPullingRef.current = false
       // A pull for an account that is no longer signed in leaves the new
@@ -1292,6 +1381,7 @@ export function FeedReader() {
       }
       readSyncRetryDelayRef.current = READ_SYNC_RETRY_MIN_MS
       readSyncReadyRef.current = true
+      scheduleReadSyncCover(0)
       if (publishAfter || readSyncPendingRef.current) {
         readSyncPendingRef.current = false
         void publishReadSyncNow()
@@ -1319,6 +1409,8 @@ export function FeedReader() {
     if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
     readSyncTimerRef.current = null
     clearReadSyncRetry()
+    clearReadSyncCover()
+    readSyncSessionRef.current.coverRetryDelay = READ_SYNC_RETRY_MIN_MS
     readSyncPendingRef.current = false
     // Turning it off replaces the published list with an empty one.
     void withdrawReadStatus({
@@ -1330,7 +1422,19 @@ export function FeedReader() {
   }
 
   // Handle importing feeds from Nostr sync
-  const handleImportFeeds = async (feedsToImport: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }>) => {
+  type ImportedFeed = { type: 'RSS' | 'NOSTR'; url: string; tags?: string[]; category?: { name: string; color?: string; icon?: string } }
+  const handleImportFeeds = async (feedsToImport: ImportedFeed[]) => {
+    readSyncImportingRef.current++
+    try {
+      await importFeeds(feedsToImport)
+    } finally {
+      readSyncImportingRef.current--
+      // Feeds imported before a failure are subscribed too, so check either way.
+      scheduleReadSyncCover()
+    }
+  }
+
+  const importFeeds = async (feedsToImport: ImportedFeed[]) => {
     // First, create a map of category names to IDs for existing categories
     const categoryMap = new Map<string, string>()
     for (const cat of categories) {

@@ -16,6 +16,7 @@ import {
   buildPublishedReadList,
   chunkGuidsForRequest,
   cleanPulledGuids,
+  coverNewFeedsWithReadList,
   MARK_READ_REQUEST_BYTES,
   MAX_PUBLISHED_READ_CONTENT,
   newReadSyncSession,
@@ -23,6 +24,7 @@ import {
   publishReadStatusIfChanged,
   pullReadStatus,
   READ_STATUS_D_TAG,
+  READ_SYNC_FEED_IDS_MAX,
   READ_SYNC_RETRY_MAX_MS,
   READ_SYNC_RETRY_MIN_MS,
   readSyncAllowed,
@@ -144,6 +146,21 @@ describe('chunkGuidsForRequest', () => {
       }
     }
   })
+
+  it('keeps a call scoped to the most and longest feed ids under the route cap too', async () => {
+    setReadSyncEnabled(true)
+    const worst = Array.from({ length: 2000 }, (_, i) => `${i}`.padEnd(MAX_GUID_LEN, '\u0001'))
+    const feedIds = Array.from({ length: READ_SYNC_FEED_IDS_MAX }, (_, i) => `${i}`.padEnd(64, 'x'))
+    const server = fakeServer(feedIds)
+    const session = { ...newReadSyncSession(NPUB), pulled: true, remote: worst }
+    await expect(coverNewFeedsWithReadList({ canSign: () => true, npub: () => NPUB, session, ...server })).resolves.toBeNull()
+    expect(server.markRead.mock.calls.flatMap(([part]) => part)).toEqual(worst)
+    for (const [part, scope] of server.markRead.mock.calls) {
+      expect(scope).toEqual(feedIds)
+      const body = JSON.stringify({ 0: superjson.serialize({ guids: part, feedIds: scope }) })
+      expect(new TextEncoder().encode(body).length + 200 * 45).toBeLessThan(MAX_TRPC_BODY_BYTES)
+    }
+  })
 })
 
 describe('readStatusListSchema caps', () => {
@@ -199,6 +216,8 @@ describe('pullReadStatus', () => {
     npub: () => NPUB,
     session,
     onApplied: vi.fn(),
+    getUncovered: vi.fn(async () => ({ feedIds: [] as string[], more: false })),
+    markApplied: vi.fn(async () => {}),
   })
 
   it('does nothing when the setting is off or the user cannot sign', async () => {
@@ -561,6 +580,255 @@ describe('publishReadStatusIfChanged', () => {
     ])
     expect(publish).toHaveBeenCalledTimes(2)
     expect(maxActive).toBe(1)
+  })
+})
+
+describe('pullReadStatus and covered feeds', () => {
+  const fresh = (itemGuids: string[], isFresh = true) =>
+    vi.fn(async (): Promise<ReadStatusFetchResult> => ({ success: true, found: true, data: { itemGuids }, createdAt: 100, fresh: isFresh, complete: true }))
+  const auth = { canSign: () => true, npub: () => NPUB }
+
+  it('marks applied the feeds uncovered when a fresh pull starts, not ones subscribed during it', async () => {
+    setReadSyncEnabled(true)
+    const guids = Array.from({ length: 3000 }, (_, i) => `https://example.com/${'p'.repeat(40)}/${i}`)
+    const server = fakeServer(['old', 'new-before'], ['old'])
+    server.markRead.mockImplementation(async () => {
+      // A feed subscribed while the chunks go out misses the earlier ones.
+      if (!server.subscribed.includes('mid-pull')) server.subscribed.push('mid-pull')
+      return { marked: 0 }
+    })
+    const session = newReadSyncSession(NPUB)
+    await expect(pullReadStatus({ ...auth, ...server, session, fetchRemote: fresh(guids) })).resolves.toBe(true)
+    // The pull applies to every feed, unscoped.
+    expect(server.markRead.mock.calls.map((call) => call.length)).toEqual(chunkGuidsForRequest(guids).map(() => 1))
+    expect(server.markApplied).toHaveBeenCalledOnce()
+    expect(server.markApplied).toHaveBeenCalledWith(['new-before'])
+    expect([...server.applied].sort()).toEqual(['new-before', 'old'])
+
+    // The cover run then gives the list to the feed subscribed mid-pull.
+    server.markRead.mockClear()
+    await expect(coverNewFeedsWithReadList({ ...auth, ...server, session })).resolves.toBeNull()
+    expect(server.markRead).toHaveBeenCalledTimes(chunkGuidsForRequest(guids, MARK_READ_REQUEST_BYTES - JSON.stringify(['mid-pull']).length).length)
+    expect(new Set(server.markRead.mock.calls.map(([, scope]) => JSON.stringify(scope)))).toEqual(new Set(['["mid-pull"]']))
+    expect(server.applied.has('mid-pull')).toBe(true)
+  })
+
+  it('marks nothing applied for a stale event, and still applies when the snapshot fails', async () => {
+    setReadSyncEnabled(true)
+    const server = fakeServer(['f1'])
+    await pullReadStatus({ ...auth, ...server, session: newReadSyncSession(NPUB), fetchRemote: fresh(['a'], false) })
+    expect(server.getUncovered).not.toHaveBeenCalled()
+    expect(server.markApplied).not.toHaveBeenCalled()
+
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    server.getUncovered.mockRejectedValueOnce(new Error('429'))
+    const session = newReadSyncSession(NPUB)
+    await expect(pullReadStatus({ ...auth, ...server, session, fetchRemote: fresh(['a']) })).resolves.toBe(true)
+    expect(server.markRead).toHaveBeenCalledWith(['a'])
+    expect(server.markApplied).not.toHaveBeenCalled()
+    expect(storage.data.get(WATERMARK)).toBe('100')
+  })
+
+  it('never throws when an opts callback does', async () => {
+    setReadSyncEnabled(true)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const boom = () => {
+      throw new Error('boom')
+    }
+    const server = fakeServer(['f1'])
+    const session = newReadSyncSession(NPUB)
+    for (const broken of [{ isCancelled: boom }, { canSign: boom }, { npub: boom }]) {
+      await expect(pullReadStatus({ ...auth, ...server, session, fetchRemote: fresh(['a']), ...broken })).resolves.toBe(false)
+    }
+  })
+})
+
+// The account's subscriptions as the server keeps them: which feeds are
+// subscribed and which ones the read list was applied to.
+function fakeServer(subscribed: string[], appliedAlready: string[] = []) {
+  const applied = new Set(appliedAlready)
+  const server = {
+    subscribed,
+    applied,
+    markRead: vi.fn(async (_guids: string[], _feedIds?: string[]): Promise<unknown> => ({ marked: 0 })),
+    getUncovered: vi.fn(async () => {
+      const feedIds = server.subscribed.filter((feedId) => !applied.has(feedId))
+      return { feedIds: feedIds.slice(0, READ_SYNC_FEED_IDS_MAX), more: feedIds.length > READ_SYNC_FEED_IDS_MAX }
+    }),
+    markApplied: vi.fn(async (feedIds: string[]) => {
+      for (const feedId of feedIds) if (server.subscribed.includes(feedId)) applied.add(feedId)
+    }),
+    onApplied: vi.fn(),
+  }
+  return server
+}
+
+describe('coverNewFeedsWithReadList', () => {
+  const pulled = (remote: string[] | null = ['a', 'b'], npub = NPUB) => ({ ...newReadSyncSession(npub), pulled: true, remote })
+  const run = (server: ReturnType<typeof fakeServer>, session = pulled(), extra: Record<string, unknown> = {}) =>
+    coverNewFeedsWithReadList({ canSign: () => true, npub: () => session.npub, session, ...server, ...extra })
+  const bigList = () => Array.from({ length: 3000 }, (_, i) => `https://example.com/${'p'.repeat(40)}/${i}`)
+
+  it('applies the list only to uncovered feeds, then marks them applied', async () => {
+    setReadSyncEnabled(true)
+    const server = fakeServer(['covered', 'f2', 'f3'], ['covered'])
+    await expect(run(server)).resolves.toBeNull()
+    expect(server.markRead).toHaveBeenCalledOnce()
+    expect(server.markRead).toHaveBeenCalledWith(['a', 'b'], ['f2', 'f3'])
+    expect(server.markApplied).toHaveBeenCalledWith(['f2', 'f3'])
+    expect(server.onApplied).toHaveBeenCalledOnce()
+    expect([...server.applied].sort()).toEqual(['covered', 'f2', 'f3'])
+
+    // Covered now: the next check sends nothing but the one lookup.
+    await run(server)
+    expect(server.getUncovered).toHaveBeenCalledTimes(2)
+    expect(server.markRead).toHaveBeenCalledOnce()
+    expect(server.markApplied).toHaveBeenCalledOnce()
+  })
+
+  it('leaves a feed another browser covered alone, so its unreads stay unread', async () => {
+    setReadSyncEnabled(true)
+    const server = fakeServer(['old'], ['old'])
+    const browserX = pulled(['k'])
+    const browserY = pulled(['k'])
+    // The user subscribes F, browser Y covers it, then marks F:k unread.
+    server.subscribed.push('F')
+    await run(server, browserY)
+    expect(server.markRead).toHaveBeenCalledWith(['k'], ['F'])
+    server.markRead.mockClear()
+    // Browser X, which never saw F before, checks later and sends nothing.
+    await expect(run(server, browserX)).resolves.toBeNull()
+    expect(server.markRead).not.toHaveBeenCalled()
+    expect(server.markApplied).toHaveBeenCalledOnce()
+  })
+
+  it('marks uncovered feeds applied without sending anything when there is no list', async () => {
+    setReadSyncEnabled(true)
+    for (const remote of [null, []]) {
+      const server = fakeServer(['f1'])
+      await expect(run(server, pulled(remote))).resolves.toBeNull()
+      expect(server.markRead).not.toHaveBeenCalled()
+      expect(server.markApplied).toHaveBeenCalledWith(['f1'])
+      expect(server.onApplied).not.toHaveBeenCalled()
+    }
+  })
+
+  it('does not even look before the pull, or when sync is not allowed', async () => {
+    const notPulled = pulled()
+    notPulled.pulled = false
+    const cases: Array<[ReturnType<typeof pulled>, Record<string, unknown>]> = [
+      [pulled(), {}], // the setting is off
+      [pulled(), { canSign: () => false }],
+      [pulled(), { npub: () => 'npub1other' }],
+      [pulled(), { isCancelled: () => true }],
+      [notPulled, {}],
+    ]
+    for (const [i, [session, extra]] of cases.entries()) {
+      if (i === 1) setReadSyncEnabled(true)
+      const server = fakeServer(['f1'])
+      await expect(run(server, session, extra)).resolves.toBeNull()
+      expect(server.getUncovered).not.toHaveBeenCalled()
+    }
+  })
+
+  it('stops between steps when cancelled or the account changes, leaving the feeds uncovered', async () => {
+    setReadSyncEnabled(true)
+    const steps = ['getUncovered', 'markRead', 'markApplied'] as const
+    for (const step of steps) {
+      for (const stop of ['cancel', 'account'] as const) {
+        const server = fakeServer(['f1'])
+        const state = { cancelled: false, npub: NPUB }
+        const original = server[step].getMockImplementation()!
+        server[step].mockImplementation((async (...args: never[]) => {
+          const result = await (original as (...a: never[]) => Promise<unknown>)(...args)
+          if (stop === 'cancel') state.cancelled = true
+          else state.npub = 'npub1other'
+          return result
+        }) as never)
+        const session = pulled(bigList())
+        const result = await run(server, session, { isCancelled: () => state.cancelled, npub: () => state.npub })
+        expect(result).toBeNull()
+        expect(server.onApplied).not.toHaveBeenCalled()
+        if (step === 'getUncovered') expect(server.markRead).not.toHaveBeenCalled()
+        if (step === 'markRead') {
+          expect(server.markRead).toHaveBeenCalledOnce()
+          expect(server.markApplied).not.toHaveBeenCalled()
+          expect(server.applied.has('f1')).toBe(false)
+        }
+      }
+    }
+  })
+
+  it('keeps the feeds uncovered on failure and backs off exponentially, then resets', async () => {
+    setReadSyncEnabled(true)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const server = fakeServer(['f1'])
+    const session = pulled()
+    server.markRead.mockRejectedValue(new Error('429'))
+    await expect(run(server, session)).resolves.toBe(READ_SYNC_RETRY_MIN_MS)
+    await expect(run(server, session)).resolves.toBe(READ_SYNC_RETRY_MIN_MS * 2)
+    await expect(run(server, session)).resolves.toBe(READ_SYNC_RETRY_MIN_MS * 4)
+    expect(server.applied.has('f1')).toBe(false)
+    expect(server.markApplied).not.toHaveBeenCalled()
+
+    server.getUncovered.mockRejectedValueOnce(new Error('429'))
+    await expect(run(server, session)).resolves.toBe(READ_SYNC_RETRY_MIN_MS * 8)
+    server.markApplied.mockRejectedValueOnce(new Error('429'))
+    server.markRead.mockResolvedValue({ marked: 1 })
+    await expect(run(server, session)).resolves.toBe(READ_SYNC_RETRY_MIN_MS * 16)
+    expect(server.applied.has('f1')).toBe(false)
+
+    await expect(run(server, session)).resolves.toBeNull()
+    expect(server.applied.has('f1')).toBe(true)
+    expect(session.coverRetryDelay).toBe(READ_SYNC_RETRY_MIN_MS)
+    for (let i = 0; i < 20; i++) session.coverRetryDelay = nextReadSyncRetryDelay(session.coverRetryDelay)
+    expect(session.coverRetryDelay).toBe(READ_SYNC_RETRY_MAX_MS)
+  })
+
+  it('never throws when an opts callback does, and reports it as a failure', async () => {
+    setReadSyncEnabled(true)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const boom = () => {
+      throw new Error('boom')
+    }
+    for (const broken of [{ isCancelled: boom }, { canSign: boom }, { npub: boom }, { onApplied: boom }]) {
+      const session = pulled()
+      await expect(run(fakeServer(['f1']), session, broken)).resolves.toBe(READ_SYNC_RETRY_MIN_MS)
+      expect(session.covering).toBe(false)
+    }
+  })
+
+  it('never runs twice at once, and runs again for a feed subscribed meanwhile', async () => {
+    setReadSyncEnabled(true)
+    const server = fakeServer(['f1'])
+    const session = pulled()
+    let inFlight = 0
+    let release!: () => void
+    server.markRead.mockImplementation(async () => {
+      inFlight++
+      expect(inFlight).toBe(1)
+      if (server.markRead.mock.calls.length === 1) await new Promise<void>((resolve) => (release = resolve))
+      inFlight--
+      return { marked: 1 }
+    })
+    const first = run(server, session)
+    await vi.waitFor(() => expect(server.markRead).toHaveBeenCalledOnce())
+    server.subscribed.push('f2')
+    await expect(run(server, session)).resolves.toBeNull()
+    expect(server.getUncovered).toHaveBeenCalledOnce()
+    release()
+    await first
+    expect(server.markRead.mock.calls.map(([, scope]) => scope)).toEqual([['f1'], ['f2']])
+    expect([...server.applied]).toEqual(['f1', 'f2'])
+  })
+
+  it('pages through more uncovered feeds than one call carries', async () => {
+    setReadSyncEnabled(true)
+    const feeds = Array.from({ length: READ_SYNC_FEED_IDS_MAX + 3 }, (_, i) => `f${i}`)
+    const server = fakeServer(feeds)
+    await expect(run(server)).resolves.toBeNull()
+    expect(server.markApplied.mock.calls.map(([ids]) => ids.length)).toEqual([READ_SYNC_FEED_IDS_MAX, 3])
+    expect(server.applied.size).toBe(feeds.length)
   })
 })
 
