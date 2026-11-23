@@ -467,6 +467,45 @@ describe('feed.getFeeds applying a kind 30404 subscription list', () => {
       expect(rows[1]).toMatchObject({ deletedAt: null, readListAppliedAt: APPLIED, tags: ['old'] })
     })
 
+    it('brings back only the video feed when the list keeps the videos and records the main feed as deleted', async () => {
+      const feeds = [mainFeed, videoFeed]
+      const rows = [row('main', { deletedAt: BEFORE }), row('video', { deletedAt: BEFORE })]
+      const db = fakeDb(feeds, rows)
+      remoteList({ nostr: [NPUB], deleted: [NPUB], tags: { [NPUB]: ['n', 'video'] } })
+
+      await sync(db)
+
+      expect(feeds).toHaveLength(2)
+      expect(rows).toHaveLength(2)
+      expect(rows[0]).toMatchObject({ deletedAt: BEFORE, readListAppliedAt: APPLIED, tags: ['old'] })
+      expect(rows[1]).toMatchObject({ deletedAt: null, readListAppliedAt: null, tags: ['n', 'video'] })
+    })
+
+    it('does not create the main feed when the list records it as deleted and no video row can return', async () => {
+      const feeds: Feed[] = []
+      const rows: Row[] = []
+      const db = fakeDb(feeds, rows)
+      remoteList({ nostr: [NPUB], deleted: [NPUB] })
+
+      await sync(db)
+
+      expect(feeds).toEqual([])
+      expect(rows).toEqual([])
+    })
+
+    it('brings back both feeds when the list has the npub in nostr only', async () => {
+      const rows = [row('main', { deletedAt: BEFORE }), row('video', { deletedAt: BEFORE })]
+      const db = fakeDb([mainFeed, videoFeed], rows)
+      remoteList({ nostr: [NPUB] })
+
+      await sync(db)
+
+      expect(rows.map((r) => [r.feedId, r.deletedAt, r.readListAppliedAt, r.tags])).toEqual([
+        ['main', null, null, []],
+        ['video', null, null, ['video']],
+      ])
+    })
+
     it('keeps the main feed unsubscribed when the list records the npub as deleted', async () => {
       const rows = [row('main', { deletedAt: BEFORE }), row('video')]
       const db = fakeDb([mainFeed, videoFeed], rows)
@@ -476,6 +515,45 @@ describe('feed.getFeeds applying a kind 30404 subscription list', () => {
 
       expect(rows[0]).toMatchObject({ deletedAt: BEFORE })
     })
+  })
+
+  it('retries the list on the next sync when a revive batch fails', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const feeds: Feed[] = []
+    const rows: Row[] = []
+    const urls: string[] = []
+    for (let i = 0; i < 700; i++) {
+      const url = `https://f${i}.example/feed.xml`
+      urls.push(url)
+      feeds.push(rss(`f${i}`, url))
+      rows.push(row(`f${i}`, { deletedAt: BEFORE }))
+    }
+    const db = fakeDb(feeds, rows)
+    let prefs: Record<string, unknown> | null = null
+    db.userPreference.findUnique.mockImplementation(async () => prefs as never)
+    db.userPreference.upsert.mockImplementation(async (args: { create?: object; update: object }) => {
+      prefs = prefs ? { ...prefs, ...args.update } : { ...args.create }
+      return args
+    })
+    const updateMany = db.subscription.updateMany.getMockImplementation()!
+    db.subscription.updateMany
+      .mockImplementationOnce(updateMany)
+      .mockImplementationOnce(async () => { throw new Error('connection reset') })
+    remoteList({ rss: urls })
+
+    await sync(db)
+
+    expect(rows.filter((r) => r.deletedAt === null)).toHaveLength(500)
+    expect(errors).toHaveBeenCalled()
+    expect(db.userPreference.upsert).toHaveBeenCalledTimes(1)
+    expect(db.userPreference.upsert.mock.calls[0]![0]).toHaveProperty('update.updatedAt')
+    expect(db.userPreference.upsert.mock.calls[0]![0]).not.toHaveProperty('update.lastSubscriptionSyncCreatedAt')
+    expect(db.userPreference.upsert.mock.calls[0]![0]).not.toHaveProperty('create.lastSubscriptionSyncCreatedAt')
+
+    await sync(db)
+
+    expect(rows.every((r) => r.deletedAt === null && r.readListAppliedAt === null)).toBe(true)
+    expect(prefs).toMatchObject({ lastSubscriptionSyncCreatedAt: BigInt(LIST_AT) })
   })
 
   it.each([
@@ -567,6 +645,21 @@ describe('fetchSubscriptionListFromServer created_at validation', () => {
     const result = await actualSync.fetchSubscriptionListFromServer(PUBKEY, ['wss://relay.invalid'])
 
     expect(result).toMatchObject({ success: true, createdAt: skewed, data: { rss: [URL_B] } })
+  })
+})
+
+describe('normalizeUrlForComparison', () => {
+  const norm = actualSync.normalizeUrlForComparison
+
+  it('keeps a non-default port so feeds on different ports stay distinct', () => {
+    expect(norm('https://a.example:8000/feed.xml')).not.toBe(norm('https://a.example:9000/feed.xml'))
+    expect(norm('https://a.example:8000/feed.xml')).not.toBe(norm(URL_A))
+    expect(norm('https://A.EXAMPLE:8000/feed.xml/')).toBe(norm('http://a.example:8000/feed.xml'))
+  })
+
+  it('treats a default port as no port', () => {
+    expect(norm('https://a.example:443/feed.xml')).toBe(norm(URL_A))
+    expect(norm('http://a.example:80/feed.xml')).toBe(norm(URL_A))
   })
 })
 

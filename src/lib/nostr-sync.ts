@@ -578,8 +578,8 @@ export function normalizeUrlForComparison(url: string): string {
     const urlObj = new URL(url.trim())
     // Remove trailing slash from pathname
     let pathname = urlObj.pathname.replace(/\/+$/, '')
-    // Lowercase the hostname
-    const hostname = urlObj.hostname.toLowerCase()
+    // Lowercase the host, keeping a non-default port (URL drops 80/443)
+    const hostname = urlObj.host.toLowerCase()
     // Sort and normalize search params
     urlObj.searchParams.sort()
     const search = urlObj.searchParams.toString()

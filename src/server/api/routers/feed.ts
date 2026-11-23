@@ -393,6 +393,7 @@ export const feedRouter = createTRPCRouter({
               for (const rssUrl of remoteList.rss) queueFeed('RSS', rssUrl, rssKey(rssUrl))
               for (const npub of remoteList.nostr) queueFeed('NOSTR', npub, npubKey(npub))
 
+              let reviveFailed = false
               if (remoteIsFresh && feedsToAdd.length > 0) {
                 const categoryIds = new Map<string, string>()
                 // Revivals batched by the tags and category they get
@@ -405,6 +406,11 @@ export const feedRouter = createTRPCRouter({
                 }
 
                 for (const feed of feedsToAdd) {
+                  // An npub in both nostr and deleted means the user kept the
+                  // videos but dropped the main feed, so only the video comes back.
+                  const videoOnly = feed.type === 'NOSTR' && remoteDeletedNpubs.has(feed.key)
+                  const video = feed.type === 'NOSTR' ? revivableVideo.get(feed.key) : undefined
+                  if (videoOnly && !video) continue
                   try {
                     // Handle category if present
                     let categoryId: string | undefined = feed.category ? categoryIds.get(feed.category.name) : undefined
@@ -441,11 +447,10 @@ export const feedRouter = createTRPCRouter({
 
                     // A revived row takes the list's tags and category, as a
                     // resubscribe takes the ones the user picks.
-                    const deleted = revivable.get(feed.key)
-                    if (deleted) {
-                      queueRevive(deleted.feedId, feed.tags, categoryId ?? null)
-                      const video = feed.type === 'NOSTR' ? revivableVideo.get(feed.key) : undefined
-                      if (video) queueRevive(video.feedId, [...feed.tags, 'video'], categoryId ?? null)
+                    const deleted = videoOnly ? undefined : revivable.get(feed.key)
+                    if (deleted || videoOnly) {
+                      if (deleted) queueRevive(deleted.feedId, feed.tags, categoryId ?? null)
+                      if (video) queueRevive(video.feedId, [...new Set([...feed.tags, 'video'])], categoryId ?? null)
                       continue
                     }
 
@@ -511,7 +516,8 @@ export const feedRouter = createTRPCRouter({
                 }
 
                 // The deletedAt condition makes each revive atomic: a row the
-                // user resubscribed to meanwhile is active and keeps its choices.
+                // user resubscribed to meanwhile is active and keeps its choices,
+                // and a retry of the same list skips the batches already done.
                 for (const { tags, categoryId, feedIds } of revives.values()) {
                   for (let i = 0; i < feedIds.length; i += REVIVE_BATCH_SIZE) {
                     try {
@@ -524,6 +530,7 @@ export const feedRouter = createTRPCRouter({
                         data: { ...REACTIVATE_SUBSCRIPTION, tags, categoryId },
                       })
                     } catch (e) {
+                      reviveFailed = true
                       console.error('❌ Auto-sync error reviving feeds:', e)
                     }
                   }
@@ -532,16 +539,18 @@ export const feedRouter = createTRPCRouter({
 
               // Update updatedAt manually to track last sync even if no feeds were added.
               // Advance the freshness watermark only for fresh events so older
-              // events are rejected later and cannot roll back state.
+              // events are rejected later and cannot roll back state, and not
+              // when a revive failed so the next sync retries the same list.
+              const advanceWatermark = remoteIsFresh && !reviveFailed
               await ctx.db.userPreference.upsert({
                 where: { userPubkey: ctx.nostrPubkey },
                 create: {
                   userPubkey: ctx.nostrPubkey,
-                  ...(remoteIsFresh ? { lastSubscriptionSyncCreatedAt: BigInt(remoteCreatedAt) } : {}),
+                  ...(advanceWatermark ? { lastSubscriptionSyncCreatedAt: BigInt(remoteCreatedAt) } : {}),
                 },
                 update: {
                   updatedAt: new Date(),
-                  ...(remoteIsFresh ? { lastSubscriptionSyncCreatedAt: BigInt(remoteCreatedAt) } : {}),
+                  ...(advanceWatermark ? { lastSubscriptionSyncCreatedAt: BigInt(remoteCreatedAt) } : {}),
                 },
               })
 
