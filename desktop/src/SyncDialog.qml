@@ -32,11 +32,13 @@ Dialog {
         close()
     }
 
+    // Asked unless the keyring has answered that it holds no key: while a
+    // check is out, or after one failed, a key may well be there.
     function askToStop() {
-        if (!backend.signingKeyStored)
+        if (backend.signingKeyChecked && !backend.signingKeyStored && !backend.signingBusy)
             return stopSyncing(false)
         confirmingStop = true
-        confirmation.forceActiveFocus()
+        removeKeyButton.forceActiveFocus()
     }
 
     function addKey() {
@@ -155,7 +157,7 @@ Dialog {
                 Label {
                     Layout.fillWidth: true
                     text: backend.signingKeyStored
-                          ? qsTr("Readstr can sign as this account: its key is in your keyring.")
+                          ? qsTr("A signing key for this account is stored in your keyring.")
                           : qsTr("Add this account's nsec so Readstr can sign as it. The key is kept only in your keyring.")
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
@@ -220,7 +222,8 @@ Dialog {
         }
 
         // Asked in place of the form, as there is no confirm dialog to
-        // borrow; Enter takes the default, removing the key.
+        // borrow. Removing the key is the default, focused first; Tab moves
+        // between the answers and Enter takes the focused one.
         ColumnLayout {
             id: confirmation
             objectName: "stopSyncConfirmation"
@@ -247,11 +250,13 @@ Dialog {
                     objectName: "keepKeyButton"
                     text: qsTr("Keep key")
                     flat: true
-                    focusPolicy: Qt.NoFocus
                     Material.roundedScale: theme.radius
+                    Keys.onReturnPressed: clicked()
+                    Keys.onEnterPressed: clicked()
                     onClicked: dialog.stopSyncing(false)
                 }
                 Button {
+                    id: removeKeyButton
                     objectName: "removeKeyButton"
                     text: qsTr("Remove key")
                     // Flat, as Material's raised fill is drawn through the
@@ -259,8 +264,9 @@ Dialog {
                     // flat and highlighted, it takes the accent color.
                     flat: true
                     highlighted: true
-                    focusPolicy: Qt.NoFocus
                     Material.roundedScale: theme.radius
+                    Keys.onReturnPressed: clicked()
+                    Keys.onEnterPressed: clicked()
                     onClicked: dialog.stopSyncing(true)
                 }
             }

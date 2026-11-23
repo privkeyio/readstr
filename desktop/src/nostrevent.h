@@ -29,6 +29,8 @@ struct NostrEvent {
     // as lowercase hex of the right length, and at most maxTags tags of at
     // most maxTagValues strings each, maxTagCharacters in all.
     static std::optional<NostrEvent> fromJson(const QJsonValue &value);
+    // Whether the tags are within the limits fromJson() holds them to.
+    bool tagsWithinLimits() const;
     // [0, pubkey, created_at, kind, tags, content] as NIP-01 serializes it,
     // the bytes whose SHA-256 is the id.
     QByteArray serialized() const;

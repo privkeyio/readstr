@@ -887,11 +887,13 @@ void Backend::setKeyStore(KeyStore *keyStore) {
     checkSigningKey();
 }
 
-void Backend::setSigning(bool stored, const QString &error) {
+void Backend::setSigning(bool stored, const QString &error, bool checked) {
     const bool busy = m_keyJobRunning || !m_keyJobs.isEmpty();
-    if (stored == m_signingKeyStored && busy == m_signingBusy && error == m_signingError)
+    if (stored == m_signingKeyStored && checked == m_signingKeyChecked && busy == m_signingBusy
+        && error == m_signingError)
         return;
     m_signingKeyStored = stored;
+    m_signingKeyChecked = checked;
     m_signingBusy = busy;
     m_signingError = error;
     emit signingChanged();
@@ -945,7 +947,7 @@ void Backend::runKeyJobs() {
 void Backend::resetSigning() {
     ++m_signingEpoch;
     dropSigner(tr("The sync account changed before the event was signed"));
-    setSigning(false, {});
+    setSigning(false, {}, false);
 }
 
 void Backend::dropSigner(const QString &error) {
@@ -976,7 +978,7 @@ void Backend::failPendingSigns(const QString &error, bool queuedToo) {
 void Backend::checkSigningKey() {
     const QString npub = m_syncAccount.npub;
     if (npub.isEmpty() || !m_keyStore)
-        return setSigning(false, {});
+        return setSigning(false, {}, true);
     queueKeyJob([this, npub, epoch = m_signingEpoch](const std::function<void()> &finished) {
         if (epoch != m_signingEpoch || !m_keyStore)
             return finished();
@@ -991,7 +993,7 @@ void Backend::checkSigningKey() {
                     self->m_signer.reset();
                     self->failPendingSigns(noKeyStored(npub), false);
                 }
-                self->setSigning(result.found, self->keyStoreError(result));
+                self->setSigning(result.found, self->keyStoreError(result), result.error == KeyStore::Error::None);
             }
             finished();
         });
@@ -1037,9 +1039,11 @@ bool Backend::addSigningKey(const QString &text) {
         if (epoch != m_signingEpoch || !m_keyStore)
             return finished();
         m_keyStore->store(npub, *key, [self = QPointer(this), epoch, finished](const KeyStore::Result &result) {
-            if (self && epoch == self->m_signingEpoch)
-                self->setSigning(result.error == KeyStore::Error::None || self->m_signingKeyStored,
-                                 self->keyStoreError(result));
+            if (self && epoch == self->m_signingEpoch) {
+                const bool stored = result.error == KeyStore::Error::None;
+                self->setSigning(stored || self->m_signingKeyStored, self->keyStoreError(result),
+                                 stored || self->m_signingKeyChecked);
+            }
             finished();
         });
         wipe(*key);
@@ -1063,7 +1067,8 @@ void Backend::forgetSigningKey() {
         m_keyStore->remove(npub, [self = QPointer(this), epoch, finished](const KeyStore::Result &result) {
             if (self && epoch == self->m_signingEpoch) {
                 const bool removed = result.error == KeyStore::Error::None;
-                self->setSigning(!removed && self->m_signingKeyStored, self->keyStoreError(result));
+                self->setSigning(!removed && self->m_signingKeyStored, self->keyStoreError(result),
+                                 removed || self->m_signingKeyChecked);
             }
             finished();
         });
@@ -1106,8 +1111,9 @@ void Backend::loadSigner() {
         if (load != m_signerLoad)
             return finished();
         // Every keyring call asked for before this one has answered, so
-        // whether a key is stored is known now.
-        if (!m_signingKeyStored || !m_keyStore) {
+        // whether a key is stored is known now, unless the last check
+        // failed: then the read itself finds out.
+        if (!m_keyStore || (m_signingKeyChecked && !m_signingKeyStored)) {
             m_loadingSigner = false;
             failPendingSigns(missing);
             return finished();
@@ -1121,21 +1127,24 @@ void Backend::loadSigner() {
                 // with it.
                 std::unique_ptr<LocalSigner> signer = result.found ? LocalSigner::create(result.secret) : nullptr;
                 if (result.error != KeyStore::Error::None) {
-                    // Shown in the dialog too, which would otherwise go on
-                    // saying the account can sign while every sign fails.
+                    // Shown in the dialog too, which would otherwise say
+                    // nothing of why every sign fails.
                     const QString error = self->keyStoreError(result);
                     self->setSigning(self->m_signingKeyStored, error);
                     self->failPendingSigns(error);
                 } else if (!result.found) {
-                    self->setSigning(false, {});
+                    self->setSigning(false, {}, true);
                     self->failPendingSigns(missing);
-                } else if (!signer || signer->pubkey() != pubkey) {
-                    self->failPendingSigns(
-                        tr("The key in the keyring is not the one for %1").arg(Nip19::shortNpub(npub, npub)));
                 } else {
-                    self->m_signer = std::move(signer);
-                    for (auto &[event, done] : std::exchange(self->m_pendingSigns, {}))
-                        self->handToSigner(event, std::move(done));
+                    self->setSigning(true, {}, true);
+                    if (!signer || signer->pubkey() != pubkey) {
+                        self->failPendingSigns(
+                            tr("The key in the keyring is not the one for %1").arg(Nip19::shortNpub(npub, npub)));
+                    } else {
+                        self->m_signer = std::move(signer);
+                        for (auto &[event, done] : std::exchange(self->m_pendingSigns, {}))
+                            self->handToSigner(event, std::move(done));
+                    }
                 }
             }
             finished();

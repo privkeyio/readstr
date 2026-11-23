@@ -77,6 +77,8 @@ std::pair<NostrEvent, QString> LocalSigner::signNow(const NostrEvent &event) con
     // an event the app itself, and so a relay, would take.
     if (event.kind < 0 || event.kind > 65535 || event.createdAt < 0 || event.createdAt > 1000000000000LL)
         return {{}, tr("Cannot sign this event: its kind or date is out of range")};
+    if (!event.tagsWithinLimits())
+        return {{}, tr("Cannot sign this event: it has too many tags or too much in them")};
     NostrEvent result = event;
     result.pubkey = m_pubkey;
     const QByteArray digest = QCryptographicHash::hash(result.serialized(), QCryptographicHash::Sha256);

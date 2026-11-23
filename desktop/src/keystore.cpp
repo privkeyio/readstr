@@ -315,8 +315,13 @@ void SecretServiceKeyStore::readItems(const Paths &items, qsizetype unlocked, qs
             message << QVariant::fromValue(QDBusObjectPath(session));
             call(message, [this, session, pubkey, done, skip](const QDBusMessage &reply) {
                 closeSession(session);
-                if (isError(reply))
+                if (isError(reply)) {
+                    // An item deleted since the search is passed over, like
+                    // one that holds no key.
+                    if (reply.errorName() == QLatin1String("org.freedesktop.Secret.Error.NoSuchObject"))
+                        return skip();
                     return done(failure(reply));
+                }
                 auto secret = argument<Secret>(reply, 0, "(oayays)");
                 if (!secret)
                     return skip();
@@ -354,8 +359,13 @@ void SecretServiceKeyStore::store(const QString &npub, const QByteArray &secret,
     if (!connected())
         return later(done, failure(Error::Unavailable));
     // A copy of its own rather than one sharing the caller's buffer, so the
-    // wipes here and the caller's each reach the bytes they mean to.
-    auto key = std::make_shared<QByteArray>(secret.constData(), secret.size());
+    // wipes here and the caller's each reach the bytes they mean to. Wiped
+    // when the last holder lets go too, as when the store is destroyed with
+    // the session or an unlock prompt still out.
+    const std::shared_ptr<QByteArray> key(new QByteArray(secret.constData(), secret.size()), [](QByteArray *bytes) {
+        wipe(*bytes);
+        delete bytes;
+    });
     openSession([this, npub, key, done](const QString &session, const Result &status) {
         if (status.error != Error::None) {
             wipe(*key);

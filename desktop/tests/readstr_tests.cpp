@@ -3783,6 +3783,23 @@ private slots:
         QVERIFY(signer->signNow(outOfRange).second.startsWith("Cannot sign this event"));
         QVERIFY(signer->signNow(outOfRange).first.sig.isEmpty());
 
+        // Tags past what fromJson() takes are refused; at the limits, signed.
+        const QString tooManyTags = "Cannot sign this event: it has too many tags or too much in them";
+        NostrEvent tagged = draft;
+        tagged.tags = QList<QStringList>(NostrEvent::maxTags, {"t", "x"});
+        QVERIFY(signer->signNow(tagged).second.isEmpty());
+        tagged.tags << QStringList{"t", "x"};
+        QCOMPARE(signer->signNow(tagged).second, tooManyTags);
+        tagged.tags = {QStringList(NostrEvent::maxTagValues, "x")};
+        QVERIFY(signer->signNow(tagged).second.isEmpty());
+        tagged.tags.first() << "x";
+        QCOMPARE(signer->signNow(tagged).second, tooManyTags);
+        tagged.tags = {{"t", QString(NostrEvent::maxTagCharacters - 1, 'x')}};
+        QVERIFY(signer->signNow(tagged).second.isEmpty());
+        tagged.tags.first().last() += 'x';
+        QCOMPARE(signer->signNow(tagged).second, tooManyTags);
+        QVERIFY(signer->signNow(tagged).first.sig.isEmpty());
+
         // A signer gone before it answers never answers.
         bool answered = false;
         auto gone = LocalSigner::create(QByteArray(32, '\2'));
@@ -4105,6 +4122,36 @@ private slots:
             QVERIFY(result->error == KeyStore::Error::Failed);
             QCOMPARE(result->detail, QString("No item in the keyring holds this account's key."));
             QVERIFY(result->secret.isEmpty());
+        }
+        // An item deleted since the search is passed over too; any other
+        // failure to read one still fails the read.
+        {
+            result.reset();
+            FakeSecretService service;
+            service.lookup(npub, keep);
+            service.reply({paths({junk, real}), paths({})});
+            service.reply(opened);
+            QCOMPARE(service.methods().last(), "Item.GetSecret " + junk);
+            service.fail("org.freedesktop.Secret.Error.NoSuchObject");
+            QVERIFY(!result);
+            service.reply({});
+            service.reply(opened);
+            QCOMPARE(service.methods().last(), "Item.GetSecret " + real);
+            service.reply(secret(QByteArray(32, '\1').toHex()));
+            QVERIFY(result);
+            QVERIFY(result->error == KeyStore::Error::None);
+            QVERIFY(result->found);
+        }
+        {
+            result.reset();
+            FakeSecretService service;
+            service.lookup(npub, keep);
+            service.reply({paths({junk, real}), paths({})});
+            service.reply(opened);
+            service.fail("org.freedesktop.DBus.Error.Failed", "broken");
+            QVERIFY(result);
+            QVERIFY(result->error == KeyStore::Error::Failed);
+            QCOMPARE(result->detail, QString("broken"));
         }
     }
 
@@ -5921,11 +5968,14 @@ private slots:
         FakeKeyStore keys;
         // How the user answers, given the window and the dialog's parts.
         using Answer = std::function<void(QQuickWindow *, QObject *keep, QObject *remove)>;
-        const auto stopWith = [&](bool keyStored, const Answer &answer) {
+        // With `checkFails`, the keyring cannot say whether it holds a key.
+        const auto stopWith = [&](bool keyStored, const Answer &answer, bool checkFails = false) {
             seedSyncAccount();
             keys.keys.clear();
             if (keyStored)
                 keys.keys.insert(npub, QByteArray(32, '\1'));
+            keys.error = checkFails ? KeyStore::Error::Failed : KeyStore::Error::None;
+            const bool asks = keyStored || checkFails;
             Backend backend;
             backend.setKeyStore(&keys);
             QQmlEngine engine;
@@ -5949,18 +5999,22 @@ private slots:
             QObject *remove = root->findChild<QObject *>("removeKeyButton");
             QObject *confirmation = root->findChild<QObject *>("stopSyncConfirmation");
             QVERIFY(stop && keep && remove && confirmation);
-            QTRY_COMPARE(backend.signingKeyStored(), keyStored);
+            QTRY_VERIFY(!backend.signingBusy());
+            QCOMPARE(backend.signingKeyStored(), keyStored && !checkFails);
+            QCOMPARE(backend.signingKeyChecked(), !checkFails);
             QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
             QTRY_VERIFY(dialog->property("opened").toBool());
+            QTRY_VERIFY(!backend.signingBusy());
             QVERIFY(stop->property("visible").toBool());
             QVERIFY(!keep->property("visible").toBool());
             QVERIFY(QMetaObject::invokeMethod(stop, "clicked"));
-            if (keyStored) {
+            if (asks) {
                 QVERIFY(confirmation->property("visible").toBool());
                 QVERIFY(!stop->property("visible").toBool());
                 QVERIFY(keep->property("visible").toBool());
                 QVERIFY(remove->property("visible").toBool());
                 QVERIFY(remove->property("highlighted").toBool());
+                QTRY_VERIFY(remove->property("activeFocus").toBool());
                 // Nothing changes until the user answers.
                 const qsizetype removals = keys.calls.count("remove " + npub);
                 QTest::qWait(20);
@@ -5973,6 +6027,7 @@ private slots:
             QTRY_VERIFY(!dialog->property("visible").toBool());
             QTRY_VERIFY(backend.syncNpub().isEmpty());
             QTest::qWait(20);
+            keys.error = KeyStore::Error::None;
         };
 
         stopWith(true, [](QQuickWindow *, QObject *keep, QObject *) {
@@ -5991,7 +6046,22 @@ private slots:
         QVERIFY(keys.keys.isEmpty());
         QCOMPARE(keys.calls.count("remove " + npub), 2);
 
+        // Tab reaches "Keep key", and Enter then takes it.
+        stopWith(true, [](QQuickWindow *window, QObject *keep, QObject *) {
+            QTest::keyClick(window, Qt::Key_Backtab);
+            QTRY_VERIFY(keep->property("activeFocus").toBool());
+            QTest::keyClick(window, Qt::Key_Return);
+        });
+        QCOMPARE(keys.keys.value(npub), QByteArray(32, '\1'));
+        QCOMPARE(keys.calls.count("remove " + npub), 2);
+
         stopWith(false, {});
+        QCOMPARE(keys.calls.count("remove " + npub), 2);
+
+        // A keyring that could not be checked may hold the key, so it asks.
+        stopWith(false, [](QQuickWindow *, QObject *keep, QObject *) {
+            QVERIFY(QMetaObject::invokeMethod(keep, "clicked"));
+        }, true);
         QCOMPARE(keys.calls.count("remove " + npub), 2);
     }
 
@@ -6031,6 +6101,48 @@ private slots:
         QTRY_COMPARE(errors.size(), 2);
         QCOMPARE(errors.last(), "No signing key is stored for " + shortNpub);
         QCOMPARE(keys.calls.count("lookup " + npub), 1);
+    }
+
+    // A check that failed says nothing about the key, so a sign still reads
+    // it: failing with the keyring's error while that fails, and signing
+    // once the keyring answers.
+    void backendSignsAfterTheLaunchCheckFailed()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeKeyStore keys;
+        keys.keys.insert(npub, QByteArray(32, '\1'));
+        keys.error = KeyStore::Error::Locked;
+        Backend backend;
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(!backend.signingBusy());
+        QVERIFY(!backend.signingKeyStored());
+        QVERIFY(!backend.signingKeyChecked());
+        const QString locked = backend.signingError();
+        QCOMPARE(locked, QString("The keyring is locked. Unlock it and try again."));
+        std::optional<std::pair<NostrEvent, QString>> answer;
+        const auto keep = [&](const NostrEvent &event, const QString &error) { answer.emplace(event, error); };
+
+        backend.sign(signingDraft(), keep);
+        QTRY_VERIFY(answer);
+        QCOMPARE(answer->second, locked);
+        QCOMPARE(keys.calls.count("lookup " + npub), 1);
+        QVERIFY(!backend.signingKeyChecked());
+
+        keys.error = KeyStore::Error::None;
+        answer.reset();
+        backend.sign(signingDraft(), keep);
+        QTRY_VERIFY(answer);
+        QVERIFY2(answer->second.isEmpty(), qPrintable(answer->second));
+        QCOMPARE(answer->first.pubkey, syncPubkey());
+        QVERIFY(answer->first.verify());
+        QCOMPARE(keys.calls.count("lookup " + npub), 2);
+        QVERIFY(backend.signingKeyStored());
+        QVERIFY(backend.signingKeyChecked());
+        QVERIFY(backend.signingError().isEmpty());
     }
 
     // A sign handed to the signer is answered even when the signer goes
@@ -6126,13 +6238,15 @@ private slots:
                 if (random.bounded(5) == 0)
                     draft.kind = -5;
                 const int sign = issued++;
-                backend.sign(draft, [&, sign](const NostrEvent &event, const QString &error) {
+                // The account synced when it is asked for, which is the only
+                // one that may sign it.
+                const QString expected = backend.syncNpub() == otherNpub ? other->pubkey() : syncPubkey();
+                backend.sign(draft, [&, sign, expected](const NostrEvent &event, const QString &error) {
                     ++answered;
                     ++answers[sign];
                     if (error.isEmpty())
                         ++signedCount;
-                    if (error.isEmpty()
-                        && (!event.verify() || (event.pubkey != syncPubkey() && event.pubkey != other->pubkey())))
+                    if (error.isEmpty() && (!event.verify() || event.pubkey != expected))
                         ++foreign;
                 });
             }

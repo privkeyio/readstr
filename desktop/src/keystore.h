@@ -40,7 +40,8 @@ public:
     struct Result {
         Error error = Error::None;
         QString detail;
-        // contains() and lookup(): whether a key is stored for the npub.
+        // contains(): whether an item is stored under the npub's attributes;
+        // lookup(): whether one of them holds the npub's key.
         bool found = false;
         // lookup() only: the 32-byte secret key. It is wiped once `done`
         // returns, so a caller keeps what it needs, not the buffer.
@@ -50,8 +51,9 @@ public:
 
     using QObject::QObject;
 
-    // Whether a key is stored for `npub`, without reading it or asking to
-    // unlock anything.
+    // Whether an item is stored under `npub`'s attributes, without reading
+    // it or asking to unlock anything. A match says only that much: the item
+    // may hold no key, or another account's; only lookup() checks the key.
     virtual void contains(const QString &npub, Done done) = 0;
     // Reads the key for `npub`, unlocking the keyring first if need be. Only
     // a key whose public key is the npub's is handed back.

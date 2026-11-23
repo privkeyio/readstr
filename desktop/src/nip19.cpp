@@ -45,8 +45,10 @@ std::optional<QByteArray> convertBits(const QByteArray &data, int from, int to, 
     const quint32 mask = (1u << to) - 1;
     for (char c : data) {
         const quint32 value = quint8(c);
-        if (value >> from)
+        if (value >> from) {
+            wipe(out);
             return std::nullopt;
+        }
         accumulator = (accumulator << from) | value;
         bits += from;
         while (bits >= to) {
@@ -58,6 +60,7 @@ std::optional<QByteArray> convertBits(const QByteArray &data, int from, int to, 
         if (bits)
             out.append(char((accumulator << (to - bits)) & mask));
     } else if (bits >= from || ((accumulator << (to - bits)) & mask)) {
+        wipe(out);
         return std::nullopt;
     }
     return out;

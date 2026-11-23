@@ -88,6 +88,9 @@ class Backend : public QObject {
     // only looked up, not read, until something is to be signed; whether a
     // keyring call about it is out; and what the last one could not do.
     Q_PROPERTY(bool signingKeyStored READ signingKeyStored NOTIFY signingChanged)
+    // Whether signingKeyStored is the keyring's own answer, rather than a
+    // guess while no check has answered or after one failed.
+    Q_PROPERTY(bool signingKeyChecked READ signingKeyChecked NOTIFY signingChanged)
     Q_PROPERTY(bool signingBusy READ signingBusy NOTIFY signingChanged)
     Q_PROPERTY(QString signingError READ signingError NOTIFY signingChanged)
 
@@ -138,6 +141,7 @@ public:
     QVariant syncedAt() const;
     bool syncing() const { return m_syncing; }
     bool signingKeyStored() const { return m_signingKeyStored; }
+    bool signingKeyChecked() const { return m_signingKeyChecked; }
     bool signingBusy() const { return m_signingBusy; }
     QString signingError() const { return m_signingError; }
 
@@ -305,8 +309,10 @@ private:
     // `pubkey` is the account the pull was for.
     void syncApplied(const Sync::Outcome &outcome, const QString &pubkey);
     // Sets what the properties say; whether the keyring is busy follows
-    // from the jobs still queued.
-    void setSigning(bool stored, const QString &error);
+    // from the jobs still queued. Without `checked`, whether the keyring
+    // answered stays as it was.
+    void setSigning(bool stored, const QString &error, bool checked);
+    void setSigning(bool stored, const QString &error) { setSigning(stored, error, m_signingKeyChecked); }
     QString keyStoreError(const KeyStore::Result &result) const;
     // Drops the signer and the signing state of an account no longer synced.
     void resetSigning();
@@ -390,6 +396,7 @@ private:
     // The sync account's, once something has been signed.
     std::unique_ptr<Signer> m_signer;
     bool m_signingKeyStored = false;
+    bool m_signingKeyChecked = false;
     bool m_signingBusy = false;
     QString m_signingError;
     // Keyring calls go one at a time, in the order they were asked for, so
