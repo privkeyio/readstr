@@ -12,14 +12,17 @@ and videos (NIP-71) by the authors you follow. The window has three panes
 (SQLite library, fetcher, feed parser, discovery, OPML, Nostr relays) runs
 headless from the command line. It syncs your subscriptions, read articles,
 and saved views with the Readstr web app over Nostr: it pulls them, and
-with your signing key in the desktop keyring it publishes its own.
+with your signing key in the desktop keyring, or through a remote signer app
+such as Amber, it publishes its own.
 
 ## Build, test, install
 
 Everything needed comes with Omarchy (`qmake6`, `make`, a C++ compiler,
 Qt's base, declarative, SVG, and Wayland modules, and `mpv` for videos)
-except two packages for Nostr: `sudo pacman -S qt6-websockets libsecp256k1`. The open and save dialogs
-are the desktop's own, through `xdg-desktop-portal` over D-Bus.
+except the packages for Nostr: `sudo pacman -S qt6-websockets libsecp256k1 qrencode`
+(`openssl`, whose libcrypto does the NIP-44 encryption of a remote signer,
+is already part of Arch). The open and save dialogs are the desktop's own,
+through `xdg-desktop-portal` over D-Bus.
 
 ```sh
 bin/build      # qmake6 + make into build/readstr
@@ -124,6 +127,59 @@ what was waiting on it, with the reason. "Forget key" deletes it from
 the keyring. "Stop syncing" with a key stored asks whether to remove it too
 ("Remove key", the default, or "Keep key"); syncing stops either way, and a
 removal that fails says why in the status bar.
+
+### Remote signer (NIP-46)
+
+Instead of the `nsec`, a signer app that keeps the key, such as Amber on a
+phone, can sign for the account over NIP-46 ("Nostr Connect"). In the same
+dialog, either paste the app's `bunker://` link and press "Connect", or press
+"Connect with a signer app", which shows a `nostrconnect://` link and its QR
+code to scan (or copy into the app). The link names a fresh client key, the
+first two of your sync relays, a random secret the app must send back, the
+name Readstr, and the permissions it asks for (signing kinds 30404, 30405,
+30406, and 21842); the QR code is drawn in process with libqrencode, at most
+4096 pixels wide. Once the app answers, Readstr asks it for the account's
+public key, then to sign a throwaway event of kind 21842 (ephemeral, used by
+no NIP, never published) holding a random token, and refuses the pairing,
+keeping nothing, unless the key is the npub you sync with and the signature
+is by it and checks out: anyone can repeat a public key, only the signer
+holding the key can sign. Approve that request in the app too. "Stop
+connecting" stops a pairing even while the keyring writes it: it is then
+deleted again.
+
+The pairing (the client's secret key, the signer's public key, its relays,
+and the secret) is kept only in the keyring, as an item labeled "Readstr
+remote signer pairing (npub1…)" with the attributes
+`application=readstr-nip46` and `npub=npub1…`, never in Readstr's files, so
+Readstr signs through the app again after a restart without pairing anew.
+When the keyring holds both a key and a pairing, the key signs and the
+remote signer is the alternative; a key added, or a new pairing made, while
+the remote signer still has requests out takes over once they are answered.
+"Disconnect signer" deletes the pairing and fails what waits on the remote
+signer (a read of the key goes on), and "Stop syncing" with "Remove key"
+deletes it with the key. A pairing read back after a restart is not proven
+again, which would take an approval on every launch: the first one in the
+keyring that parses is used, so another program in your session could plant
+one, as it could read the unlocked keyring, key included, anyway.
+
+Requests and answers are kind 24133 events between the client key and the
+signer's key, their content encrypted with NIP-44 version 2 (secp256k1 ECDH,
+then HKDF, ChaCha20, and HMAC-SHA256 through OpenSSL's libcrypto), checked
+against the NIP's official test vectors. A relay in a `bunker://` link is
+used only when it is wss:// to a public host that is not an onion service, or
+one of your configured sync relays. Answers count only when they come from
+the signer's key with a valid signature, decrypt and parse, and answer a
+request still waiting, once; relay messages past 256 KiB close the
+connection, which is opened again while an answer is awaited. A request
+every relay refuses (`OK` false) fails at once with what the relay said. A signed event
+is used only when it is the one asked for, by the account's key, with a
+signature that checks out. Each request waits up to 60 seconds for an
+answer (5 minutes for a signer app to answer the link); meanwhile the dialog
+and the status bar say "Approve the request in your signer app". A signer
+that asks you to approve on a web page (`auth_url`, https only) has the
+address shown as text to open yourself; Readstr opens no browser. Nothing decrypted is
+logged. An event over the 65,535 bytes NIP-44 can carry cannot be signed
+remotely.
 
 Merging is close to the web app's and never removes anything here:
 

@@ -43,8 +43,10 @@ public:
         // contains(): whether an item is stored under the npub's attributes;
         // lookup(): whether one of them holds the npub's key.
         bool found = false;
-        // lookup() only: the 32-byte secret key. It is wiped once `done`
-        // returns, so a caller keeps what it needs, not the buffer.
+        // lookup() only: the 32-byte secret key; lookupPairing() only: the
+        // pairing as RemoteSigner::Pairing::toJson() writes it. It is wiped
+        // once `done` returns, so a caller keeps what it needs, not the
+        // buffer.
         QByteArray secret;
     };
     using Done = std::function<void(const Result &result)>;
@@ -62,13 +64,30 @@ public:
     virtual void store(const QString &npub, const QByteArray &secret, Done done) = 0;
     // Deletes every key stored for `npub`; `found` says whether there was one.
     virtual void remove(const QString &npub, Done done) = 0;
+
+    // The same for the account's pairing with a remote signer (NIP-46),
+    // kept as an item of its own, as the client key it holds can ask the
+    // signer to sign. lookupPairing() hands back only a pairing that parses:
+    // the first one, unlocked items first. Its signer is not asked again to
+    // prove it holds the key, which would take an approval on every launch,
+    // so another program of the user's can plant a pairing; such a program
+    // can read the unlocked keyring, the key included, anyway.
+    virtual void containsPairing(const QString &npub, Done done) = 0;
+    virtual void lookupPairing(const QString &npub, Done done) = 0;
+    virtual void storePairing(const QString &npub, const QByteArray &pairing, Done done) = 0;
+    virtual void removePairing(const QString &npub, Done done) = 0;
 };
 
 // The freedesktop Secret Service (GNOME Keyring, KeePassXC, KWallet's
 // bridge) over the session bus: one item per npub in the default
 // collection, with the attributes application=readstr and npub=<npub>,
-// holding the key as 64 hex characters. A locked collection or item is
-// unlocked through the service's own prompt. Nothing here waits on the bus.
+// holding the key as 64 hex characters, and one per npub paired with a
+// remote signer, with application=readstr-nip46 and npub=<npub>, holding the
+// pairing as JSON. The pairing's application differs rather than adding an
+// attribute, since a search matches every item that has the attributes it
+// names, and one for the key must not find the pairing. A locked collection or
+// item is unlocked through the service's own prompt. Nothing here waits on the
+// bus.
 class SecretServiceKeyStore : public KeyStore {
     Q_OBJECT
 
@@ -89,9 +108,14 @@ public:
     void lookup(const QString &npub, Done done) override;
     void store(const QString &npub, const QByteArray &secret, Done done) override;
     void remove(const QString &npub, Done done) override;
+    void containsPairing(const QString &npub, Done done) override;
+    void lookupPairing(const QString &npub, Done done) override;
+    void storePairing(const QString &npub, const QByteArray &pairing, Done done) override;
+    void removePairing(const QString &npub, Done done) override;
 
-    // The attributes that find an npub's item.
+    // The attributes that find an npub's key, and its pairing.
     static QMap<QString, QString> attributes(const QString &npub);
+    static QMap<QString, QString> pairingAttributes(const QString &npub);
 
     // How long a prompt may stay unanswered before its operation fails.
     // Generous, as a user may well take a while to type a keyring password,
@@ -118,21 +142,31 @@ private slots:
 private:
     // Each step hands on a Result whose error is None when it succeeded.
     using Paths = QList<QDBusObjectPath>;
+    // Takes an item's value, which it may wipe, and fills in `result` when
+    // the value is what was looked for.
+    using Accept = std::function<bool(QByteArray &value, Result &result)>;
+    using Attributes = QMap<QString, QString>;
     void later(const Done &done, const Result &result);
     void openSession(std::function<void(const QString &session, const Result &status)> next);
     void closeSession(const QString &session);
-    void search(const QString &npub, std::function<void(const Paths &unlocked, const Paths &locked,
-                                                        const Result &status)> next);
+    void search(const Attributes &attributes,
+                std::function<void(const Paths &unlocked, const Paths &locked, const Result &status)> next);
     void unlock(const Paths &objects, std::function<void(const Result &status)> next);
     void prompt(const QString &path, std::function<void(const Result &status)> next);
     // Stops waiting on the prompt at `path`, handing back what was to run
     // when it completed, or nothing if no prompt waits there.
     std::function<void(const Result &status)> takePrompt(const QString &path);
+    void containsItem(const Attributes &attributes, Done done);
+    void lookupItem(const Attributes &attributes, const Accept &accept, Done done);
     // Reads `items` in turn, the first `unlocked` of them already unlocked,
-    // until one holds the key of `pubkey`.
-    void readItems(const Paths &items, qsizetype unlocked, qsizetype next, const QString &pubkey, Done done);
-    void createItem(const QString &session, const QString &npub, const std::shared_ptr<QByteArray> &secret,
-                    bool unlocked, Done done);
+    // until `accept` takes one.
+    void readItems(const Paths &items, qsizetype unlocked, qsizetype next, const Accept &accept, Done done);
+    // Stores `value`, which the store wipes once done with it.
+    void storeItem(const Attributes &attributes, const QString &label, const std::shared_ptr<QByteArray> &value,
+                   Done done);
+    void createItem(const QString &session, const Attributes &attributes, const QString &label,
+                    const std::shared_ptr<QByteArray> &value, bool unlocked, Done done);
+    void removeItems(const Attributes &attributes, Done done);
     void deleteItems(const Paths &items, qsizetype next, Done done);
 
     struct Prompt {

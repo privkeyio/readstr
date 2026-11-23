@@ -11,6 +11,7 @@
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQuickItem>
 #include <QQuickWindow>
 #include <QTextDocument>
 #include <QDir>
@@ -58,12 +59,15 @@
 #include "localnetwork.h"
 #include "markdown.h"
 #include "nip19.h"
+#include "nip44.h"
 #include "nostrevent.h"
 #include "nostrsource.h"
 #include "opml.h"
 #include "paths.h"
 #include "portalfilepicker.h"
+#include "qrcode.h"
 #include "relaypool.h"
+#include "remotesigner.h"
 #include "sanitizer.h"
 #include "signer.h"
 #include "sourcemodel.h"
@@ -72,6 +76,7 @@
 #include "theme.h"
 #include "thumbnails.h"
 #include "translator.h"
+#include "wipe.h"
 
 // Answers the OPML dialogs the way a user would, without a portal.
 class FakePicker : public FilePicker {
@@ -134,8 +139,10 @@ protected:
 class FakeKeyStore : public KeyStore {
 public:
     QHash<QString, QByteArray> keys;
+    QHash<QString, QByteArray> pairings;
     Error error = Error::None;
     QStringList calls;
+    QStringList pairingCalls;
     bool hold = false;
     QRandomGenerator *delays = nullptr;
 
@@ -171,6 +178,27 @@ public:
     void remove(const QString &npub, Done done) override {
         calls << "remove " + npub;
         answer(done, [this, npub](Result &result) { result.found = keys.remove(npub) > 0; });
+    }
+    // Pairings with a remote signer, in a list of calls of their own, so
+    // the tests of the key see only the key's.
+    void containsPairing(const QString &npub, Done done) override {
+        pairingCalls << "contains " + npub;
+        answer(done, [this, npub](Result &result) { result.found = pairings.contains(npub); });
+    }
+    void lookupPairing(const QString &npub, Done done) override {
+        pairingCalls << "lookup " + npub;
+        answer(done, [this, npub](Result &result) {
+            result.found = pairings.contains(npub);
+            result.secret = pairings.value(npub);
+        });
+    }
+    void storePairing(const QString &npub, const QByteArray &pairing, Done done) override {
+        pairingCalls << "store " + npub;
+        answer(done, [this, npub, pairing](Result &) { pairings.insert(npub, pairing); });
+    }
+    void removePairing(const QString &npub, Done done) override {
+        pairingCalls << "remove " + npub;
+        answer(done, [this, npub](Result &result) { result.found = pairings.remove(npub) > 0; });
     }
 
 private:
@@ -241,6 +269,154 @@ private:
 
     QList<std::function<void(const QDBusMessage &)>> m_done;
     qsizetype m_answered = 0;
+};
+
+
+// A remote signer (NIP-46) for tests, such as Amber, listening on a
+// FakeRelay: it answers each kind 24133 request tagged to it as a signer app
+// would, signing with the user's key, unless told to misbehave. Its keys
+// are made from fixed bytes in memory.
+class FakeBunker {
+public:
+    enum class Sign { Honest, BadSignature, OtherKey, OtherEvent, Refuse, Twice };
+    struct Held {
+        QString client;
+        QString id;
+        QString method;
+        QJsonArray params;
+    };
+
+    explicit FakeBunker(FakeRelay &relay, char signerByte = 5, char userByte = 1)
+        : m_relay(relay), m_signerSecret(32, signerByte), m_signer(LocalSigner::create(m_signerSecret)),
+          m_user(LocalSigner::create(QByteArray(32, userByte))) {
+        relay.onEvent = [this](const QJsonObject &event) { received(event); };
+    }
+    ~FakeBunker() { m_relay.onEvent = {}; }
+
+    // The methods asked for, in order, and the params of each.
+    QStringList methods;
+    QList<QJsonArray> params;
+    // What connect must carry, when set.
+    QString secret;
+    // Requests are kept, unanswered, until answerHeld().
+    bool hold = false;
+    QList<Held> held;
+    // Each request is first answered with auth_url and this URL.
+    QString authUrl;
+    Sign sign = Sign::Honest;
+
+    QString pubkey() const { return m_signer->pubkey(); }
+    QString userPubkey() const { return m_user->pubkey(); }
+    QString uri(const QString &relay, const QString &connectSecret = {}) const {
+        QString link = "bunker://" + pubkey() + "?relay=" + QUrl::toPercentEncoding(relay);
+        if (!connectSecret.isEmpty())
+            link += "&secret=" + connectSecret;
+        return link;
+    }
+
+    void answerHeld() {
+        for (const Held &request : std::exchange(held, {}))
+            answer(request);
+    }
+
+    // Sends an answer to `client`, encrypted and signed by `from` (the
+    // bunker's own key unless given), with `content` as the plaintext.
+    void respondRaw(const QString &client, const QString &content, const QByteArray &fromSecret = {},
+                    const std::optional<QString> &payloadOverride = std::nullopt) {
+        const QByteArray secretKey = fromSecret.isEmpty() ? m_signerSecret : fromSecret;
+        const auto from = LocalSigner::create(secretKey);
+        const QByteArray key = Nip44::conversationKey(secretKey, QByteArray::fromHex(client.toLatin1()));
+        NostrEvent event;
+        event.kind = 24133;
+        event.createdAt = QDateTime::currentSecsSinceEpoch();
+        event.tags = {{"p", client}};
+        event.content = payloadOverride ? *payloadOverride : *Nip44::encrypt(content.toUtf8(), key);
+        m_relay.push(from->signNow(event).first.toJson());
+    }
+    void respond(const QString &client, const QString &id, const QString &result, const QString &error = {},
+                 const QByteArray &fromSecret = {}) {
+        QJsonObject answer{{"id", id}, {"result", result}};
+        if (!error.isEmpty())
+            answer.insert("error", error);
+        respondRaw(client, QString::fromUtf8(QJsonDocument(answer).toJson(QJsonDocument::Compact)), fromSecret);
+    }
+
+    // Answers a nostrconnect:// link as a signer app that scanned it would,
+    // with the link's secret unless given another.
+    void connectTo(const QString &link, const std::optional<QString> &otherSecret = std::nullopt) {
+        const QString client = link.section("://", 1).section('?', 0, 0);
+        const QString linkSecret = QUrlQuery(link.section('?', 1)).queryItemValue("secret", QUrl::FullyDecoded);
+        respond(client, "connect-1", otherSecret ? *otherSecret : linkSecret);
+    }
+
+private:
+    void received(const QJsonObject &json) {
+        const auto event = NostrEvent::fromJson(json);
+        if (!event || event->kind != 24133 || event->tag("p") != pubkey() || !event->verify())
+            return;
+        const QByteArray key = Nip44::conversationKey(m_signerSecret, QByteArray::fromHex(event->pubkey.toLatin1()));
+        const auto plaintext = Nip44::decrypt(event->content, key);
+        if (!plaintext)
+            return;
+        const QJsonObject request = QJsonDocument::fromJson(*plaintext).object();
+        const Held held{event->pubkey, request.value("id").toString(), request.value("method").toString(),
+                        request.value("params").toArray()};
+        methods << held.method;
+        params << held.params;
+        if (hold)
+            this->held << held;
+        else
+            answer(held);
+    }
+
+    void answer(const Held &request) {
+        if (!authUrl.isEmpty()) {
+            respond(request.client, request.id, "auth_url", authUrl);
+            QTimer::singleShot(100, &m_context, [this, request] { answerNow(request); });
+            return;
+        }
+        answerNow(request);
+    }
+
+    void answerNow(const Held &request) {
+        if (request.method == "connect") {
+            if (!secret.isEmpty() && request.params.at(1).toString() != secret)
+                return respond(request.client, request.id, {}, "invalid secret");
+            return respond(request.client, request.id, "ack");
+        }
+        if (request.method == "get_public_key")
+            return respond(request.client, request.id, m_user->pubkey());
+        if (request.method == "ping")
+            return respond(request.client, request.id, "pong");
+        if (request.method != "sign_event")
+            return respond(request.client, request.id, {}, "unknown method");
+        if (sign == Sign::Refuse)
+            return respond(request.client, request.id, {}, "user rejected");
+        const QJsonObject draftJson = QJsonDocument::fromJson(request.params.at(0).toString().toUtf8()).object();
+        NostrEvent draft;
+        draft.kind = draftJson.value("kind").toInt();
+        draft.createdAt = draftJson.value("created_at").toInteger();
+        for (const QJsonValue &tag : draftJson.value("tags").toArray())
+            draft.tags << tag.toVariant().toStringList();
+        draft.content = draftJson.value("content").toString();
+        if (sign == Sign::OtherEvent)
+            draft.content += "!";
+        const auto other = LocalSigner::create(QByteArray(32, '\2'));
+        NostrEvent signedEvent = (sign == Sign::OtherKey ? other.get() : m_user.get())->signNow(draft).first;
+        if (sign == Sign::BadSignature)
+            signedEvent.sig = (signedEvent.sig.startsWith('0') ? "1" : "0") + signedEvent.sig.mid(1);
+        const QString result = QString::fromUtf8(QJsonDocument(signedEvent.toJson()).toJson(QJsonDocument::Compact));
+        respond(request.client, request.id, result);
+        if (sign == Sign::Twice)
+            respond(request.client, request.id, result);
+    }
+
+    FakeRelay &m_relay;
+    // Goes with the bunker, and the answers it was to send later with it.
+    QObject m_context;
+    QByteArray m_signerSecret;
+    std::unique_ptr<LocalSigner> m_signer;
+    std::unique_ptr<LocalSigner> m_user;
 };
 
 class ReadstrTests : public QObject {
@@ -1817,7 +1993,8 @@ private slots:
         }
         const QString source = QFileInfo(QFINDTESTDATA("../src/backend.cpp")).absolutePath();
         for (const char *name :
-             {"backend.cpp", "keystore.cpp", "sanitizer.cpp", "portalfilepicker.cpp", "signer.cpp", "sync.cpp"}) {
+             {"backend.cpp", "keystore.cpp", "sanitizer.cpp", "portalfilepicker.cpp", "remotesigner.cpp", "signer.cpp",
+              "sync.cpp"}) {
             QFile file(source + "/" + name);
             QVERIFY(file.open(QIODevice::ReadOnly));
             for (const auto &match : cppString.globalMatch(QString::fromUtf8(file.readAll())))
@@ -1840,6 +2017,1496 @@ private slots:
         for (const QString &text : strings)
             if (text.contains("%n"))
                 QVERIFY2(!english.translate("Main", text.toUtf8().constData(), nullptr, 1).isNull(), qPrintable(text));
+    }
+
+    // NIP-44 v2
+
+    void nip44DerivesConversationAndMessageKeys()
+    {
+        const QJsonObject valid = nip44Vectors().value("valid").toObject();
+        const QJsonArray conversations = valid.value("get_conversation_key").toArray();
+        QCOMPARE(conversations.size(), 35);
+        for (const QJsonValue &value : conversations) {
+            const QJsonObject vector = value.toObject();
+            QCOMPARE(Nip44::conversationKey(hex(vector.value("sec1")), hex(vector.value("pub2"))).toHex(),
+                     vector.value("conversation_key").toString().toLatin1());
+        }
+        const QJsonObject messages = valid.value("get_message_keys").toObject();
+        const QByteArray conversationKey = hex(messages.value("conversation_key"));
+        const QJsonArray keys = messages.value("keys").toArray();
+        QCOMPARE(keys.size(), 32);
+        for (const QJsonValue &value : keys) {
+            const QJsonObject vector = value.toObject();
+            const auto derived = Nip44::messageKeys(conversationKey, hex(vector.value("nonce")));
+            QVERIFY(derived);
+            QCOMPARE(derived->chachaKey, hex(vector.value("chacha_key")));
+            QCOMPARE(derived->chachaNonce, hex(vector.value("chacha_nonce")));
+            QCOMPARE(derived->hmacKey, hex(vector.value("hmac_key")));
+        }
+        const QJsonArray lengths = valid.value("calc_padded_len").toArray();
+        QCOMPARE(lengths.size(), 24);
+        for (const QJsonValue &pair : lengths)
+            QCOMPARE(Nip44::paddedLength(pair.toArray().at(0).toInteger()), pair.toArray().at(1).toInteger());
+
+        const QJsonArray invalid = nip44Vectors().value("invalid").toObject().value("get_conversation_key").toArray();
+        QCOMPARE(invalid.size(), 8);
+        for (const QJsonValue &value : invalid) {
+            const QJsonObject vector = value.toObject();
+            QVERIFY2(Nip44::conversationKey(hex(vector.value("sec1")), hex(vector.value("pub2"))).isEmpty(),
+                     qPrintable(vector.value("note").toString()));
+        }
+    }
+
+    void nip44EncryptsAndDecryptsAsTheVectors()
+    {
+        const QJsonObject valid = nip44Vectors().value("valid").toObject();
+        const QJsonArray vectors = valid.value("encrypt_decrypt").toArray();
+        QCOMPARE(vectors.size(), 10);
+        for (const QJsonValue &value : vectors) {
+            const QJsonObject vector = value.toObject();
+            const QByteArray sec1 = hex(vector.value("sec1")), sec2 = hex(vector.value("sec2"));
+            const QByteArray key = hex(vector.value("conversation_key"));
+            // The same key from either side.
+            QCOMPARE(Nip44::conversationKey(sec1, QByteArray::fromHex(LocalSigner::create(sec2)->pubkey().toLatin1())),
+                     key);
+            QCOMPARE(Nip44::conversationKey(sec2, QByteArray::fromHex(LocalSigner::create(sec1)->pubkey().toLatin1())),
+                     key);
+            const QByteArray plaintext = vector.value("plaintext").toString().toUtf8();
+            const QString payload = vector.value("payload").toString();
+            QCOMPARE(Nip44::encrypt(plaintext, key, hex(vector.value("nonce"))), std::optional(payload));
+            QCOMPARE(Nip44::decrypt(payload, key), std::optional(plaintext));
+        }
+        const QJsonArray longMessages = valid.value("encrypt_decrypt_long_msg").toArray();
+        QCOMPARE(longMessages.size(), 3);
+        for (const QJsonValue &value : longMessages) {
+            const QJsonObject vector = value.toObject();
+            const QByteArray plaintext = vector.value("pattern").toString().toUtf8().repeated(vector.value("repeat").toInt());
+            const auto sha256 = [](const QByteArray &data) {
+                return QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex();
+            };
+            QCOMPARE(sha256(plaintext), vector.value("plaintext_sha256").toString().toLatin1());
+            const QByteArray key = hex(vector.value("conversation_key"));
+            const auto payload = Nip44::encrypt(plaintext, key, hex(vector.value("nonce")));
+            QVERIFY(payload);
+            QCOMPARE(sha256(payload->toLatin1()), vector.value("payload_sha256").toString().toLatin1());
+            QCOMPARE(Nip44::decrypt(*payload, key), std::optional(plaintext));
+        }
+
+        // A fresh nonce each time: the same message never encrypts the same.
+        const QByteArray key = hex(vectors.first().toObject().value("conversation_key"));
+        const auto first = Nip44::encrypt("hello", key), second = Nip44::encrypt("hello", key);
+        QVERIFY(first && second && *first != *second);
+        QCOMPARE(Nip44::decrypt(*first, key), std::optional(QByteArray("hello")));
+        QCOMPARE(Nip44::decrypt(*second, key), std::optional(QByteArray("hello")));
+    }
+
+    void nip44RefusesWhatTheVectorsRefuse()
+    {
+        const QJsonObject invalid = nip44Vectors().value("invalid").toObject();
+        const QByteArray key(32, '\1');
+        const QJsonArray lengths = invalid.value("encrypt_msg_lengths").toArray();
+        QCOMPARE(lengths.size(), 4);
+        for (const QJsonValue &length : lengths)
+            QVERIFY(!Nip44::encrypt(QByteArray(length.toInteger(), 'a'), key));
+        const QJsonArray payloads = invalid.value("decrypt").toArray();
+        QCOMPARE(payloads.size(), 12);
+        for (const QJsonValue &value : payloads) {
+            const QJsonObject vector = value.toObject();
+            QVERIFY2(!Nip44::decrypt(vector.value("payload").toString(), hex(vector.value("conversation_key"))),
+                     qPrintable(vector.value("note").toString()));
+        }
+        // A key of the wrong size encrypts nothing.
+        QVERIFY(!Nip44::encrypt("hello", QByteArray(31, '\1')));
+        QVERIFY(!Nip44::conversationKey(QByteArray(31, '\1'), QByteArray(32, '\2')).size());
+    }
+
+    // NIP-46 remote signer
+
+    void remoteSignerParsesBunkerUris()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        const QString pk = bunker.pubkey();
+        auto pairing = RemoteSigner::parseBunkerUri("  " + bunker.uri(relay.url(), "s3cret") + " ", {relay.url()});
+        QVERIFY(pairing);
+        QCOMPARE(pairing->signerPubkey, pk);
+        QCOMPARE(pairing->relays, QStringList{relay.url()});
+        QCOMPARE(pairing->secret, QString("s3cret"));
+        QCOMPARE(pairing->clientSecret.size(), 32);
+        // A fresh client key every time.
+        auto again = RemoteSigner::parseBunkerUri(bunker.uri(relay.url()), {relay.url()});
+        QVERIFY(again && again->clientSecret != pairing->clientSecret);
+        QVERIFY(again->secret.isEmpty());
+
+        // A loopback relay is only taken when the user configured it, and
+        // the URI's other relays only when public, over wss, and not onion
+        // services; each once, and no more than maxRelays.
+        QVERIFY(!RemoteSigner::parseBunkerUri(bunker.uri(relay.url()), {}));
+        auto publicOnes = RemoteSigner::parseBunkerUri(
+            "bunker://" + pk + "?relay=wss%3A%2F%2Frelay.one.invalid&relay=wss://relay.one.invalid/"
+                + "&relay=wss://hidden.onion&relay=wss://192.168.1.2&relay=ws://relay.two.invalid"
+                + "&relay=wss://localhost&relay=wss://user@relay.three.invalid&relay=wss://relay.four.invalid",
+            {});
+        QVERIFY(publicOnes);
+        QCOMPARE(publicOnes->relays, QStringList({"wss://relay.one.invalid", "wss://relay.four.invalid"}));
+        QString many = "bunker://" + pk + "?";
+        for (int i = 0; i < 6; ++i)
+            many += QString("relay=wss://r%1.invalid&").arg(i);
+        QCOMPARE(RemoteSigner::parseBunkerUri(many, {})->relays.size(), RemoteSigner::maxRelays);
+
+        for (const QString &bad :
+             {QString("bunker://%1").arg(pk), QString("bunker://%1?relay=wss://192.168.1.2").arg(pk),
+              QString("bunker://abc?relay=wss://r.invalid"),
+              QString("bunker://%1?relay=wss://r.invalid").arg(QString(64, 'f')),
+              QString("bunker://%1?relay=wss://r.invalid&secret=a%20b").arg(pk),
+              QString("bunker://%1?relay=wss://r.invalid&secret=%2").arg(pk, QString(300, 'x')),
+              QString("bunker://%1?relay=wss://r.invalid&x=%2").arg(pk, QString(2000, 'x')),
+              QString("bunker://%1:1234?relay=wss://r.invalid").arg(pk),
+              QString("bunker://%1/path?relay=wss://r.invalid").arg(pk),
+              QString("nostrconnect://%1?relay=wss://r.invalid").arg(pk), syncNpub(), QString()})
+            QVERIFY2(!RemoteSigner::parseBunkerUri(bad, {}), qPrintable(bad.left(120)));
+
+        // As the keyring keeps it, and back, the client key first, written
+        // and read by hand.
+        QByteArray json = pairing->toJson();
+        QVERIFY(json.startsWith("{\"client\":\"" + pairing->clientSecret.toHex() + "\","));
+        QCOMPARE(QJsonDocument::fromJson(json).object().keys(), QStringList({"client", "relays", "secret", "signer"}));
+        auto restored = RemoteSigner::Pairing::fromJson(json);
+        QVERIFY(restored);
+        QCOMPARE(restored->clientSecret, pairing->clientSecret);
+        QCOMPARE(restored->signerPubkey, pk);
+        QCOMPARE(restored->relays, QStringList{relay.url()});
+        QCOMPARE(restored->secret, QString("s3cret"));
+        for (const QByteArray &bad :
+             {QByteArray("not json"), QByteArray("{}"), json.replace(relay.url().toUtf8(), "http://x.invalid"),
+              pairing->toJson().replace(pk.toUtf8(), QByteArray(64, 'f')),
+              pairing->toJson().replace(pairing->clientSecret.toHex(), QByteArray(64, '0'))})
+            QVERIFY2(!RemoteSigner::Pairing::fromJson(bad), bad.constData());
+        restored->wipe();
+        pairing->wipe();
+        QVERIFY(pairing->clientSecret.isEmpty() && pairing->secret.isEmpty());
+    }
+
+    // Connecting with the URI's secret, then the account's public key, and
+    // signing: each answer checked, the event the account's.
+    void remoteSignerConnectsAndSigns()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        bunker.secret = "s3cret";
+        auto pairing = RemoteSigner::parseBunkerUri(bunker.uri(relay.url(), "s3cret"), {relay.url()});
+        auto signer = RemoteSigner::create(*pairing, syncPubkey());
+        QVERIFY(signer);
+        signer->setLimits(quickRemoteLimits());
+        QCOMPARE(signer->pubkey(), syncPubkey());
+        std::optional<QString> paired;
+        signer->pair([&](const QString &error) { paired = error; });
+        QTRY_VERIFY(paired);
+        QCOMPARE(*paired, QString());
+        QCOMPARE(bunker.methods, QStringList({"connect", "get_public_key", "sign_event"}));
+        QCOMPARE(bunker.params.first(), (QJsonArray{bunker.pubkey(), "s3cret", RemoteSigner::permissions}));
+        // The pairing check: a throwaway event of its own kind, with
+        // nothing in it but a fresh token, which is never published.
+        const QJsonObject check = QJsonDocument::fromJson(bunker.params.last().at(0).toString().toUtf8()).object();
+        QCOMPARE(check.value("kind").toInt(), RemoteSigner::pairingCheckKind);
+        QVERIFY(RemoteSigner::pairingCheckKind >= 20000 && RemoteSigner::pairingCheckKind < 30000);
+        QVERIFY(check.value("content").toString().startsWith("Readstr pairing check "));
+        QCOMPARE(check.value("tags").toArray(), QJsonArray());
+        QVERIFY(qAbs(check.value("created_at").toInteger() - QDateTime::currentSecsSinceEpoch()) < 60);
+        QCOMPARE(signer->waiting(), 0);
+        // Every request came from the client key, never the account's.
+        for (const QJsonObject &event : std::as_const(relay.published)) {
+            QCOMPARE(event.value("kind").toInt(), 24133);
+            QCOMPARE(event.value("pubkey").toString(), signer->clientPubkey());
+            QVERIFY(!event.value("content").toString().contains("get_public_key"));
+        }
+
+        Signed result;
+        signer->sign(signingDraft(), result.done());
+        QCOMPARE(result.answers, 0);
+        QCOMPARE(signer->waiting(), 1);
+        QTRY_COMPARE(result.answers, 1);
+        QCOMPARE(result.error, QString());
+        QVERIFY(result.event.verify());
+        QCOMPARE(result.event.pubkey, syncPubkey());
+        QCOMPARE(result.event.content, signingDraft().content);
+        QCOMPARE(result.event.tags, signingDraft().tags);
+        const QJsonObject draft = QJsonDocument::fromJson(bunker.params.last().at(0).toString().toUtf8()).object();
+        QCOMPARE(draft.keys(), QStringList({"content", "created_at", "kind", "tags"}));
+
+        std::optional<QString> pinged;
+        signer->ping([&](const QString &error) { pinged = error; });
+        QTRY_VERIFY(pinged);
+        QCOMPARE(*pinged, QString());
+
+        // A wrong secret is refused by the signer, and said.
+        auto wrong = RemoteSigner::parseBunkerUri(bunker.uri(relay.url(), "guess"), {relay.url()});
+        auto refused = RemoteSigner::create(*wrong, syncPubkey());
+        std::optional<QString> refusal;
+        refused->pair([&](const QString &error) { refusal = error; });
+        QTRY_VERIFY(refusal);
+        QCOMPARE(*refusal, QString("The signer refused to connect: invalid secret"));
+    }
+
+    void remoteSignerRefusesAnotherAccount()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay, 5, 2);
+        auto signer = pairedSigner(bunker, relay);
+        std::optional<QString> paired;
+        signer->pair([&](const QString &error) { paired = error; });
+        QTRY_VERIFY(paired);
+        const QString theirs = Nip19::npub(bunker.userPubkey());
+        QCOMPARE(*paired, "The signer holds the key of " + Nip19::shortNpub(theirs, theirs) + ", not the one for "
+                     + Nip19::shortNpub(syncNpub(), syncNpub()));
+    }
+
+    // A signed event is only taken when it is the one asked for, signed by
+    // the account, with a signature that checks out, and once.
+    void remoteSignerChecksWhatComesBack()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        auto signer = pairedSigner(bunker, relay);
+        const QString shortNpub = Nip19::shortNpub(syncNpub(), syncNpub());
+        for (const auto &[mode, expected] :
+             {std::pair(FakeBunker::Sign::BadSignature, QString("The signer's signature does not check out")),
+              std::pair(FakeBunker::Sign::OtherKey, "The signer signed with another key than the one for " + shortNpub),
+              std::pair(FakeBunker::Sign::OtherEvent, QString("The signer sent back another event than the one asked for")),
+              std::pair(FakeBunker::Sign::Refuse, QString("The signer refused to sign: user rejected"))}) {
+            bunker.sign = mode;
+            Signed result;
+            signer->sign(signingDraft(), result.done());
+            QTRY_COMPARE(result.answers, 1);
+            QCOMPARE(result.error, expected);
+            QVERIFY(result.event.id.isEmpty());
+        }
+        bunker.sign = FakeBunker::Sign::Twice;
+        Signed twice;
+        signer->sign(signingDraft(), twice.done());
+        QTRY_COMPARE(twice.answers, 1);
+        QTest::qWait(200);
+        QCOMPARE(twice.answers, 1);
+        QVERIFY(twice.error.isEmpty());
+
+        // What is out of range never reaches the signer.
+        const qsizetype asked = bunker.methods.size();
+        NostrEvent huge = signingDraft();
+        huge.content = QString(70000, 'x');
+        Signed tooLarge;
+        signer->sign(huge, tooLarge.done());
+        QCOMPARE(tooLarge.answers, 0);
+        QTRY_COMPARE(tooLarge.answers, 1);
+        QCOMPARE(tooLarge.error, QString("This event is too large for a remote signer to sign"));
+        NostrEvent bad = signingDraft();
+        bad.kind = 70000;
+        Signed outOfRange;
+        signer->sign(bad, outOfRange.done());
+        QTRY_COMPARE(outOfRange.answers, 1);
+        QCOMPARE(outOfRange.error, QString("Cannot sign this event: its kind or date is out of range"));
+        QCOMPARE(bunker.methods.size(), asked);
+    }
+
+    // Answers with unknown ids, from other keys, that do not decrypt or
+    // parse, or that are too large are passed over, and the real one still
+    // counts, even after a relay dropped the connection over one.
+    void remoteSignerIgnoresStrayAnswers()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        auto signer = pairedSigner(bunker, relay);
+        bunker.hold = true;
+        Signed result;
+        signer->sign(signingDraft(), result.done());
+        QTRY_COMPARE(bunker.held.size(), 1);
+        const FakeBunker::Held request = bunker.held.first();
+        QCOMPARE(request.client, signer->clientPubkey());
+        bunker.respond(request.client, "unknown-id", "{}");
+        bunker.respond(request.client, request.id, "{}", {}, QByteArray(32, '\6'));
+        bunker.respondRaw(request.client, {}, {}, QString("not a payload"));
+        bunker.respondRaw(request.client, "not json");
+        bunker.respondRaw(request.client, QJsonDocument(QJsonObject{{"id", request.id}, {"result", 7}}).toJson());
+        bunker.respondRaw(request.client, QJsonDocument(QJsonObject{{"id", QString(200, 'x')}}).toJson());
+        relay.pushRaw("[\"EVENT\",\"other\",{}]");
+        QTest::qWait(200);
+        QCOMPARE(result.answers, 0);
+        QCOMPARE(signer->waiting(), 1);
+
+        // A message past the cap closes the connection, which is opened
+        // again while an answer is awaited.
+        QCOMPARE(relay.connections, 1);
+        relay.pushRaw("[\"NOTICE\",\"" + QString(300 * 1024, 'x') + "\"]");
+        QTRY_COMPARE(relay.connections, 2);
+        QTRY_COMPARE(relay.requests.size(), 2);
+        bunker.answerHeld();
+        QTRY_COMPARE(result.answers, 1);
+        QCOMPARE(result.error, QString());
+        QVERIFY(result.event.verify());
+        QCOMPARE(signer->waiting(), 0);
+    }
+
+    void remoteSignerTimesOut()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        bunker.hold = true;
+        auto signer = pairedSigner(bunker, relay);
+        RemoteSigner::Limits limits = quickRemoteLimits();
+        limits.requestTimeoutMs = 300;
+        signer->setLimits(limits);
+        Signed result;
+        signer->sign(signingDraft(), result.done());
+        QTRY_COMPARE(result.answers, 1);
+        QCOMPARE(result.error, QString("The signer did not answer in time"));
+        QCOMPARE(signer->waiting(), 0);
+        // An answer after the timeout is no answer.
+        bunker.answerHeld();
+        QTest::qWait(100);
+        QCOMPARE(result.answers, 1);
+
+        // No relay to reach: said as such.
+        RemoteSigner::Pairing pairing;
+        pairing.clientSecret = QByteArray(32, '\7');
+        pairing.signerPubkey = bunker.pubkey();
+        pairing.relays = {"ws://127.0.0.1:1"};
+        auto unreachable = RemoteSigner::create(pairing, syncPubkey());
+        limits.connectTimeoutMs = 200;
+        unreachable->setLimits(limits);
+        Signed lost;
+        unreachable->sign(signingDraft(), lost.done());
+        QTRY_COMPARE(lost.answers, 1);
+        QCOMPARE(lost.error, QString("Cannot reach the relays of the remote signer"));
+
+        // Gone, it answers nothing.
+        Signed dropped;
+        bunker.hold = true;
+        signer->sign(signingDraft(), dropped.done());
+        QTRY_COMPARE(bunker.held.size(), 1);
+        signer.reset();
+        bunker.answerHeld();
+        QTest::qWait(400);
+        QCOMPARE(dropped.answers, 0);
+    }
+
+    // An auth_url answer is shown, never opened, and the real answer that
+    // follows it is still taken.
+    void remoteSignerSurfacesAuthUrls()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        auto signer = pairedSigner(bunker, relay);
+        QSignalSpy urls(signer.get(), &RemoteSigner::authUrl);
+        bunker.authUrl = "https://signer.example.invalid/approve?id=1";
+        Signed result;
+        signer->sign(signingDraft(), result.done());
+        QTRY_COMPARE(urls.size(), 1);
+        QCOMPARE(urls.first().first().toString(), bunker.authUrl);
+        QCOMPARE(result.answers, 0);
+        QTRY_COMPARE(result.answers, 1);
+        QCOMPARE(result.error, QString());
+        QVERIFY(result.event.verify());
+
+        // Not a web page, or one over plain http: passed over, and the
+        // request goes on waiting.
+        for (const QString &url : {QString("file:///etc/passwd"), QString("http://signer.example.invalid/approve")}) {
+            bunker.authUrl = url;
+            Signed other;
+            signer->sign(signingDraft(), other.done());
+            QTRY_COMPARE(other.answers, 1);
+            QCOMPARE(urls.size(), 1);
+        }
+    }
+
+    // A nostrconnect:// link names the client, the relays, and a secret; the
+    // signer app's connect must carry that secret, and tells its key.
+    void remoteSignerPairsThroughANostrConnectLink()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        auto pairing = RemoteSigner::newPairing({relay.url(), "http://not.a.relay.invalid"});
+        QVERIFY(pairing);
+        QCOMPARE(pairing->relays, QStringList{relay.url()});
+        QVERIFY(pairing->signerPubkey.isEmpty());
+        QCOMPARE(pairing->secret.size(), 32);
+        const QString link = RemoteSigner::nostrConnectUri(*pairing);
+        auto signer = RemoteSigner::create(*pairing, syncPubkey());
+        QVERIFY(signer);
+        signer->setLimits(quickRemoteLimits());
+        QVERIFY(link.startsWith("nostrconnect://" + signer->clientPubkey() + "?relay="));
+        const QUrlQuery query(link.section('?', 1));
+        QCOMPARE(query.allQueryItemValues("relay", QUrl::FullyDecoded), QStringList{relay.url()});
+        QCOMPARE(query.queryItemValue("secret"), pairing->secret);
+        QCOMPARE(query.queryItemValue("name"), QString("Readstr"));
+        QCOMPARE(query.queryItemValue("perms", QUrl::FullyDecoded),
+                 QString("sign_event:30404,sign_event:30405,sign_event:30406,sign_event:%1")
+                     .arg(RemoteSigner::pairingCheckKind));
+
+        std::optional<QString> paired;
+        signer->pair([&](const QString &error) { paired = error; });
+        QCOMPARE(signer->waiting(), 1);
+        QTRY_COMPARE(relay.requests.size(), 1);
+        // Another secret, or another key with the right one but no
+        // connection to it, is not the pairing.
+        bunker.connectTo(link, QString("guess"));
+        QTest::qWait(100);
+        QVERIFY(!paired);
+        QCOMPARE(signer->pairing().signerPubkey, QString());
+        bunker.connectTo(link);
+        QTRY_VERIFY(paired);
+        QCOMPARE(*paired, QString());
+        QCOMPARE(bunker.methods, QStringList({"get_public_key", "sign_event"}));
+        RemoteSigner::Pairing learned = signer->pairing();
+        QCOMPARE(learned.signerPubkey, bunker.pubkey());
+        QCOMPARE(learned.clientSecret, pairing->clientSecret);
+        QVERIFY(RemoteSigner::Pairing::fromJson(learned.toJson()));
+        learned.wipe();
+
+        Signed result;
+        signer->sign(signingDraft(), result.done());
+        QTRY_COMPARE(result.answers, 1);
+        QVERIFY(result.event.verify());
+
+        // A link nobody answers ends in time.
+        auto unanswered = RemoteSigner::newPairing({relay.url()});
+        auto waiting = RemoteSigner::create(*unanswered, syncPubkey());
+        RemoteSigner::Limits limits = quickRemoteLimits();
+        limits.pairingTimeoutMs = 200;
+        waiting->setLimits(limits);
+        std::optional<QString> timedOut;
+        waiting->pair([&](const QString &error) { timedOut = error; });
+        QTRY_VERIFY(timedOut);
+        QCOMPARE(*timedOut, QString("No signer app answered the link in time"));
+        QCOMPARE(waiting->waiting(), 0);
+        pairing->wipe();
+        unanswered->wipe();
+    }
+
+    // A signer that only repeats the account's public key, which anyone
+    // can, but cannot sign with its key is no pairing.
+    void remoteSignerPairsOnlyWhenItCanSign()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        for (const auto &[mode, expected] :
+             {std::pair(FakeBunker::Sign::OtherKey,
+                        "The signer did not show that it holds the account's key: The signer signed with another key "
+                        "than the one for " + Nip19::shortNpub(syncNpub(), syncNpub())),
+              std::pair(FakeBunker::Sign::BadSignature,
+                        QString("The signer did not show that it holds the account's key: The signer's signature "
+                                "does not check out")),
+              std::pair(FakeBunker::Sign::Refuse,
+                        QString("The signer did not show that it holds the account's key: The signer refused to "
+                                "sign: user rejected"))}) {
+            bunker.sign = mode;
+            bunker.methods.clear();
+            auto signer = pairedSigner(bunker, relay);
+            std::optional<QString> paired;
+            signer->pair([&](const QString &error) { paired = error; });
+            QTRY_VERIFY(paired);
+            QCOMPARE(*paired, expected);
+            QCOMPARE(bunker.methods, QStringList({"connect", "get_public_key", "sign_event"}));
+        }
+    }
+
+    // Deleted with a request out on a connected relay, or from inside one
+    // of its own callbacks, the signer answers nothing more and nothing of
+    // it runs after.
+    void remoteSignerCanBeDeletedAnytime()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        bunker.hold = true;
+        auto signer = pairedSigner(bunker, relay);
+        Signed dropped;
+        signer->sign(signingDraft(), dropped.done());
+        QTRY_COMPARE(bunker.held.size(), 1);
+        signer.reset();
+        bunker.answerHeld();
+        relay.dropAll();
+        QTest::qWait(100);
+        QCOMPARE(dropped.answers, 0);
+
+        bunker.hold = false;
+        signer = pairedSigner(bunker, relay);
+        bool answered = false;
+        signer->sign(signingDraft(), [&](const NostrEvent &event, const QString &error) {
+            answered = event.verify() && error.isEmpty();
+            signer.reset();
+        });
+        QTRY_VERIFY(answered);
+        QTest::qWait(100);
+
+        bunker.hold = true;
+        signer = pairedSigner(bunker, relay);
+        RemoteSigner::Limits limits = quickRemoteLimits();
+        limits.requestTimeoutMs = 100;
+        signer->setLimits(limits);
+        std::optional<QString> timedOut;
+        signer->sign(signingDraft(), [&](const NostrEvent &, const QString &error) {
+            timedOut = error;
+            signer.reset();
+        });
+        QTRY_VERIFY(timedOut);
+        QCOMPARE(*timedOut, QString("The signer did not answer in time"));
+        bunker.held.clear();
+
+        auto unanswered = RemoteSigner::newPairing({relay.url()});
+        signer = RemoteSigner::create(*unanswered, syncPubkey());
+        unanswered->wipe();
+        limits.pairingTimeoutMs = 100;
+        signer->setLimits(limits);
+        std::optional<QString> unpaired;
+        signer->pair([&](const QString &error) {
+            unpaired = error;
+            signer.reset();
+        });
+        QTRY_VERIFY(unpaired);
+        QTest::qWait(100);
+    }
+
+    // A second pair() while a link waits fails, and the first still pairs.
+    void remoteSignerPairsOnceAtATime()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        auto pairing = RemoteSigner::newPairing({relay.url()});
+        const QString link = RemoteSigner::nostrConnectUri(*pairing);
+        auto signer = RemoteSigner::create(*pairing, syncPubkey());
+        pairing->wipe();
+        signer->setLimits(quickRemoteLimits());
+        std::optional<QString> first, second;
+        signer->pair([&](const QString &error) { first = error; });
+        signer->pair([&](const QString &error) { second = error; });
+        QTRY_VERIFY(second);
+        QCOMPARE(*second, QString("Already waiting for a signer app to answer the link"));
+        QVERIFY(!first);
+        QTRY_COMPARE(relay.requests.size(), 1);
+        bunker.connectTo(link);
+        QTRY_VERIFY(first);
+        QCOMPARE(*first, QString());
+    }
+
+    // Limits set after the signer is made apply to its relays' sockets.
+    void remoteSignerAppliesLimitsToItsRelays()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        bunker.hold = true;
+        auto pairing = RemoteSigner::parseBunkerUri(bunker.uri(relay.url()), {relay.url()});
+        auto signer = RemoteSigner::create(*pairing, syncPubkey());
+        pairing->wipe();
+        RemoteSigner::Limits limits = quickRemoteLimits();
+        limits.maxMessageBytes = 4 * 1024;
+        signer->setLimits(limits);
+        Signed result;
+        signer->sign(signingDraft(), result.done());
+        QTRY_COMPARE(bunker.held.size(), 1);
+        QCOMPARE(relay.connections, 1);
+        relay.pushRaw("[\"NOTICE\",\"" + QString(8 * 1024, 'x') + "\"]");
+        QTRY_COMPARE(relay.connections, 2);
+        QTRY_COMPARE(relay.requests.size(), 2);
+        bunker.answerHeld();
+        QTRY_COMPARE(result.answers, 1);
+        QCOMPARE(result.error, QString());
+    }
+
+    // A request every relay refused fails at once with what they said;
+    // one refused by some relays only still goes through the others.
+    void remoteSignerFailsWhatEveryRelayRefuses()
+    {
+        FakeRelay first, second;
+        first.rejectWith = "blocked: not on the list";
+        second.rejectWith = "rate-limited: slow down";
+        FakeBunker bunker(second);
+        // The relay passes the request on even so; the signer's answer
+        // must not be what ends it.
+        bunker.hold = true;
+        const QString uri = bunker.uri(first.url()) + "&relay=" + QUrl::toPercentEncoding(second.url());
+        auto pairing = RemoteSigner::parseBunkerUri(uri, {first.url(), second.url()});
+        QCOMPARE(pairing->relays.size(), 2);
+        auto signer = RemoteSigner::create(*pairing, syncPubkey());
+        pairing->wipe();
+        RemoteSigner::Limits limits = quickRemoteLimits();
+        limits.requestTimeoutMs = 30000;
+        signer->setLimits(limits);
+        QElapsedTimer clock;
+        clock.start();
+        Signed refused;
+        signer->sign(signingDraft(), refused.done());
+        QTRY_COMPARE(refused.answers, 1);
+        QVERIFY(clock.elapsed() < 10000);
+        QVERIFY2(refused.error.startsWith("The relays of the remote signer refused the request: "),
+                 qPrintable(refused.error));
+        QCOMPARE(signer->waiting(), 0);
+
+        bunker.held.clear();
+        bunker.hold = false;
+        second.rejectWith.clear();
+        Signed signedOnce;
+        signer->sign(signingDraft(), signedOnce.done());
+        QTRY_COMPARE(signedOnce.answers, 1);
+        QCOMPARE(signedOnce.error, QString());
+        QVERIFY(signedOnce.event.verify());
+    }
+
+    // A request queued for a relay still connecting is not sent there once
+    // another relay has brought its answer.
+    void remoteSignerSendsOnlyWhatStillWaits()
+    {
+        FakeRelay fast, slow;
+        FakeBunker bunker(fast);
+        slow.pauseAccepting();
+        const QString uri = bunker.uri(fast.url()) + "&relay=" + QUrl::toPercentEncoding(slow.url());
+        auto pairing = RemoteSigner::parseBunkerUri(uri, {fast.url(), slow.url()});
+        QCOMPARE(pairing->relays.size(), 2);
+        auto signer = RemoteSigner::create(*pairing, syncPubkey());
+        pairing->wipe();
+        RemoteSigner::Limits limits = quickRemoteLimits();
+        limits.connectTimeoutMs = 10000;
+        signer->setLimits(limits);
+        Signed result;
+        signer->sign(signingDraft(), result.done());
+        QTRY_COMPARE(result.answers, 1);
+        QCOMPARE(result.error, QString());
+        QVERIFY(slow.log.isEmpty());
+        slow.resumeAccepting();
+        QTRY_VERIFY(slow.log.contains("REQ"));
+        QTest::qWait(100);
+        QCOMPARE(slow.published.size(), 0);
+        QCOMPARE(fast.published.size(), 1);
+    }
+
+    // A relay that ends the subscription with CLOSED is asked again, and
+    // the answer still comes through it; one that keeps closing it counts
+    // as refusing the request, which a later request asks it again for.
+    void remoteSignerResubscribesAfterClosed()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        bunker.hold = true;
+        relay.closeWith = "error: restarting";
+        RemoteSigner::Limits limits = quickRemoteLimits();
+        limits.requestTimeoutMs = 30000;
+        auto signer = pairedSigner(bunker, relay);
+        signer->setLimits(limits);
+        Signed result;
+        signer->sign(signingDraft(), result.done());
+        QTRY_COMPARE(bunker.held.size(), 1);
+        QTRY_VERIFY(relay.requests.size() >= 2);
+        relay.closeWith.clear();
+        const qsizetype asked = relay.requests.size();
+        QTRY_VERIFY(relay.requests.size() > asked);
+        QCOMPARE(result.answers, 0);
+        bunker.answerHeld();
+        QTRY_COMPARE(result.answers, 1);
+        QCOMPARE(result.error, QString());
+        QVERIFY(result.event.verify());
+        QCOMPARE(relay.connections, 1);
+
+        relay.closeWith = "blocked: not for you";
+        auto closing = pairedSigner(bunker, relay);
+        closing->setLimits(limits);
+        QElapsedTimer clock;
+        clock.start();
+        Signed refused;
+        const qsizetype before = relay.requests.size();
+        closing->sign(signingDraft(), refused.done());
+        QTRY_COMPARE(refused.answers, 1);
+        QVERIFY(clock.elapsed() < 10000);
+        QCOMPARE(refused.error, QString("The relays of the remote signer refused the request: blocked: not for you"));
+        QCOMPARE(relay.requests.size() - before, 4);
+        QCOMPARE(closing->waiting(), 0);
+
+        bunker.held.clear();
+        bunker.hold = false;
+        relay.closeWith.clear();
+        Signed again;
+        closing->sign(signingDraft(), again.done());
+        QTRY_COMPARE(again.answers, 1);
+        QCOMPARE(again.error, QString());
+        QVERIFY(again.event.verify());
+    }
+
+    // A draft whose signed answer cannot come back, past NIP-44's bound or
+    // the relay message cap, is refused before it reaches the signer, even
+    // when the request itself would fit.
+    void remoteSignerRefusesWhatCannotComeBack()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        auto signer = pairedSigner(bunker, relay);
+        NostrEvent over = signingDraft();
+        over.tags = {};
+        over.content = QString(Nip44::maxPlaintext - 200, 'x');
+        Signed tooLarge;
+        signer->sign(over, tooLarge.done());
+        QTRY_COMPARE(tooLarge.answers, 1);
+        QCOMPARE(tooLarge.error, QString("This event is too large for a remote signer to sign"));
+        QTest::qWait(100);
+        QCOMPARE(bunker.methods, QStringList());
+
+        NostrEvent under = over;
+        under.content = QString(Nip44::maxPlaintext - 600, 'x');
+        Signed fits;
+        signer->sign(under, fits.done());
+        QTRY_COMPARE(fits.answers, 1);
+        QCOMPARE(fits.error, QString());
+        QVERIFY(fits.event.verify());
+        QCOMPARE(fits.event.content, under.content);
+
+        RemoteSigner::Limits limits = quickRemoteLimits();
+        limits.maxMessageBytes = 4 * 1024;
+        signer->setLimits(limits);
+        bunker.methods.clear();
+        NostrEvent capped = over;
+        capped.content = QString(3000, 'x');
+        Signed pastCap;
+        signer->sign(capped, pastCap.done());
+        QTRY_COMPARE(pastCap.answers, 1);
+        QCOMPARE(pastCap.error, QString("This event is too large for a remote signer to sign"));
+        capped.content = QString(1000, 'x');
+        Signed withinCap;
+        signer->sign(capped, withinCap.done());
+        QTRY_COMPARE(withinCap.answers, 1);
+        QCOMPARE(withinCap.error, QString());
+        QCOMPARE(bunker.methods, QStringList{"sign_event"});
+    }
+
+    // The pairing is an item of its own, which a search for the key cannot
+    // find, and only one that parses is handed back.
+    void secretServiceKeepsThePairingApart()
+    {
+        const QString npub = syncNpub(), session = "/org/freedesktop/secrets/session/1";
+        const QVariantList opened{QVariant::fromValue(QDBusVariant(QString())),
+                                  QVariant::fromValue(QDBusObjectPath(session))};
+        RemoteSigner::Pairing pairing;
+        pairing.clientSecret = QByteArray(32, '\7');
+        pairing.signerPubkey = syncPubkey();
+        pairing.relays = {"wss://relay.example.invalid"};
+        QByteArray json = pairing.toJson();
+        using Attributes = QMap<QString, QString>;
+        const Attributes attributes{{"application", "readstr-nip46"}, {"npub", npub}};
+        QCOMPARE(SecretServiceKeyStore::pairingAttributes(npub), attributes);
+        {
+            FakeSecretService service;
+            std::optional<KeyStore::Result> result;
+            service.storePairing(npub, json, [&](const KeyStore::Result &answer) { result = answer; });
+            service.reply(opened);
+            const QVariantList create = service.calls.last().arguments();
+            const QVariantMap properties = create.at(0).toMap();
+            QCOMPARE(properties.value("org.freedesktop.Secret.Item.Label").toString(),
+                     "Readstr remote signer pairing (" + npub + ")");
+            QCOMPARE(properties.value("org.freedesktop.Secret.Item.Attributes").value<Attributes>(), attributes);
+            QCOMPARE(create.at(1).value<SecretServiceKeyStore::Secret>().value, json);
+            service.reply({QVariant::fromValue(QDBusObjectPath("/org/freedesktop/secrets/collection/login/7")),
+                           QVariant::fromValue(QDBusObjectPath("/"))});
+            QVERIFY(result && result->error == KeyStore::Error::None);
+            QCOMPARE(service.calls.at(1).arguments().at(1).value<SecretServiceKeyStore::Secret>().value,
+                     QByteArray(json.size(), '\0'));
+        }
+        {
+            FakeSecretService service;
+            std::optional<KeyStore::Result> result;
+            service.lookupPairing(npub, [&](const KeyStore::Result &answer) { result = answer; });
+            QCOMPARE(service.calls.first().arguments().at(0).value<Attributes>(), attributes);
+            const auto paths = [](const QString &path) {
+                return QVariant::fromValue(QList<QDBusObjectPath>{QDBusObjectPath(path)});
+            };
+            service.reply({paths("/org/freedesktop/secrets/collection/login/1"), QVariant::fromValue(QList<QDBusObjectPath>())});
+            service.reply(opened);
+            // A buffer of its own, as the store wipes the reply's in place.
+            const QByteArray sent(json.constData(), json.size());
+            service.reply({QVariant::fromValue(SecretServiceKeyStore::Secret{QDBusObjectPath(session), {}, sent,
+                                                                             "text/plain"})});
+            QVERIFY(result && result->found);
+            QCOMPARE(result->secret, json);
+        }
+        {
+            // A key search names the key's attributes only.
+            FakeSecretService service;
+            service.contains(npub, [](const KeyStore::Result &) {});
+            QCOMPARE(service.calls.first().arguments().at(0).value<Attributes>(),
+                     (Attributes{{"application", "readstr"}, {"npub", npub}}));
+        }
+        pairing.wipe();
+        wipe(json);
+    }
+
+    // With no nsec stored, the window pairs with a remote signer through a
+    // bunker:// URI, keeps the pairing in the keyring alone, publishes
+    // through it, shows that the request waits for approval, and signs with
+    // it again after a restart without connecting anew.
+    void backendPublishesThroughARemoteSigner()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount(true);
+        const QString npub = syncNpub();
+        qint64 id = 0;
+        {
+            Store store;
+            QVERIFY(store.open());
+            id = store.addFeed("https://a.invalid/feed", "A");
+            store.addFeed("https://b.invalid/feed", "B");
+        }
+        FakeBunker bunker(relay);
+        bunker.secret = "s3cret";
+        FakeKeyStore keys;
+        const auto published = [&relay](int kind) {
+            QList<NostrEvent> events;
+            for (const QJsonObject &json : std::as_const(relay.published))
+                if (json.value("kind").toInt() == kind)
+                    events << *NostrEvent::fromJson(json);
+            return events;
+        };
+        QByteArray clientSecret;
+        {
+            Backend backend;
+            backend.setRelays({relay.url()});
+            backend.setPublishDelays(100, 100);
+            backend.setRemoteSignerLimits(quickRemoteLimits());
+            backend.setKeyStore(&keys);
+            QTRY_VERIFY(backend.signingKeyChecked() && !backend.signingBusy());
+            QVERIFY(backend.signerMissing());
+            QCOMPARE(backend.signerKind(), QString("none"));
+            QCOMPARE(keys.pairingCalls, QStringList{"contains " + npub});
+
+            QVERIFY(!backend.connectBunker("bunker://nothing"));
+            QCOMPARE(backend.remoteSignerError(), QString("That is not a bunker:// link with a relay Readstr can use"));
+            QVERIFY(backend.connectBunker(bunker.uri(relay.url(), "s3cret")));
+            QVERIFY(backend.remoteSignerError().isEmpty());
+            QVERIFY(backend.remoteConnecting());
+            QTRY_VERIFY(backend.remoteSignerPaired());
+            QVERIFY(!backend.remoteConnecting());
+            QVERIFY(!backend.signerMissing());
+            QCOMPARE(backend.signerKind(), QString("remote"));
+            QCOMPARE(backend.status(), QString("Connected to the remote signer"));
+            QCOMPARE(bunker.methods, QStringList({"connect", "get_public_key", "sign_event"}));
+            auto pairing = RemoteSigner::Pairing::fromJson(keys.pairings.value(npub));
+            QVERIFY(pairing);
+            QCOMPARE(pairing->signerPubkey, bunker.pubkey());
+            QCOMPARE(pairing->relays, QStringList{relay.url()});
+            clientSecret = pairing->clientSecret.toHex();
+            pairing->wipe();
+            QVERIFY(keys.keys.isEmpty());
+
+            bunker.hold = true;
+            QVERIFY(backend.unsubscribe(id));
+            QTRY_VERIFY_WITH_TIMEOUT(backend.remoteSignerWaiting(), 10000);
+            QCOMPARE(backend.status(), QString("Approve the request in your signer app"));
+            QVERIFY(published(Sync::subscriptionsKind).isEmpty());
+            bunker.hold = false;
+            bunker.answerHeld();
+            QTRY_COMPARE(published(Sync::subscriptionsKind).size(), 1);
+            QTRY_VERIFY(!backend.publishing());
+            QVERIFY(!backend.remoteSignerWaiting());
+            QVERIFY(backend.status() != "Approve the request in your signer app");
+            QVERIFY(backend.publishError().isEmpty());
+            const NostrEvent event = published(Sync::subscriptionsKind).first();
+            QVERIFY(event.verify());
+            QCOMPARE(event.pubkey, syncPubkey());
+            QCOMPARE(keys.pairingCalls.count("lookup " + npub), 0);
+        }
+        {
+            bunker.methods.clear();
+            Backend backend;
+            backend.setRelays({relay.url()});
+            backend.setRemoteSignerLimits(quickRemoteLimits());
+            backend.setKeyStore(&keys);
+            QTRY_VERIFY(backend.remoteSignerPaired());
+            QCOMPARE(backend.signerKind(), QString("remote"));
+            const qsizetype before = published(Sync::subscriptionsKind).size();
+            backend.publishNow();
+            QTRY_COMPARE_WITH_TIMEOUT(published(Sync::subscriptionsKind).size(), before + 1, 10000);
+            QTRY_VERIFY(!backend.publishing());
+            QVERIFY2(backend.publishError().isEmpty(), qPrintable(backend.publishError()));
+            QVERIFY(!bunker.methods.contains("connect"));
+            QVERIFY(bunker.methods.contains("sign_event"));
+            QCOMPARE(keys.pairingCalls.count("lookup " + npub), 1);
+
+            backend.disconnectSigner();
+            QTRY_VERIFY(!backend.remoteSignerPaired());
+            QVERIFY(keys.pairings.isEmpty());
+            QVERIFY(backend.signerMissing());
+            QCOMPARE(backend.signerKind(), QString("none"));
+            Signed result;
+            backend.sign(signingDraft(), result.done());
+            QTRY_COMPARE(result.answers, 1);
+            QCOMPARE(result.error, "No signing key is stored for " + Nip19::shortNpub(npub, npub));
+        }
+        // Nothing of the client key is left in Readstr's files.
+        QDirIterator files(dir.path(), QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
+        while (files.hasNext()) {
+            QFile file(files.next());
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QVERIFY2(!file.readAll().contains(clientSecret), qPrintable(file.fileName()));
+        }
+    }
+
+    // A signer holding another account's key is refused and not kept; a
+    // nostrconnect:// link pairs with the app that answers it; with both a
+    // key and a pairing stored, the key signs; and "Stop syncing" with
+    // removal takes the pairing too.
+    void backendPairsOnlyWithTheAccountsSigner()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeKeyStore keys;
+        Backend backend;
+        QStringList clipboard;
+        backend.setClipboardWriter([&](const QString &text) { clipboard << text; });
+        backend.setRelays({relay.url()});
+        backend.setRemoteSignerLimits(quickRemoteLimits());
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyChecked() && !backend.signingBusy());
+        {
+            FakeBunker other(relay, 5, 2);
+            QVERIFY(backend.connectBunker(other.uri(relay.url())));
+            QTRY_VERIFY(!backend.remoteConnecting());
+            QVERIFY2(backend.remoteSignerError().startsWith("The signer holds the key of "),
+                     qPrintable(backend.remoteSignerError()));
+            QVERIFY(!backend.remoteSignerPaired());
+            QVERIFY(keys.pairings.isEmpty());
+        }
+        {
+            FakeBunker bunker(relay);
+            QVERIFY(backend.nostrConnectUri().isEmpty());
+            QVERIFY(backend.startNostrConnect());
+            const QString link = backend.nostrConnectUri();
+            QVERIFY(link.startsWith("nostrconnect://"));
+            QCOMPARE(QUrlQuery(link.section('?', 1)).allQueryItemValues("relay", QUrl::FullyDecoded),
+                     QStringList{relay.url()});
+            QCOMPARE(backend.nostrConnectQr(), QrCode::source(link));
+            QVERIFY(backend.remoteSignerError().isEmpty());
+            backend.copyNostrConnectUri();
+            QCOMPARE(clipboard, QStringList{link});
+            // Stopped and started again, the old link pairs nothing.
+            backend.cancelRemoteConnect();
+            QVERIFY(!backend.remoteConnecting());
+            QVERIFY(backend.nostrConnectUri().isEmpty());
+            QVERIFY(backend.startNostrConnect());
+            const QString fresh = backend.nostrConnectUri();
+            QVERIFY(fresh != link);
+            QTRY_VERIFY(relay.requests.size() >= 2);
+            bunker.connectTo(link);
+            QTest::qWait(200);
+            QVERIFY(!backend.remoteSignerPaired());
+            bunker.connectTo(fresh);
+            QTRY_VERIFY(backend.remoteSignerPaired());
+            QVERIFY(backend.nostrConnectUri().isEmpty());
+            QVERIFY(keys.pairings.contains(npub));
+
+            // The key wins once there is one.
+            QVERIFY(backend.addSigningKey(QByteArray(32, '\1').toHex()));
+            QTRY_COMPARE(backend.signerKind(), QString("key"));
+            bunker.methods.clear();
+            Signed result;
+            backend.sign(signingDraft(), result.done());
+            QTRY_COMPARE(result.answers, 1);
+            QVERIFY(result.error.isEmpty());
+            QVERIFY(result.event.verify());
+            QTest::qWait(100);
+            QVERIFY(bunker.methods.isEmpty());
+        }
+        backend.stopSync(true);
+        QTRY_VERIFY(keys.pairings.isEmpty());
+        QTRY_VERIFY(keys.keys.isEmpty());
+        QCOMPARE(keys.pairingCalls.last(), "remove " + npub);
+        QTRY_COMPARE(backend.status(), "Stopped syncing with " + Nip19::shortNpub(npub, npub) + " and removed its signing key");
+        QVERIFY(!backend.remoteSignerPaired());
+    }
+
+    // A signer that cannot sign as the account pairs nothing, and nothing
+    // is kept.
+    void backendStoresNoPairingWithoutProof()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        FakeBunker bunker(relay);
+        bunker.sign = FakeBunker::Sign::OtherKey;
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setRemoteSignerLimits(quickRemoteLimits());
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyChecked() && !backend.signingBusy());
+        QVERIFY(backend.connectBunker(bunker.uri(relay.url())));
+        QTRY_VERIFY(!backend.remoteConnecting());
+        QVERIFY2(backend.remoteSignerError().startsWith("The signer did not show that it holds the account's key: "),
+                 qPrintable(backend.remoteSignerError()));
+        QVERIFY(!backend.remoteSignerPaired());
+        QVERIFY(keys.pairings.isEmpty());
+        QVERIFY(!keys.pairingCalls.contains("store " + syncNpub()));
+    }
+
+    // A key added while the remote signer still has signs out takes over
+    // once they are answered: what comes meanwhile, and after, is signed
+    // with the key.
+    void backendSwitchesToAKeyAddedMidRemoteSign()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        FakeBunker bunker(relay);
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setRemoteSignerLimits(quickRemoteLimits());
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyChecked() && !backend.signingBusy());
+        QVERIFY(backend.connectBunker(bunker.uri(relay.url())));
+        QTRY_VERIFY(backend.remoteSignerPaired());
+        bunker.hold = true;
+        Signed a, b;
+        backend.sign(signingDraft(), a.done());
+        backend.sign(signingDraft(), b.done());
+        QTRY_COMPARE(bunker.held.size(), 2);
+        bunker.methods.clear();
+        QVERIFY(backend.addSigningKey(QByteArray(32, '\1').toHex()));
+        QTRY_COMPARE(backend.signerKind(), QString("key"));
+        Signed meanwhile;
+        backend.sign(signingDraft(), meanwhile.done());
+        QTest::qWait(200);
+        QCOMPARE(meanwhile.answers, 0);
+        bunker.hold = false;
+        bunker.answerHeld();
+        QTRY_COMPARE(a.answers, 1);
+        QTRY_COMPARE(b.answers, 1);
+        QTRY_COMPARE(meanwhile.answers, 1);
+        QVERIFY(a.error.isEmpty() && b.error.isEmpty() && meanwhile.error.isEmpty());
+        QVERIFY(meanwhile.event.verify());
+        Signed next;
+        backend.sign(signingDraft(), next.done());
+        QTRY_COMPARE(next.answers, 1);
+        QVERIFY(next.error.isEmpty());
+        QVERIFY(next.event.verify());
+        QTest::qWait(100);
+        QCOMPARE(bunker.methods, QStringList());
+    }
+
+    // Paired anew with another signer while the first still has a sign
+    // out, the next sign goes to the new one.
+    void backendSwitchesToANewPairingMidRemoteSign()
+    {
+        QTemporaryDir dir;
+        FakeRelay relayA, relayB;
+        relayA.honourFilters = relayB.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        FakeBunker bunkerA(relayA, 5, 1), bunkerB(relayB, 7, 1);
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setRelays({relayA.url(), relayB.url()});
+        backend.setRemoteSignerLimits(quickRemoteLimits());
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyChecked() && !backend.signingBusy());
+        QVERIFY(backend.connectBunker(bunkerA.uri(relayA.url())));
+        QTRY_VERIFY(backend.remoteSignerPaired());
+        bunkerA.hold = true;
+        Signed a;
+        backend.sign(signingDraft(), a.done());
+        QTRY_COMPARE(bunkerA.held.size(), 1);
+        QVERIFY(backend.connectBunker(bunkerB.uri(relayB.url())));
+        QTRY_VERIFY(!backend.remoteConnecting());
+        QCOMPARE(RemoteSigner::Pairing::fromJson(keys.pairings.value(syncNpub()))->signerPubkey, bunkerB.pubkey());
+        bunkerA.hold = false;
+        bunkerA.answerHeld();
+        QTRY_COMPARE(a.answers, 1);
+        QVERIFY(a.error.isEmpty());
+        bunkerA.methods.clear();
+        bunkerB.methods.clear();
+        Signed next;
+        backend.sign(signingDraft(), next.done());
+        QTRY_COMPARE(next.answers, 1);
+        QVERIFY2(next.error.isEmpty(), qPrintable(next.error));
+        QCOMPARE(bunkerA.methods, QStringList());
+        QCOMPARE(bunkerB.methods, QStringList{"sign_event"});
+    }
+
+    // "Disconnect signer" fails what the remote signer has out, and what
+    // waits on the pairing being read, but not a read of the key, and a
+    // removal the keyring fails is said.
+    void backendDisconnectsOnlyTheRemoteSigner()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        const QString disconnected = "The remote signer was disconnected before the event was signed";
+        FakeBunker bunker(relay);
+        FakeKeyStore keys;
+        auto backend = std::make_unique<Backend>();
+        const auto open = [&] {
+            backend = std::make_unique<Backend>();
+            backend->setRelays({relay.url()});
+            backend->setRemoteSignerLimits(quickRemoteLimits());
+            backend->setKeyStore(&keys);
+            QTRY_VERIFY(backend->signingKeyChecked() && !backend->signingBusy());
+        };
+        const auto pair = [&] {
+            QVERIFY(backend->connectBunker(bunker.uri(relay.url())));
+            QTRY_VERIFY(backend->remoteSignerPaired());
+        };
+        // Mid remote sign.
+        open();
+        pair();
+        bunker.hold = true;
+        Signed remote;
+        backend->sign(signingDraft(), remote.done());
+        QTRY_COMPARE(bunker.held.size(), 1);
+        backend->disconnectSigner();
+        QTRY_COMPARE(remote.answers, 1);
+        QCOMPARE(remote.error, disconnected);
+        QTRY_VERIFY(!backend->remoteSignerPaired());
+        QVERIFY(keys.pairings.isEmpty());
+        bunker.held.clear();
+        bunker.hold = false;
+
+        // While the key is read, the key signs.
+        pair();
+        keys.keys.insert(npub, QByteArray(32, '\1'));
+        open();
+        QCOMPARE(backend->signerKind(), QString("key"));
+        keys.hold = true;
+        Signed withKey;
+        backend->sign(signingDraft(), withKey.done());
+        QTRY_COMPARE(keys.held(), 1);
+        backend->disconnectSigner();
+        keys.hold = false;
+        keys.release();
+        QTRY_COMPARE(withKey.answers, 1);
+        QVERIFY2(withKey.error.isEmpty(), qPrintable(withKey.error));
+        QVERIFY(withKey.event.verify());
+        QTRY_VERIFY(keys.pairings.isEmpty());
+
+        // A key the check found but the read did not: the pairing is not
+        // read after it.
+        pair();
+        open();
+        keys.keys.clear();
+        keys.hold = true;
+        bunker.methods.clear();
+        Signed gone;
+        backend->sign(signingDraft(), gone.done());
+        QTRY_COMPARE(keys.held(), 1);
+        backend->disconnectSigner();
+        keys.hold = false;
+        const qsizetype lookups = keys.pairingCalls.count("lookup " + npub);
+        keys.release();
+        QTRY_COMPARE(gone.answers, 1);
+        QCOMPARE(gone.error, disconnected);
+        QCOMPARE(keys.pairingCalls.count("lookup " + npub), lookups);
+        QTRY_VERIFY(keys.pairings.isEmpty());
+
+        // While the pairing is read.
+        pair();
+        open();
+        bunker.methods.clear();
+        keys.hold = true;
+        Signed reading;
+        backend->sign(signingDraft(), reading.done());
+        QTRY_COMPARE(keys.held(), 1);
+        QCOMPARE(keys.pairingCalls.last(), "lookup " + npub);
+        backend->disconnectSigner();
+        QTRY_COMPARE(reading.answers, 1);
+        QCOMPARE(reading.error, disconnected);
+        keys.hold = false;
+        keys.release();
+        QTRY_VERIFY(keys.pairings.isEmpty());
+        QTest::qWait(100);
+        QVERIFY(bunker.methods.isEmpty());
+
+        // A removal that fails.
+        pair();
+        keys.error = KeyStore::Error::Locked;
+        backend->disconnectSigner();
+        QTRY_VERIFY(!backend->signingError().isEmpty());
+        QVERIFY(backend->remoteSignerPaired());
+        QVERIFY(keys.pairings.contains(npub));
+        keys.error = KeyStore::Error::None;
+    }
+
+    // Disconnected while giving way to a key added mid sign, the remote
+    // signer fails only what it has out; what waits behind it is signed
+    // with the key.
+    void backendDisconnectKeepsSignsForTheKey()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        FakeBunker bunker(relay);
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setRemoteSignerLimits(quickRemoteLimits());
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyChecked() && !backend.signingBusy());
+        QVERIFY(backend.connectBunker(bunker.uri(relay.url())));
+        QTRY_VERIFY(backend.remoteSignerPaired());
+        bunker.hold = true;
+        Signed remote;
+        backend.sign(signingDraft(), remote.done());
+        QTRY_COMPARE(bunker.held.size(), 1);
+        QVERIFY(backend.addSigningKey(QByteArray(32, '\1').toHex()));
+        QTRY_COMPARE(backend.signerKind(), QString("key"));
+        Signed queued;
+        backend.sign(signingDraft(), queued.done());
+        QTest::qWait(100);
+        QCOMPARE(queued.answers, 0);
+        backend.disconnectSigner();
+        QTRY_COMPARE(remote.answers, 1);
+        QCOMPARE(remote.error, QString("The remote signer was disconnected before the event was signed"));
+        QTRY_COMPARE(queued.answers, 1);
+        QVERIFY2(queued.error.isEmpty(), qPrintable(queued.error));
+        QVERIFY(queued.event.verify());
+        QTRY_VERIFY(!backend.remoteSignerPaired());
+        bunker.held.clear();
+    }
+
+    // The approval page shown is that of a request still waiting: once the
+    // one that named it is answered, it goes, though another still waits.
+    void backendShowsTheAuthUrlOfAWaitingRequest()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        FakeBunker bunker(relay);
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setRemoteSignerLimits(quickRemoteLimits());
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyChecked() && !backend.signingBusy());
+        QVERIFY(backend.connectBunker(bunker.uri(relay.url())));
+        QTRY_VERIFY(backend.remoteSignerPaired());
+        QTRY_VERIFY(!backend.remoteConnecting());
+        bunker.hold = true;
+        Signed a, b;
+        backend.sign(signingDraft(), a.done());
+        QTRY_COMPARE(bunker.held.size(), 1);
+        backend.sign(signingDraft(), b.done());
+        QTRY_COMPARE(bunker.held.size(), 2);
+        const FakeBunker::Held first = bunker.held.at(0), second = bunker.held.at(1);
+        const QString url = "https://signer.example.invalid/approve?id=a";
+        bunker.respond(first.client, first.id, "auth_url", url);
+        QTRY_COMPARE(backend.remoteAuthUrl(), url);
+        bunker.held = {first};
+        bunker.answerHeld();
+        QTRY_COMPARE(a.answers + b.answers, 1);
+        QTRY_COMPARE(backend.remoteAuthUrl(), QString());
+        QVERIFY(backend.remoteSignerWaiting());
+        bunker.held = {second};
+        bunker.answerHeld();
+        QTRY_COMPARE(a.answers + b.answers, 2);
+        QVERIFY(a.error.isEmpty() && b.error.isEmpty());
+        QTRY_VERIFY(!backend.remoteSignerWaiting());
+        QCOMPARE(backend.remoteAuthUrl(), QString());
+    }
+
+    // "Stop connecting" while the keyring writes the pairing takes it out
+    // again, and nothing shows as paired.
+    void backendUndoesAPairingStoppedWhileStored()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeBunker bunker(relay);
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setRemoteSignerLimits(quickRemoteLimits());
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyChecked() && !backend.signingBusy());
+        keys.hold = true;
+        QVERIFY(backend.connectBunker(bunker.uri(relay.url())));
+        QTRY_COMPARE(keys.held(), 1);
+        QCOMPARE(keys.pairingCalls.last(), "store " + npub);
+        backend.cancelRemoteConnect();
+        keys.hold = false;
+        keys.release();
+        QTRY_COMPARE(keys.pairingCalls.last(), "remove " + npub);
+        QTRY_VERIFY(keys.pairings.isEmpty());
+        QTest::qWait(50);
+        QVERIFY(!backend.remoteSignerPaired());
+        QCOMPARE(backend.signerKind(), QString("none"));
+        QVERIFY(backend.status() != "Connected to the remote signer");
+    }
+
+    // Stopped while a new pairing is written over a working one, the new
+    // one stays: the old item is already overwritten, and removing the new
+    // one would leave no signer at all. The old signer gives way to it.
+    void backendKeepsARepairingStoppedWhileStored()
+    {
+        QTemporaryDir dir;
+        FakeRelay relayA, relayB;
+        relayA.honourFilters = relayB.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeBunker bunkerA(relayA, 5, 1), bunkerB(relayB, 7, 1);
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setRelays({relayA.url(), relayB.url()});
+        backend.setRemoteSignerLimits(quickRemoteLimits());
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyChecked() && !backend.signingBusy());
+        QVERIFY(backend.connectBunker(bunkerA.uri(relayA.url())));
+        QTRY_VERIFY(backend.remoteSignerPaired());
+        QTRY_VERIFY(!backend.remoteConnecting() && !backend.signingBusy());
+        keys.hold = true;
+        QVERIFY(backend.connectBunker(bunkerB.uri(relayB.url())));
+        QTRY_COMPARE(keys.held(), 1);
+        QCOMPARE(keys.pairingCalls.last(), "store " + npub);
+        backend.cancelRemoteConnect();
+        keys.hold = false;
+        keys.release();
+        QTRY_VERIFY(!backend.signingBusy());
+        QTest::qWait(50);
+        QVERIFY(!keys.pairingCalls.contains("remove " + npub));
+        QCOMPARE(RemoteSigner::Pairing::fromJson(keys.pairings.value(npub))->signerPubkey, bunkerB.pubkey());
+        QVERIFY(backend.remoteSignerPaired());
+        bunkerA.methods.clear();
+        bunkerB.methods.clear();
+        Signed next;
+        backend.sign(signingDraft(), next.done());
+        QTRY_COMPARE(next.answers, 1);
+        QVERIFY2(next.error.isEmpty(), qPrintable(next.error));
+        QCOMPARE(bunkerA.methods, QStringList());
+        QCOMPARE(bunkerB.methods, QStringList{"sign_event"});
+    }
+
+    // A link's QR code is drawn in process, scaled by whole modules, with
+    // its quiet zone, and the dialog shows it with the link to copy.
+    void qrCodeDrawsANostrConnectLink()
+    {
+        const QString link = "nostrconnect://" + syncPubkey()
+            + "?relay=wss%3A%2F%2Frelay.example.invalid&secret=0123456789abcdef&name=Readstr";
+        const QImage image = QrCode::image(link, 4);
+        QVERIFY(!image.isNull());
+        QCOMPARE(image.width(), image.height());
+        QCOMPARE(image.width() % 4, 0);
+        QCOMPARE(qGray(image.pixel(0, 0)), 255);
+        QCOMPARE(qGray(image.pixel(image.width() - 1, image.height() - 1)), 255);
+        // The finder pattern's corner, just inside the quiet zone, is dark.
+        QCOMPARE(qGray(image.pixel(16, 16)), 0);
+        QVERIFY(QrCode::image(QString()).isNull());
+
+        QrImageProvider provider;
+        const QString source = QrCode::source(link);
+        QVERIFY(source.startsWith("image://qr/"));
+        QSize size;
+        const QImage served = provider.requestImage(source.mid(11), &size, QSize(200, 200));
+        QVERIFY(!served.isNull());
+        QCOMPARE(size, served.size());
+        QVERIFY(served.width() <= 200 && served.width() > 100);
+
+        // However large the size asked for, no wider than maxSize, and a
+        // scale past it draws nothing rather than overflowing.
+        const QImage huge = provider.requestImage(source.mid(11), &size, QSize(300000000, 300000000));
+        QVERIFY(!huge.isNull());
+        QVERIFY(huge.width() <= QrCode::maxSize && huge.width() > QrCode::maxSize / 2);
+        QVERIFY(QrCode::image(link, 100000000).isNull());
+        QVERIFY(QrCode::image(link, QrCode::maxSize).isNull());
+    }
+
+    void syncDialogConnectsASignerApp()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        FakeKeyStore keys;
+        Backend backend;
+        QStringList clipboard;
+        backend.setClipboardWriter([&](const QString &text) { clipboard << text; });
+        backend.setRelays({relay.url()});
+        backend.setKeyStore(&keys);
+        QQmlEngine engine;
+        engine.addImageProvider("qr", new QrImageProvider);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty(
+            "theme", QVariantMap{{"radius", 0}, {"background", "#000000"}, {"foreground", "#ffffff"}});
+        engine.rootContext()->setContextProperty("translator", QVariantMap{{"language", "en"}});
+        QQmlComponent component(&engine);
+        component.setData("import QtQuick\nimport QtQuick.Controls\n"
+                          "ApplicationWindow { width: 800; height: 760; property alias dialog: dialog\n"
+                          " SyncDialog { id: dialog } }\n",
+                          QUrl("qrc:/probe.qml"));
+        std::unique_ptr<QObject> window(component.create());
+        QVERIFY2(window, qPrintable(component.errorString()));
+        QObject *dialog = window->property("dialog").value<QObject *>();
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        QTRY_VERIFY(!backend.signingBusy());
+        QObject *start = window->findChild<QObject *>("nostrConnectButton");
+        QObject *panel = window->findChild<QObject *>("nostrConnectPanel");
+        QObject *qr = window->findChild<QObject *>("nostrConnectQr");
+        QObject *copy = window->findChild<QObject *>("copyNostrConnectButton");
+        QObject *cancel = window->findChild<QObject *>("cancelRemoteConnectButton");
+        QObject *bunkerField = window->findChild<QObject *>("bunkerField");
+        QObject *connectBunker = window->findChild<QObject *>("connectBunkerButton");
+        QObject *error = window->findChild<QObject *>("remoteSignerErrorLabel");
+        QVERIFY(start && panel && qr && copy && cancel && bunkerField && connectBunker && error);
+        QVERIFY(start->property("visible").toBool());
+        QVERIFY(!panel->property("visible").toBool());
+
+        QVERIFY(QMetaObject::invokeMethod(start, "clicked"));
+        QTRY_VERIFY(panel->property("visible").toBool());
+        QVERIFY(!start->property("visible").toBool());
+        QTRY_COMPARE(qr->property("status").toInt(), 1);
+        QVERIFY(qr->property("sourceSize").toSize().width() > 0);
+        // The dialog stays within the window, its form scrolls, and the
+        // footer's buttons stay in view below it.
+        auto *scroll = window->findChild<QQuickItem *>("syncDialogScroll");
+        auto *stop = window->findChild<QQuickItem *>("stopSyncButton");
+        auto *publish = window->findChild<QQuickItem *>("publishReadsBox");
+        QVERIFY(scroll && stop && publish);
+        QTRY_VERIFY(scroll->property("contentHeight").toReal() > scroll->height());
+        const qreal dialogTop = dialog->property("y").toReal();
+        QVERIFY(dialogTop >= 0);
+        QVERIFY(dialogTop + dialog->property("height").toReal() <= 760);
+        QVERIFY(stop->isVisible());
+        const QPointF stopBottom = stop->mapToScene(QPointF(0, stop->height()));
+        QVERIFY2(stopBottom.y() <= 760 && stopBottom.y() > 0, qPrintable(QString::number(stopBottom.y())));
+        QVERIFY(publish->mapToScene(QPointF(0, publish->height())).y() > 760);
+        QVERIFY(QMetaObject::invokeMethod(copy, "clicked"));
+        QCOMPARE(clipboard, QStringList{backend.nostrConnectUri()});
+        QVERIFY(QMetaObject::invokeMethod(cancel, "clicked"));
+        QTRY_VERIFY(!panel->property("visible").toBool());
+
+        // The pasted link leaves the field as it is submitted.
+        QVERIFY(QMetaObject::invokeMethod(bunkerField, "insert", Q_ARG(int, 0), Q_ARG(QString, "bunker://nope")));
+        QVERIFY(QMetaObject::invokeMethod(connectBunker, "clicked"));
+        QCOMPARE(bunkerField->property("text").toString(), QString());
+        QTRY_VERIFY(error->property("visible").toBool());
+        QCOMPARE(error->property("text").toString(), QString("That is not a bunker:// link with a relay Readstr can use"));
     }
 
     // Sanitizer
@@ -6479,6 +8146,11 @@ private slots:
         QVERIFY(backend.signingBusy());
         QCOMPARE(keys.held(), 1);
         keys.release();
+        // The check of the pairing comes after the key's.
+        QVERIFY(backend.signingBusy());
+        QCOMPARE(keys.held(), 1);
+        QCOMPARE(keys.pairingCalls.last(), "contains " + npub);
+        keys.release();
         QVERIFY(!backend.signingBusy());
         QTRY_COMPARE(error, "No signing key is stored for " + Nip19::shortNpub(npub, npub));
     }
@@ -6499,6 +8171,9 @@ private slots:
         backend.setKeyStore(&service);
         service.reply({noItems, lockedItem});
         QVERIFY(backend.signingKeyStored());
+        // No pairing with a remote signer.
+        service.reply({noItems, noItems});
+        QVERIFY(!backend.remoteSignerPaired());
         QStringList errors;
         const auto keep = [&](const NostrEvent &, const QString &error) { errors << error; };
         backend.sign(signingDraft(), keep);
@@ -9371,6 +11046,61 @@ private:
     }
 
     // An event for the signing tests to sign.
+    // The official vectors (nip44.vectors.json, from the NIP's repository),
+    // checked against the checksum NIP-44 publishes before any is used.
+    static QJsonObject nip44Vectors()
+    {
+        QFile file(QFINDTESTDATA("nip44.vectors.json"));
+        if (!file.open(QIODevice::ReadOnly))
+            qFatal("cannot read the NIP-44 vectors");
+        const QByteArray contents = file.readAll();
+        if (QCryptographicHash::hash(contents, QCryptographicHash::Sha256).toHex()
+            != "269ed0f69e4c192512cc779e78c555090cebc7c785b609e338a62afc3ce25040")
+            qFatal("the NIP-44 vectors are not the published ones");
+        return QJsonDocument::fromJson(contents).object().value("v2").toObject();
+    }
+
+    static QByteArray hex(const QJsonValue &value) { return QByteArray::fromHex(value.toString().toLatin1()); }
+
+    static RemoteSigner::Limits quickRemoteLimits()
+    {
+        RemoteSigner::Limits limits;
+        limits.requestTimeoutMs = 5000;
+        limits.pairingTimeoutMs = 5000;
+        limits.connectTimeoutMs = 2000;
+        limits.reconnectMs = 100;
+        return limits;
+    }
+
+    // A pairing with `bunker` over `relay`, as a bunker:// URI it gave would
+    // make, ready to sign.
+    static std::unique_ptr<RemoteSigner> pairedSigner(const FakeBunker &bunker, const FakeRelay &relay,
+                                                     const QString &userPubkey = syncPubkey())
+    {
+        auto pairing = RemoteSigner::parseBunkerUri(bunker.uri(relay.url()), {relay.url()});
+        if (!pairing)
+            qFatal("cannot parse the test bunker URI");
+        auto signer = RemoteSigner::create(*pairing, userPubkey);
+        pairing->wipe();
+        signer->setLimits(quickRemoteLimits());
+        return signer;
+    }
+
+    // What a sign gave, once it has answered.
+    struct Signed {
+        int answers = 0;
+        NostrEvent event;
+        QString error;
+        Signer::Done done()
+        {
+            return [this](const NostrEvent &signedEvent, const QString &why) {
+                ++answers;
+                event = signedEvent;
+                error = why;
+            };
+        }
+    };
+
     static NostrEvent signingDraft()
     {
         NostrEvent draft;

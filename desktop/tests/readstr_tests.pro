@@ -7,3 +7,4 @@ include(../src/sources.pri)
 
 HEADERS += fakehttpserver.h fakerelay.h
 SOURCES += readstr_tests.cpp
+DISTFILES += nip44.vectors.json
