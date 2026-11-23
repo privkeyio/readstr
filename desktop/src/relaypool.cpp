@@ -9,6 +9,7 @@
 #include <QPointer>
 #include <QRandomGenerator>
 #include <QRegularExpression>
+#include <QSet>
 #include <QTimer>
 #include <QWebSocket>
 
@@ -55,6 +56,7 @@ struct RelayPool::Batch {
         QStringList relays;
         int done = 0;
         int answered = 0;
+        int unreachable = 0;
         QStringList errors;
         // By id, or for a replaceable event by its address, holding only
         // the newest version.
@@ -98,6 +100,7 @@ public:
         connect(&m_socket, &QWebSocket::connected, this, [this] {
             m_connectTimer.stop();
             m_connected = true;
+            m_reached = true;
             const QList<int> queued = std::exchange(m_queued, {});
             for (int query : queued)
                 subscribe(query);
@@ -315,7 +318,7 @@ private:
 
     void report(int query, const QString &error) {
         if (m_pool)
-            m_pool->relayDone(m_batch, query, error.isEmpty() ? QString() : m_relay + ": " + error);
+            m_pool->relayDone(m_batch, query, error.isEmpty() ? QString() : m_relay + ": " + error, m_reached);
     }
 
     static constexpr int maxReconnects = 2;
@@ -326,6 +329,8 @@ private:
     QWebSocket m_socket;
     QTimer m_connectTimer;
     bool m_connected = false;
+    // Connected at least once in this batch.
+    bool m_reached = false;
     // Sent an EOSE or CLOSED in this batch.
     bool m_answered = false;
     bool m_hostile = false;
@@ -529,7 +534,7 @@ bool RelayPool::accept(const std::shared_ptr<Batch> &batch, int queryIndex, cons
     return true;
 }
 
-void RelayPool::relayDone(const std::shared_ptr<Batch> &batch, int queryIndex, const QString &error) {
+void RelayPool::relayDone(const std::shared_ptr<Batch> &batch, int queryIndex, const QString &error, bool reached) {
     if (batch->over)
         return;
     Batch::Query &state = batch->queries[queryIndex];
@@ -540,6 +545,8 @@ void RelayPool::relayDone(const std::shared_ptr<Batch> &batch, int queryIndex, c
         ++state.answered;
     else
         state.errors << error;
+    if (!reached)
+        ++state.unreachable;
     if (state.done >= state.relays.size()) {
         deliver(batch, queryIndex, {});
         return;
@@ -572,6 +579,7 @@ void RelayPool::deliver(const std::shared_ptr<Batch> &batch, int queryIndex, con
     result.events = state.events.values();
     result.relays = int(state.relays.size());
     result.answered = state.answered;
+    result.unreachable = state.unreachable;
     result.truncated = state.truncated;
     result.deferred = state.deferred;
     for (auto it = state.oversized.cbegin(); it != state.oversized.cend(); ++it)
@@ -604,4 +612,161 @@ void RelayPool::deliver(const std::shared_ptr<Batch> &batch, int queryIndex, con
             batch->finished();
     };
     batch->each(queryIndex, result, release);
+}
+
+int PublishResult::accepted() const {
+    int count = 0;
+    for (const Relay &relay : relays)
+        count += relay.accepted;
+    return count;
+}
+
+QString PublishResult::error() const {
+    if (ok())
+        return {};
+    if (relays.isEmpty())
+        return QStringLiteral("no usable relays");
+    QStringList reasons;
+    for (const Relay &relay : relays)
+        reasons << relay.relay + ": " + relay.message;
+    return reasons.join(QStringLiteral("; "));
+}
+
+// One event sent to a few relays, each on its own WebSocket, which ends at
+// the relay's OK for it, a failure to connect, the socket's end, or the
+// timeout, whichever comes first. Once every relay has ended, `done` runs
+// from the event loop, and the publication lets go of the pool and goes.
+class RelayPool::Publication : public QObject {
+public:
+    Publication(RelayPool *pool, const NostrEvent &event, const QStringList &relays,
+                std::function<void(const PublishResult &)> done, std::function<bool()> stillWanted)
+        : QObject(pool), m_pool(pool), m_id(event.id), m_done(std::move(done)),
+          m_stillWanted(std::move(stillWanted)) {
+        const Limits limits = pool->limits();
+        const QString message = QString::fromUtf8(
+            QJsonDocument(QJsonArray{"EVENT", event.toJson()}).toJson(QJsonDocument::Compact));
+        // Every relay is listed before any socket opens, as one may fail
+        // there and then, and the publication must not end before the rest.
+        for (const QString &relay : relays)
+            m_result.relays << PublishResult::Relay{relay, false, {}};
+        for (qsizetype i = 0; i < relays.size(); ++i) {
+            auto *socket = new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this);
+            // Only OK and NOTICE are wanted, both short.
+            socket->setMaxAllowedIncomingMessageSize(64 * 1024);
+            socket->setMaxAllowedIncomingFrameSize(64 * 1024);
+            auto *timer = new QTimer(this);
+            timer->setSingleShot(true);
+            m_sockets << socket;
+            m_timers << timer;
+            connect(timer, &QTimer::timeout, this, [this, i] {
+                end(i, false,
+                    m_sockets.at(i)->state() == QAbstractSocket::ConnectedState ? QStringLiteral("timed out")
+                                                                                : QStringLiteral("timed out connecting"));
+            });
+            connect(socket, &QWebSocket::connected, this, [this, i, message, limits] {
+                if (m_stillWanted && !m_stillWanted()) {
+                    m_result.cancelled = true;
+                    end(i, false, QStringLiteral("no longer wanted"));
+                    return;
+                }
+                m_timers.at(i)->start(limits.publishTimeoutMs);
+                m_sockets.at(i)->sendTextMessage(message);
+            });
+            connect(socket, &QWebSocket::disconnected, this, [this, i] {
+                const QString reason = m_sockets.at(i)->closeReason();
+                end(i, false, reason.isEmpty() ? QStringLiteral("connection closed") : reason);
+            });
+            connect(socket, &QWebSocket::errorOccurred, this,
+                    [this, i] { end(i, false, m_sockets.at(i)->errorString()); });
+            connect(socket, &QWebSocket::textMessageReceived, this,
+                    [this, i](const QString &text) { received(i, text); });
+            timer->start(limits.connectTimeoutMs);
+            QNetworkRequest request{QUrl(relays.at(i))};
+            request.setHeader(QNetworkRequest::UserAgentHeader, QByteArray("readstr-desktop/" READSTR_VERSION));
+            socket->open(request);
+        }
+        if (relays.isEmpty())
+            finish();
+    }
+
+private:
+    void received(qsizetype index, const QString &text) {
+        const QJsonArray message = QJsonDocument::fromJson(text.toUtf8()).array();
+        // ["OK", <event id>, <accepted>, <message>], NIP-01; anything else,
+        // a NOTICE or another event's OK, is not the answer.
+        if (message.size() < 3 || message.at(0).toString() != QLatin1String("OK")
+            || message.at(1).toString() != m_id || !message.at(2).isBool())
+            return;
+        const QString reason = FeedParser::cleanText(message.at(3).toString().left(400)).left(200);
+        const bool accepted = message.at(2).toBool();
+        end(index, accepted, reason.isEmpty() && !accepted ? QStringLiteral("refused the event") : reason);
+    }
+
+    void end(qsizetype index, bool accepted, const QString &message) {
+        if (m_ended.contains(index))
+            return;
+        m_ended.insert(index);
+        PublishResult::Relay &relay = m_result.relays[index];
+        relay.accepted = accepted;
+        relay.message = FeedParser::cleanText(message.left(400)).left(200);
+        if (relay.message.isEmpty() && !accepted)
+            relay.message = QStringLiteral("connection failed");
+        m_timers.at(index)->stop();
+        QWebSocket *socket = m_sockets.at(index);
+        socket->disconnect(this);
+        if (socket->state() == QAbstractSocket::ConnectedState)
+            socket->close();
+        else
+            socket->abort();
+        if (m_ended.size() == m_result.relays.size())
+            finish();
+    }
+
+    void finish() {
+        // Let go of the pool first, so `done` may delete it.
+        setParent(nullptr);
+        QTimer::singleShot(0, this, [this] {
+            const QPointer<RelayPool> pool = m_pool;
+            const auto done = std::move(m_done);
+            const PublishResult result = m_result;
+            deleteLater();
+            if (pool && done)
+                done(result);
+        });
+    }
+
+    QPointer<RelayPool> m_pool;
+    QString m_id;
+    std::function<void(const PublishResult &)> m_done;
+    std::function<bool()> m_stillWanted;
+    PublishResult m_result;
+    QList<QWebSocket *> m_sockets;
+    QList<QTimer *> m_timers;
+    QSet<qsizetype> m_ended;
+};
+
+void RelayPool::publish(const NostrEvent &event, const QStringList &extraRelays,
+                        std::function<void(const PublishResult &)> done, std::function<bool()> stillWanted) {
+    // As a query picks them: the configured relays, then the public ones
+    // an nprofile named, each once, less onion services among those, which
+    // cannot be reached without Tor and whose names would leak to DNS.
+    QStringList chosen;
+    const auto add = [&](const QString &candidate, bool trusted) {
+        QUrl url(candidate.trimmed(), QUrl::StrictMode);
+        if (url.path() == QLatin1String("/"))
+            url.setPath({});
+        const QString key = url.toString(QUrl::FullyEncoded);
+        QString host = url.host().toLower();
+        if (host.endsWith('.'))
+            host.chop(1);
+        const bool onion = host == QLatin1String("onion") || host.endsWith(QLatin1String(".onion"));
+        if ((trusted ? isUsableRelay(url) : isPublicRelay(url) && !onion) && !chosen.contains(key)
+            && chosen.size() < m_limits.maxRelays)
+            chosen << key;
+    };
+    for (const QString &relay : relays())
+        add(relay, true);
+    for (const QString &relay : extraRelays)
+        add(relay, false);
+    new Publication(this, event, chosen, std::move(done), std::move(stillWanted));
 }

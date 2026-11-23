@@ -131,6 +131,31 @@ const QList<QStringList> migrations = {
         " view TEXT NOT NULL,"
         " exclude TEXT)",
     },
+    {
+        // When an article was last marked read here, so the read status
+        // published lists the newest reads first, as the web app does.
+        "ALTER TABLE items ADD COLUMN read_at INTEGER",
+        // Whether this machine publishes its read articles (kind 30405),
+        // which is public; off until asked for, as on the web.
+        "ALTER TABLE sync_account ADD COLUMN publish_reads INTEGER NOT NULL DEFAULT 0",
+        // The content of the newest event per d tag the relays are known to
+        // hold, pulled and applied or published here, which a publish builds
+        // on so it keeps what only another device knows, and when it was
+        // stored here, so a feed subscribed here after a list marking it
+        // deleted came can be told from one that list deleted.
+        "CREATE TABLE sync_remote ("
+        " d_tag TEXT PRIMARY KEY,"
+        " event_id TEXT NOT NULL,"
+        " content TEXT NOT NULL,"
+        " stored_at INTEGER NOT NULL DEFAULT 0)",
+        // Whether "Publish now" confirmed the account, which automatic
+        // publishing waits for, and the kinds (a bit mask) changed here and
+        // not published yet, so they survive a restart. A new account starts
+        // with neither, as clearSyncState() deletes the row; one from before
+        // publishing starts unconfirmed too.
+        "ALTER TABLE sync_account ADD COLUMN publish_confirmed INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE sync_account ADD COLUMN publish_pending INTEGER NOT NULL DEFAULT 0",
+    },
 };
 
 std::atomic<int> connectionCounter{0};
@@ -139,7 +164,7 @@ const char feedColumns[] =
     "SELECT f.id, f.url, f.title, f.site_url, f.description, c.name, f.etag, f.last_modified, f.last_error,"
     " f.last_fetched_at, f.relay_hints, f.complete_at,"
     " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id AND i.is_read = 0),"
-    " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id), f.incomplete"
+    " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id), f.incomplete, f.created_at"
     " FROM feeds f LEFT JOIN categories c ON c.id = f.category_id";
 
 Feed feedFrom(const QSqlQuery &query) {
@@ -161,6 +186,7 @@ Feed feedFrom(const QSqlQuery &query) {
     feed.unread = query.value(12).toInt();
     feed.total = query.value(13).toInt();
     feed.incomplete = query.value(14).toBool();
+    feed.createdAt = QDateTime::fromSecsSinceEpoch(query.value(15).toLongLong(), QTimeZone::UTC);
     return feed;
 }
 
@@ -790,8 +816,9 @@ std::optional<LibraryCounts> Store::counts() {
 int Store::markRead(const ArticleFilter &filter, qint64 upToId) {
     QVariantList values;
     QSqlQuery query(m_db);
-    query.prepare(QStringLiteral("UPDATE items AS i SET is_read = 1 WHERE i.is_read = 0 AND i.id <= ?")
+    query.prepare(QStringLiteral("UPDATE items AS i SET is_read = 1, read_at = ? WHERE i.is_read = 0 AND i.id <= ?")
                   + filterSql(filter, values));
+    query.addBindValue(QDateTime::currentSecsSinceEpoch());
     query.addBindValue(upToId);
     for (const QVariant &value : values)
         query.addBindValue(value);
@@ -810,14 +837,25 @@ bool Store::setFlag(const char *column, qint64 articleId, bool value) {
     return query.numRowsAffected() == 1 || fail(QStringLiteral("no article with id %1").arg(articleId));
 }
 
-bool Store::setRead(qint64 articleId, bool read) { return setFlag("is_read", articleId, read); }
+bool Store::setRead(qint64 articleId, bool read) {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("UPDATE items SET is_read = ?, read_at = ? WHERE id = ?"));
+    query.addBindValue(read ? 1 : 0);
+    query.addBindValue(read ? QVariant(QDateTime::currentSecsSinceEpoch()) : QVariant(QMetaType::fromType<qint64>()));
+    query.addBindValue(articleId);
+    if (!query.exec())
+        return fail(query.lastError().text());
+    return query.numRowsAffected() == 1 || fail(QStringLiteral("no article with id %1").arg(articleId));
+}
 bool Store::setStarred(qint64 articleId, bool starred) { return setFlag("is_starred", articleId, starred); }
 
 SyncAccount Store::syncAccount() {
     m_error.clear();
     SyncAccount account;
     QSqlQuery query(m_db);
-    if (!query.exec(QStringLiteral("SELECT npub, pubkey, relay_hints, synced_at FROM sync_account WHERE id = 1"))) {
+    if (!query.exec(QStringLiteral(
+            "SELECT npub, pubkey, relay_hints, synced_at, publish_reads, publish_confirmed, publish_pending"
+            " FROM sync_account WHERE id = 1"))) {
         fail(query.lastError().text());
         return account;
     }
@@ -827,6 +865,9 @@ SyncAccount Store::syncAccount() {
         account.relays = QJsonDocument::fromJson(query.value(2).toString().toUtf8()).toVariant().toStringList();
         if (!query.value(3).isNull())
             account.syncedAt = QDateTime::fromSecsSinceEpoch(query.value(3).toLongLong(), QTimeZone::UTC);
+        account.publishReads = query.value(4).toBool();
+        account.publishConfirmed = query.value(5).toBool();
+        account.publishPending = query.value(6).toInt();
     }
     query.finish();
     if (account.pubkey.isEmpty())
@@ -867,7 +908,8 @@ bool Store::setSyncAccount(const QString &npub, const QString &pubkey, const QSt
 
 bool Store::clearSyncState() {
     QSqlQuery query(m_db);
-    for (const char *statement : {"DELETE FROM sync_account", "DELETE FROM sync_applied", "DELETE FROM sync_read"})
+    for (const char *statement :
+         {"DELETE FROM sync_account", "DELETE FROM sync_applied", "DELETE FROM sync_read", "DELETE FROM sync_remote"})
         if (!query.exec(QString::fromLatin1(statement)))
             return fail(query.lastError().text());
     return true;
@@ -897,16 +939,112 @@ bool Store::recordSynced(const QDateTime &time) {
     return query.exec() || fail(query.lastError().text());
 }
 
-int Store::applyReadGuids(const QStringList &guids) {
+int publishBit(int kind) {
+    switch (kind) {
+    case 30404:
+        return 1;
+    case 30405:
+        return 2;
+    case 30406:
+        return 4;
+    }
+    return 0;
+}
+
+bool Store::updateSyncAccount(const QString &pubkey, const QString &assignments, const QVariantList &values) {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("UPDATE sync_account SET %1 WHERE pubkey = ?").arg(assignments));
+    for (const QVariant &value : values)
+        query.addBindValue(value);
+    query.addBindValue(pubkey);
+    if (!query.exec())
+        return fail(query.lastError().text());
+    return query.numRowsAffected() == 1 || fail(QStringLiteral("the sync account changed"));
+}
+
+bool Store::setPublishReads(const QString &pubkey, bool publish) {
+    return updateSyncAccount(pubkey, QStringLiteral("publish_reads = ?"), {publish ? 1 : 0});
+}
+
+bool Store::setPublishConfirmed(const QString &pubkey) {
+    return updateSyncAccount(pubkey, QStringLiteral("publish_confirmed = 1"), {});
+}
+
+bool Store::markPublishPending(const QString &pubkey, int mask, bool pending) {
+    return updateSyncAccount(pubkey,
+                             pending ? QStringLiteral("publish_pending = publish_pending | ?")
+                                     : QStringLiteral("publish_pending = publish_pending & ~?"),
+                             {mask});
+}
+
+bool Store::rememberReadGuids(const QStringList &guids) {
     QSqlQuery query(m_db);
     if (!query.exec(QStringLiteral("DELETE FROM sync_read")))
-        return fail(query.lastError().text()), -1;
+        return fail(query.lastError().text());
     query.prepare(QStringLiteral("INSERT INTO sync_read (guid) VALUES (?) ON CONFLICT DO NOTHING"));
     for (const QString &guid : guids) {
         query.addBindValue(guid);
         if (!query.exec())
-            return fail(query.lastError().text()), -1;
+            return fail(query.lastError().text());
     }
+    return true;
+}
+
+std::optional<QStringList> Store::rememberedReadGuids() {
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("SELECT guid FROM sync_read"))) {
+        fail(query.lastError().text());
+        return std::nullopt;
+    }
+    QStringList guids;
+    while (query.next())
+        guids << query.value(0).toString();
+    return guids;
+}
+
+bool Store::eachReadGuid(const std::function<bool(const QString &)> &take) {
+    QSqlQuery query(m_db);
+    query.setForwardOnly(true);
+    if (!query.exec(QStringLiteral(
+            "SELECT guid FROM items WHERE is_read = 1 ORDER BY read_at IS NULL, read_at DESC, id DESC")))
+        return fail(query.lastError().text());
+    while (query.next())
+        if (!take(query.value(0).toString()))
+            break;
+    return true;
+}
+
+bool Store::setSyncRemote(const QString &dTag, const QString &eventId, const QString &content, qint64 storedAt) {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral(
+        "INSERT INTO sync_remote (d_tag, event_id, content, stored_at) VALUES (?, ?, ?, ?) ON CONFLICT(d_tag)"
+        " DO UPDATE SET event_id = excluded.event_id, content = excluded.content, stored_at = excluded.stored_at"
+        " WHERE sync_remote.event_id <> excluded.event_id"));
+    query.addBindValue(dTag);
+    query.addBindValue(eventId);
+    query.addBindValue(content);
+    query.addBindValue(storedAt < 0 ? QDateTime::currentSecsSinceEpoch() : storedAt);
+    return query.exec() || fail(query.lastError().text());
+}
+
+std::optional<SyncRemote> Store::syncRemote(const QString &dTag) {
+    m_error.clear();
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("SELECT event_id, content, stored_at FROM sync_remote WHERE d_tag = ?"));
+    query.addBindValue(dTag);
+    if (!query.exec()) {
+        fail(query.lastError().text());
+        return std::nullopt;
+    }
+    if (!query.next())
+        return std::nullopt;
+    return SyncRemote{query.value(0).toString(), query.value(1).toString(), query.value(2).toLongLong()};
+}
+
+int Store::applyReadGuids(const QStringList &guids) {
+    if (!rememberReadGuids(guids))
+        return -1;
+    QSqlQuery query(m_db);
     // Only ever from unread to read: a GUID missing from the list says
     // nothing about an article read here.
     if (!query.exec(QStringLiteral(

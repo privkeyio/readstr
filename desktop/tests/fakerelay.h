@@ -15,7 +15,8 @@
 // A Nostr relay on 127.0.0.1 for tests. Every REQ gets the same stored
 // events (whatever the filter says, as a careless relay would), then EOSE,
 // unless the relay is told to stay silent, to close subscriptions, or to
-// honour filters.
+// honour filters. Every EVENT is answered with OK, true unless told to
+// refuse it or to say nothing.
 class FakeRelay : public QWebSocketServer {
 public:
     FakeRelay() : QWebSocketServer(QStringLiteral("fake-relay"), QWebSocketServer::NonSecureMode) {
@@ -51,12 +52,43 @@ public:
     QList<QJsonArray> requests;
     QStringList closed;
     int connections = 0;
+    // The events sent with EVENT, as they came.
+    QList<QJsonObject> published;
+    // OK false with this message instead of true.
+    QString rejectWith;
+    // No OK at all, as a relay that never answers.
+    bool ignoreEvents = false;
+    // Sends each OK this long after the EVENT, to keep a publish out.
+    int okDelayMs = 0;
+    // Events accepted join `events`, so later REQs return them.
+    bool keepPublished = false;
+    // The type of every message received, in order.
+    QStringList log;
 
 private:
     int m_answered = 0;
     void received(QWebSocket *socket, const QString &text) {
         const QJsonArray message = QJsonDocument::fromJson(text.toUtf8()).array();
         const QString type = message.at(0).toString(), id = message.at(1).toString();
+        log << type;
+        if (type == QLatin1String("EVENT")) {
+            const QJsonObject event = message.at(1).toObject();
+            published << event;
+            if (ignoreEvents)
+                return;
+            const bool accepted = rejectWith.isEmpty();
+            const QJsonArray ok{"OK", event.value(QStringLiteral("id")), accepted, rejectWith};
+            if (okDelayMs > 0)
+                QTimer::singleShot(okDelayMs, this, [socket = QPointer<QWebSocket>(socket), ok] {
+                    if (socket)
+                        send(socket, ok);
+                });
+            else
+                send(socket, ok);
+            if (accepted && keepPublished)
+                events << event;
+            return;
+        }
         if (type == QLatin1String("CLOSE")) {
             closed << id;
             return;

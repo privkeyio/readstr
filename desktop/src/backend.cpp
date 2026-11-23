@@ -9,6 +9,7 @@
 #include <QRandomGenerator>
 #include <QScopeGuard>
 #include <QStandardPaths>
+#include <algorithm>
 
 #include "filepicker.h"
 #include "markdown.h"
@@ -82,6 +83,8 @@ Backend::Backend(FilePicker *picker, QObject *parent)
     m_syncRelays->setLimits(Sync::limits());
     m_autoRefresh.setSingleShot(true);
     connect(&m_autoRefresh, &QTimer::timeout, this, &Backend::refreshAll);
+    m_publishTimer.setSingleShot(true);
+    connect(&m_publishTimer, &QTimer::timeout, this, [this] { startPublish(); });
 
     if (m_picker) {
         connect(m_picker, &FilePicker::openSelected, this, &Backend::importFrom);
@@ -118,6 +121,7 @@ Backend::~Backend() {
     // finishes, and the ones queued behind it never start.
     m_closing = true;
     m_autoRefresh.stop();
+    m_publishTimer.stop();
     m_fetcher.reset();
     m_relays.reset();
     m_syncRelays.reset();
@@ -455,15 +459,19 @@ void Backend::saveFlags(const Article &before, bool read, bool starred, const QS
     showFlags(id, read, starred);
     // The worker takes writes in order, so each only needs what it changes.
     writeOnWorker(
-        [id, read, starred, readChanged, starredChanged](Store &store) {
-            return (!readChanged || store.setRead(id, read)) && (!starredChanged || store.setStarred(id, starred))
-                       ? 1
-                       : -1;
+        [id, read, starred, readChanged, starredChanged,
+         readsPending = readChanged ? readsPublishedFor() : QString()](Store &store) {
+            if ((readChanged && !store.setRead(id, read)) || (starredChanged && !store.setStarred(id, starred)))
+                return -1;
+            markReadsPending(store, readsPending);
+            return 1;
         },
         failure,
-        [this, id, failure](const WriteResult &result) {
+        [this, id, failure, readChanged](const WriteResult &result) {
             if (!result.error.isEmpty())
                 setStatus(failure.arg(result.error), true);
+            else if (readChanged)
+                schedulePublish(Sync::readStatusKind);
             const auto pending = m_pendingFlags.find(id);
             if (pending != m_pendingFlags.end()) {
                 if (--pending->writes > 0)
@@ -554,16 +562,25 @@ void Backend::markViewRead() {
     const ArticleFilter filter = currentFilter();
     const qint64 upToId = m_viewLastId;
     const QString failure = tr("Cannot mark the view read: %1");
-    writeOnWorker([filter, upToId](Store &store) { return store.markRead(filter, upToId); }, failure,
-                  [this, failure](const WriteResult &result) {
-                      if (!result.error.isEmpty()) {
-                          setStatus(failure.arg(result.error), true);
-                          return;
-                      }
-                      setStatus(tr("Marked %n articles read", nullptr, result.changed));
-                      reloadCounts();
-                      loadArticles();
-                  });
+    writeOnWorker(
+        [filter, upToId, readsPending = readsPublishedFor()](Store &store) {
+            const int marked = store.markRead(filter, upToId);
+            if (marked > 0)
+                markReadsPending(store, readsPending);
+            return marked;
+        },
+        failure,
+        [this, failure](const WriteResult &result) {
+            if (!result.error.isEmpty()) {
+                setStatus(failure.arg(result.error), true);
+                return;
+            }
+            setStatus(tr("Marked %n articles read", nullptr, result.changed));
+            if (result.changed > 0)
+                schedulePublish(Sync::readStatusKind);
+            reloadCounts();
+            loadArticles();
+        });
 }
 
 void Backend::addFeed(const QString &address) {
@@ -665,10 +682,12 @@ void Backend::subscribeFinished(const Library::Subscription &subscription) {
     reloadLibrary();
     const Feed feed = m_store.feed(subscription.id).value_or(Feed{});
     const QString title = Nip19::shortNpub(feed.title, feed.url);
-    if (subscription.created)
+    if (subscription.created) {
         setStatus(tr("Subscribed to %1 (%n articles)", nullptr, subscription.added).arg(title));
-    else
+        schedulePublish(Sync::subscriptionsKind);
+    } else {
         setStatus(tr("Already subscribed to %1").arg(title));
+    }
     const int row = m_sources.rowOf(SourceModel::Kind::Feed, subscription.id);
     if (row >= 0)
         selectSource(row);
@@ -701,6 +720,7 @@ bool Backend::unsubscribe(qint64 feedId) {
                           setStatus(failure.arg(result.error), true);
                       } else {
                           setStatus(tr("Unsubscribed from %1").arg(title));
+                          schedulePublish(Sync::subscriptionsKind);
                       }
                       reloadLibrary();
                   });
@@ -868,8 +888,19 @@ void Backend::reloadSyncAccount() {
         return;
     }
     const bool changed = account.npub != m_syncAccount.npub;
+    // Confirmed only ever goes from false to true for an account, and the
+    // write saying so may still be on its way.
+    const bool confirmed = !changed && m_syncAccount.publishConfirmed;
     m_syncAccount = account;
+    m_syncAccount.publishConfirmed = account.publishConfirmed || confirmed;
     if (changed) {
+        resetPublish();
+        // What was changed here and not published before the last quit goes
+        // out with the first publish.
+        for (int kind : {Sync::subscriptionsKind, Sync::readStatusKind, Sync::viewsKind})
+            if ((account.publishPending & publishBit(kind))
+                && (kind != Sync::readStatusKind || account.publishReads))
+                m_publishKinds << kind;
         resetSigning();
         checkSigningKey();
     }
@@ -892,11 +923,15 @@ void Backend::setSigning(bool stored, const QString &error, bool checked) {
     if (stored == m_signingKeyStored && checked == m_signingKeyChecked && busy == m_signingBusy
         && error == m_signingError)
         return;
+    const bool found = stored && !m_signingKeyStored;
     m_signingKeyStored = stored;
     m_signingKeyChecked = checked;
     m_signingBusy = busy;
     m_signingError = error;
     emit signingChanged();
+    // What waited for a key goes out once one is known to be there.
+    if (found)
+        resumePublish();
 }
 
 QString Backend::keyStoreError(const KeyStore::Result &result) const {
@@ -1043,6 +1078,10 @@ bool Backend::addSigningKey(const QString &text) {
                 const bool stored = result.error == KeyStore::Error::None;
                 self->setSigning(stored || self->m_signingKeyStored, self->keyStoreError(result),
                                  stored || self->m_signingKeyChecked);
+                // What waited for a key, or for a key that could not be
+                // read, goes out with it.
+                if (stored)
+                    self->resumePublish();
             }
             finished();
         });
@@ -1296,6 +1335,16 @@ void Backend::syncApplied(const Sync::Outcome &outcome, const QString &pubkey) {
         setStatus(tr("Synced with Nostr: %n feeds added, %1 articles marked read", nullptr, added).arg(markedRead));
     }
     emit syncFinished();
+    // A pull for the account in the window: the publish that waited on it
+    // goes on, and changes a failed one left go out again with it.
+    if (!m_syncAccount.pubkey.isEmpty()
+        && (std::exchange(m_publishPull, false)
+            || (!m_publishKinds.isEmpty() && !m_publishing && !m_publishHeld && !m_publishTimer.isActive()
+                && m_syncAccount.publishConfirmed && !keyMissing()))) {
+        m_publishing = true;
+        emit publishChanged();
+        continuePublish(outcome);
+    }
     if (!std::exchange(m_syncFeedsAdded, false))
         return;
     // The feeds the sync added have never been fetched.
@@ -1303,6 +1352,351 @@ void Backend::syncApplied(const Sync::Outcome &outcome, const QString &pubkey) {
         m_fetchNewFeeds = true;
     else
         refreshUnfetched();
+}
+
+struct Backend::PublishRun {
+    quint64 epoch = 0;
+    SyncAccount account;
+    QList<NostrEvent> events;
+    qsizetype next = 0;
+    int published = 0;
+    QStringList errors;
+    // Shown in the dialog only: kinds waiting on a pull, not failing.
+    QStringList notes;
+    QList<int> failed;
+    // Published, or with nothing left to publish.
+    QList<int> settled;
+    bool signingFailed = false;
+    // When the drafts were built: a feed subscribed after this is newer
+    // than the list published from them.
+    qint64 builtAt = 0;
+};
+
+namespace {
+// Whole sentences per kind, so each language words them its own way.
+QString unreadable(int kind) {
+    switch (kind) {
+    case Sync::subscriptionsKind:
+        return Backend::tr("the relays hold a subscription list this app cannot read, so it is not replaced");
+    case Sync::readStatusKind:
+        return Backend::tr("the relays hold a read status this app cannot read, so it is not replaced");
+    default:
+        return Backend::tr("the relays hold saved views this app cannot read, so they are not replaced");
+    }
+}
+
+QString refused(int kind, const QString &error) {
+    switch (kind) {
+    case Sync::subscriptionsKind:
+        return Backend::tr("no relay took the subscription list: %1").arg(error);
+    case Sync::readStatusKind:
+        return Backend::tr("no relay took the read status: %1").arg(error);
+    default:
+        return Backend::tr("no relay took the saved views: %1").arg(error);
+    }
+}
+}
+
+QVariant Backend::publishedAt() const {
+    return m_publishedAt.isValid() ? QVariant(m_publishedAt.toLocalTime()) : QVariant();
+}
+
+void Backend::setPublishReads(bool publish) {
+    if (!m_storeOpen || m_syncAccount.pubkey.isEmpty() || publish == m_syncAccount.publishReads)
+        return;
+    m_syncAccount.publishReads = publish;
+    emit syncChanged();
+    const QString failure = tr("Cannot change what is published: %1");
+    writeOnWorker([publish, pubkey = m_syncAccount.pubkey](Store &store) {
+        return store.setPublishReads(pubkey, publish) ? 1 : -1;
+    }, failure,
+                  [this, failure, publish](const WriteResult &result) {
+                      if (!result.error.isEmpty())
+                          setStatus(failure.arg(result.error), true);
+                      reloadSyncAccount();
+                      if (result.error.isEmpty() && publish)
+                          schedulePublish(Sync::readStatusKind);
+                  });
+}
+
+void Backend::publishNow() {
+    if (!m_storeOpen || m_syncAccount.pubkey.isEmpty())
+        return;
+    QList<int> kinds{Sync::subscriptionsKind, Sync::viewsKind};
+    if (m_syncAccount.publishReads)
+        kinds << Sync::readStatusKind;
+    for (int kind : std::as_const(kinds))
+        markPublishPending(kind);
+    m_publishHeld = false;
+    m_publishTimer.stop();
+    // The user has seen which npub this library goes out under, so changes
+    // may go out on their own from now on.
+    if (!m_syncAccount.publishConfirmed && !keyMissing()) {
+        m_syncAccount.publishConfirmed = true;
+        emit syncChanged();
+        const QString failure = tr("Cannot change what is published: %1");
+        writeOnWorker([pubkey = m_syncAccount.pubkey](Store &store) {
+            return store.setPublishConfirmed(pubkey) ? 1 : -1;
+        }, failure, [this, failure](const WriteResult &result) {
+            if (!result.error.isEmpty())
+                setStatus(failure.arg(result.error), true);
+        });
+    }
+    startPublish(true);
+}
+
+void Backend::markPublishPending(int kind) {
+    m_publishKinds << kind;
+    savePublishPending(m_syncAccount.pubkey, publishBit(kind), true);
+}
+
+void Backend::savePublishPending(const QString &pubkey, int mask, bool pending) {
+    writeOnWorker([pubkey, mask, pending](Store &store) {
+        return store.markPublishPending(pubkey, mask, pending) ? 1 : -1;
+    }, tr("Cannot remember what is left to publish: %1"), [](const WriteResult &result) {
+        if (!result.error.isEmpty())
+            qWarning("readstr: cannot remember what is left to publish: %s", qPrintable(result.error));
+    });
+}
+
+QString Backend::readsPublishedFor() const {
+    return m_storeOpen && m_syncAccount.publishReads ? m_syncAccount.pubkey : QString();
+}
+
+void Backend::markReadsPending(Store &store, const QString &pubkey) {
+    // Failing only when the account changed meanwhile, as then the read is
+    // not this account's to publish, or with the library, which the window
+    // says when it marks the kind again.
+    if (!pubkey.isEmpty())
+        store.markPublishPending(pubkey, publishBit(Sync::readStatusKind), true);
+}
+
+void Backend::schedulePublish(int kind) {
+    if (!m_storeOpen || m_syncAccount.pubkey.isEmpty()
+        || (kind == Sync::readStatusKind && !m_syncAccount.publishReads))
+        return;
+    markPublishPending(kind);
+    m_publishHeld = false;
+    // Kept until "Publish now" confirms the account, and it goes out then.
+    if (!m_syncAccount.publishConfirmed)
+        return;
+    const bool soon = std::any_of(m_publishKinds.cbegin(), m_publishKinds.cend(),
+                                  [](int marked) { return marked != Sync::readStatusKind; });
+    if (!m_publishWaiting.isValid())
+        m_publishWaiting.start();
+    // A change that keeps coming, as reading does, still goes out in time.
+    const qint64 left = qMax<qint64>(0, m_publishMaxWaitMs - m_publishWaiting.elapsed());
+    m_publishTimer.start(int(qMin<qint64>(soon ? m_publishDelayMs : m_readPublishDelayMs, left)));
+}
+
+void Backend::resumePublish() {
+    if (m_publishKinds.isEmpty() || !m_syncAccount.publishConfirmed || m_publishing || m_publishTimer.isActive())
+        return;
+    m_publishHeld = false;
+    m_publishTimer.start(m_publishDelayMs);
+}
+
+void Backend::startPublish(bool asked) {
+    if (m_publishing) {
+        m_publishAgain = true;
+        return;
+    }
+    if (m_publishKinds.isEmpty() || m_syncAccount.pubkey.isEmpty() || (!asked && !m_syncAccount.publishConfirmed))
+        return;
+    // Nothing is signed without a key; what changed waits for one, and
+    // only someone who asked hears why. A keyring that could not be checked
+    // may hold one, and the read when signing finds out.
+    if (keyMissing()) {
+        if (asked) {
+            m_publishError = noKeyStored(m_syncAccount.npub);
+            emit publishChanged();
+        }
+        return;
+    }
+    m_publishWaiting.invalidate();
+    m_publishing = true;
+    m_publishPull = true;
+    emit publishChanged();
+    // The pull goes first, so a newer event from another device is merged
+    // before it is replaced. One that changes nothing leaves what the
+    // window said before it.
+    if (!m_syncing && !m_refreshStatus)
+        m_refreshStatus = {m_status, m_statusError};
+    sync();
+}
+
+void Backend::continuePublish(const Sync::Outcome &outcome) {
+    auto run = std::make_shared<PublishRun>();
+    run->epoch = m_publishEpoch;
+    run->account = m_syncAccount;
+    QList<int> kinds(m_publishKinds.cbegin(), m_publishKinds.cend());
+    m_publishKinds.clear();
+    std::sort(kinds.begin(), kinds.end());
+    if (!m_syncAccount.publishReads && kinds.removeAll(Sync::readStatusKind) > 0)
+        run->settled << Sync::readStatusKind;
+    if (keyMissing()) {
+        run->failed = kinds;
+        return publishDone(run);
+    }
+    if (!outcome.error.isEmpty()) {
+        run->failed = kinds;
+        run->errors << tr("the pull before it failed: %1").arg(outcome.error);
+        return publishDone(run);
+    }
+    QList<int> ready;
+    for (int kind : std::as_const(kinds)) {
+        if (outcome.refused.contains(kind)) {
+            // Replacing what cannot be read here would lose it.
+            run->failed << kind;
+            run->errors << unreadable(kind);
+        } else if (kind == Sync::readStatusKind && !outcome.settled) {
+            // As on the web: another device's reads may sit on a relay that
+            // did not answer.
+            run->failed << kind;
+            run->errors << tr("not every relay answered, so the read status is not replaced");
+        } else {
+            ready << kind;
+        }
+    }
+    if (ready.isEmpty())
+        return publishDone(run);
+    run->builtAt = QDateTime::currentSecsSinceEpoch();
+    onWorker<Sync::Drafts>(
+        [pubkey = run->account.pubkey, ready, newest = outcome.newest, now = run->builtAt](Store &store) {
+            return Sync::drafts(store, pubkey, ready, newest, now);
+        },
+        [this, run, ready](const Sync::Drafts &drafts) {
+            if (run->epoch != m_publishEpoch)
+                return;
+            if (!drafts.error.isEmpty()) {
+                run->failed << ready;
+                run->errors << drafts.error;
+                return publishDone(run);
+            }
+            run->events = drafts.events;
+            run->settled << drafts.unchanged;
+            run->failed << drafts.failed << drafts.waiting;
+            run->errors << drafts.errors;
+            run->notes << drafts.notes;
+            publishNext(run);
+        });
+}
+
+void Backend::publishNext(const std::shared_ptr<PublishRun> &run) {
+    if (run->next >= run->events.size())
+        return publishDone(run);
+    const NostrEvent draft = run->events.at(run->next++);
+    // Read articles turned off since the run began are not published, nor
+    // even signed.
+    const auto readsOff = [](Backend *backend, int kind) {
+        return kind == Sync::readStatusKind && !backend->m_syncAccount.publishReads;
+    };
+    if (readsOff(this, draft.kind)) {
+        run->settled << draft.kind;
+        return publishNext(run);
+    }
+    sign(draft, [self = QPointer(this), run, kind = draft.kind, readsOff](const NostrEvent &event,
+                                                                          const QString &error) {
+        if (!self || run->epoch != self->m_publishEpoch)
+            return;
+        if (readsOff(self, kind)) {
+            run->settled << kind;
+            return self->publishNext(run);
+        }
+        if (!error.isEmpty()) {
+            // Signing the rest would fail the same way, or prompt again.
+            run->signingFailed = true;
+            run->errors << tr("cannot sign: %1").arg(error);
+            run->failed << kind;
+            for (qsizetype i = run->next; i < run->events.size(); ++i)
+                run->failed << run->events.at(i).kind;
+            return self->publishDone(run);
+        }
+        // Read articles turned off while a relay still connects are not sent
+        // to it either.
+        const auto stillWanted = [self, kind, readsOff] { return self && !readsOff(self, kind); };
+        self->m_syncRelays->publish(event, run->account.relays, [self, run, event](const PublishResult &result) {
+            if (!self || run->epoch != self->m_publishEpoch)
+                return;
+            if (!result.ok() && result.cancelled) {
+                run->settled << event.kind;
+                return self->publishNext(run);
+            }
+            for (const PublishResult::Relay &relay : result.relays)
+                if (!relay.accepted)
+                    qWarning("readstr: publish: %s: %s", qPrintable(relay.relay), qPrintable(relay.message));
+            if (!result.ok()) {
+                run->failed << event.kind;
+                run->errors << refused(event.kind, result.error());
+                return self->publishNext(run);
+            }
+            self->onWorker<WriteResult>(
+                [pubkey = run->account.pubkey, event, builtAt = run->builtAt](Store &store) {
+                    WriteResult written;
+                    bool superseded = false;
+                    written.error = Sync::recordPublished(store, pubkey, event, builtAt, &superseded);
+                    written.changed = superseded ? 1 : 0;
+                    return written;
+                },
+                [self, run, event](const WriteResult &written) {
+                    if (!self || run->epoch != self->m_publishEpoch)
+                        return;
+                    // The relays have it either way.
+                    ++run->published;
+                    // A newer version won meanwhile, which may lack what this
+                    // one carried: built again on it after the next pull.
+                    if (written.changed > 0)
+                        run->failed << event.kind;
+                    else
+                        run->settled << event.kind;
+                    if (!written.error.isEmpty())
+                        run->errors << tr("published, but cannot record it: %1").arg(written.error);
+                    self->publishNext(run);
+                });
+        }, stillWanted);
+    });
+}
+
+void Backend::publishDone(const std::shared_ptr<PublishRun> &run) {
+    if (run->epoch != m_publishEpoch)
+        return;
+    m_publishing = false;
+    for (int kind : std::as_const(run->failed))
+        m_publishKinds << kind;
+    // Kinds done, unless changed again meanwhile, need not go out after a
+    // restart.
+    int done = 0;
+    for (int kind : std::as_const(run->settled))
+        if (!m_publishKinds.contains(kind))
+            done |= publishBit(kind);
+    if (done) {
+        m_syncAccount.publishPending &= ~done;
+        savePublishPending(run->account.pubkey, done, false);
+    }
+    m_publishHeld = run->signingFailed;
+    if (run->published > 0)
+        m_publishedAt = QDateTime::currentDateTimeUtc();
+    const QStringList problems = run->errors + run->notes;
+    m_publishError = problems.isEmpty() ? QString() : tr("Cannot publish to Nostr: %1").arg(problems.join("; "));
+    emit publishChanged();
+    if (!run->errors.isEmpty()) {
+        qWarning("readstr: %s", qPrintable(m_publishError));
+        setStatus(m_publishError, true);
+    }
+    if (std::exchange(m_publishAgain, false) && !m_publishHeld)
+        startPublish();
+}
+
+void Backend::resetPublish() {
+    ++m_publishEpoch;
+    m_publishTimer.stop();
+    m_publishKinds.clear();
+    m_publishPull = m_publishAgain = m_publishHeld = false;
+    m_publishWaiting.invalidate();
+    m_publishedAt = {};
+    m_publishError.clear();
+    m_publishing = false;
+    emit publishChanged();
 }
 
 bool Backend::refreshUnfetched() {
@@ -1415,6 +1809,7 @@ void Backend::importFrom(const QUrl &url) {
                                   emit imported();
                                   if (result.added == 0)
                                       return;
+                                  schedulePublish(Sync::subscriptionsKind);
                                   if (m_refreshing)
                                       m_fetchNewFeeds = true;
                                   else

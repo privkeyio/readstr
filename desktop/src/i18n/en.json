@@ -30,5 +30,9 @@
   "Synced with Nostr: %n feeds added, %1 articles marked read": {
     "one": "Synced with Nostr: %n feed added, %1 articles marked read",
     "other": "Synced with Nostr: %n feeds added, %1 articles marked read"
+  },
+  "%n feeds are left out of the subscription list, as their addresses are too long": {
+    "one": "%n feed is left out of the subscription list, as its address is too long",
+    "other": "%n feeds are left out of the subscription list, as their addresses are too long"
   }
 }

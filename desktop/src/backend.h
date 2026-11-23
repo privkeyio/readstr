@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QMap>
 #include <QObject>
@@ -93,6 +94,17 @@ class Backend : public QObject {
     Q_PROPERTY(bool signingKeyChecked READ signingKeyChecked NOTIFY signingChanged)
     Q_PROPERTY(bool signingBusy READ signingBusy NOTIFY signingChanged)
     Q_PROPERTY(QString signingError READ signingError NOTIFY signingChanged)
+    // Whether read articles are published too (kind 30405), which makes
+    // them public; off until turned on, as in the web app.
+    Q_PROPERTY(bool publishReads READ publishReads WRITE setPublishReads NOTIFY syncChanged)
+    // Whether "Publish now" was pressed once for this npub; until then
+    // changes are kept, not published.
+    Q_PROPERTY(bool publishConfirmed READ publishConfirmed NOTIFY syncChanged)
+    // Whether a publish is out, when one last reached a relay (null until
+    // one has), and why the last one failed, empty when it did not.
+    Q_PROPERTY(bool publishing READ publishing NOTIFY publishChanged)
+    Q_PROPERTY(QVariant publishedAt READ publishedAt NOTIFY publishChanged)
+    Q_PROPERTY(QString publishError READ publishError NOTIFY publishChanged)
 
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool statusError READ statusError NOTIFY statusChanged)
@@ -144,6 +156,11 @@ public:
     bool signingKeyChecked() const { return m_signingKeyChecked; }
     bool signingBusy() const { return m_signingBusy; }
     QString signingError() const { return m_signingError; }
+    bool publishReads() const { return m_syncAccount.publishReads; }
+    bool publishConfirmed() const { return m_syncAccount.publishConfirmed; }
+    bool publishing() const { return m_publishing; }
+    QVariant publishedAt() const;
+    QString publishError() const { return m_publishError; }
 
     QString status() const { return m_status; }
     bool statusError() const { return m_statusError; }
@@ -185,6 +202,11 @@ public:
     // changes. Nothing is published here. `done` runs exactly once, never
     // inside this call, unless the backend is destroyed first.
     void sign(const NostrEvent &event, Signer::Done done);
+    Q_INVOKABLE void setPublishReads(bool publish);
+    // Pulls, then publishes at once the subscriptions, the read articles
+    // when publishReads, and the saved views when no list of them is known.
+    // Confirms the account too, so its changes go out on their own after.
+    Q_INVOKABLE void publishNow();
     Q_INVOKABLE void importOpml();
     Q_INVOKABLE void exportOpml();
     // Puts text selected in the reader on the clipboard (and the primary
@@ -226,6 +248,14 @@ public:
     void setThumbnailLimits(const Thumbnails::Limits &limits) { m_thumbnails->setLimits(limits); }
     void setFetchLimits(const Fetcher::Limits &limits) { m_fetcher->setLimits(limits); }
     void setRelayLimits(const RelayPool::Limits &limits) { m_relays->setLimits(limits); }
+    // How long a change waits for more before it is published: a read, which
+    // comes in bursts and resends the whole list, longer, as on the web;
+    // but never more than `maxWaitMs` after the first change waiting.
+    void setPublishDelays(int changeMs, int readMs, int maxWaitMs = 5 * 60 * 1000) {
+        m_publishDelayMs = changeMs;
+        m_readPublishDelayMs = readMs;
+        m_publishMaxWaitMs = maxWaitMs;
+    }
     void setRelays(const QStringList &relays) {
         m_relays->setRelays(relays);
         m_syncRelays->setRelays(relays);
@@ -244,6 +274,7 @@ signals:
     void syncChanged();
     void syncFinished();
     void signingChanged();
+    void publishChanged();
     void statusChanged();
 
 private:
@@ -304,6 +335,34 @@ private:
     void subscribeFinished(const Library::Subscription &subscription);
     void scheduleAutoRefresh();
     void reloadSyncAccount();
+    // Publishing: a change marks its kind and (re)starts the debounce; when
+    // it ends, the events are pulled first, then the kinds marked are built
+    // from the library, signed, sent, and recorded one by one. A kind that
+    // fails stays marked for the next change or pull; after a signing
+    // failure only a change, publishNow(), or a new key retries. The kinds
+    // marked are kept in the library too, so they go out after a restart,
+    // and nothing goes out on its own until publishNow() confirmed the
+    // account.
+    struct PublishRun;
+    void schedulePublish(int kind);
+    // Marks `kind` to publish, here and in the library.
+    void markPublishPending(int kind);
+    // Sets or clears the bits of `mask` in the library's pending kinds.
+    void savePublishPending(const QString &pubkey, int mask, bool pending);
+    // The account a read changed now is to be published for, if any, and
+    // on the worker, in the read's own write, its kind marked for it, so a
+    // read saved as the window closes still goes out after a restart.
+    QString readsPublishedFor() const;
+    static void markReadsPending(Store &store, const QString &pubkey);
+    // Starts the debounce for what is marked, when nothing is under way.
+    void resumePublish();
+    // The keyring said it holds no key for the account.
+    bool keyMissing() const { return m_signingKeyChecked && !m_signingKeyStored; }
+    void startPublish(bool asked = false);
+    void continuePublish(const Sync::Outcome &outcome);
+    void publishNext(const std::shared_ptr<PublishRun> &run);
+    void publishDone(const std::shared_ptr<PublishRun> &run);
+    void resetPublish();
     // Pulls the sync events, when there is an account and no pull is out.
     void sync();
     // `pubkey` is the account the pull was for.
@@ -425,6 +484,26 @@ private:
     quint64 m_signId = 0;
     bool m_autoRefreshOn = false;
     QTimer m_autoRefresh;
+
+    QSet<int> m_publishKinds;
+    QTimer m_publishTimer;
+    int m_publishDelayMs = 2 * 1000;
+    int m_readPublishDelayMs = 30 * 1000;
+    int m_publishMaxWaitMs = 5 * 60 * 1000;
+    // Since the first change waiting to be published.
+    QElapsedTimer m_publishWaiting;
+    bool m_publishing = false;
+    // The next pull to finish is the one a publish waits on.
+    bool m_publishPull = false;
+    bool m_publishAgain = false;
+    // The last publish could not sign, which asking again at every pull
+    // would not mend and might prompt for each time.
+    bool m_publishHeld = false;
+    // Bumped when the account changes, which leaves a run for the old one
+    // unheard.
+    quint64 m_publishEpoch = 0;
+    QDateTime m_publishedAt;
+    QString m_publishError;
 
     bool m_adding = false;
     QString m_addError;

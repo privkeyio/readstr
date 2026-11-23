@@ -10,9 +10,9 @@ It reads RSS, Atom, and JSON Feed, and Nostr long-form articles (NIP-23)
 and videos (NIP-71) by the authors you follow. The window has three panes
 (sources, articles, reader) driven from the keyboard, and the same engine
 (SQLite library, fetcher, feed parser, discovery, OPML, Nostr relays) runs
-headless from the command line. It pulls your subscriptions, read articles,
-and saved views from the Readstr web app over Nostr (read-only for now;
-publishing comes in a later phase).
+headless from the command line. It syncs your subscriptions, read articles,
+and saved views with the Readstr web app over Nostr: it pulls them, and
+with your signing key in the desktop keyring it publishes its own.
 
 ## Build, test, install
 
@@ -102,15 +102,14 @@ with "Sync with Nostr…" in the `⋮` menu or `readstr sync login npub1…`, an
 it pulls what the Readstr web app publishes for it: the subscription list
 (kind 30404), the read articles (kind 30405, which the web app publishes only
 when its read-sync setting is on, and then only its most recent reads), and
-the saved views (kind 30406). Pulling needs only the public key and nothing
-is signed or published yet: the web app publishes these events in
-cleartext, so anyone can read them. The window pulls right after you log in
+the saved views (kind 30406). Pulling needs only the public key: the web
+app publishes these events in cleartext, so anyone can read them. The window pulls right after you log in
 and after every refresh of all feeds, so read marks find the articles it
 brought; `readstr sync` pulls now. A pull that fails says so in the status
 bar (and on stderr), or on stderr with exit code 1 from the command line.
 
 The dialog also takes the account's signing key (its `nsec`, or the same 64
-hex characters), for publishing in a later phase. It is kept only if it is
+hex characters), for publishing (below). It is kept only if it is
 the key of the npub you sync with, and only in your desktop keyring through
 the Secret Service (GNOME Keyring, KeePassXC, or KWallet's bridge), as an item
 labeled "Readstr Nostr key (npub1…)" in the default collection, with the
@@ -147,12 +146,80 @@ Merging is close to the web app's and never removes anything here:
 Each event applies only when it is newer than the last one applied of its
 kind (in the same second, when its id is lower, as NIP-01 has relays keep),
 so an old or replayed one never rolls anything back, and unsubscribing here
-is not undone by pulling the same list again. Readstr does not publish
-yet, though, so a feed unsubscribed here comes back with the next newer
+is not undone by pulling the same list again. Without a signing key Readstr
+publishes nothing, so a feed unsubscribed here comes back with the next newer
 subscription list the web app publishes, which still has it. (Like the web app, an empty library
 takes the subscription list whatever its age.) `readstr sync logout` or
 "Stop syncing" forgets the npub and what was pulled for it; your
 subscriptions, read marks, and saved views stay.
+
+### Publishing
+
+With the account's signing key stored, the window publishes the same events
+the web app does, with the same d tags and format, so the web app takes
+them, and a `client` tag of `readstr-omarchy`. Nothing goes out on its own
+until you press "Publish now" once for the npub, so your library is never
+published under an npub you have not confirmed; this holds for every npub
+you switch to, and for one set before Readstr could publish. Until then
+changes are kept, and they go out with that first "Publish now".
+
+- The subscription list (kind 30404), 2 seconds after you subscribe,
+  unsubscribe, or import an OPML file (a burst of changes goes out once).
+  Each feed keeps the tags and category color and icon the last list gave
+  it, which Readstr does not keep itself; a feed in that list that Readstr
+  cannot follow (one on the local network, or neither a web feed nor an
+  npub) stays in the list, and one it could follow but you unsubscribed
+  goes into `deleted`. A feed another device unsubscribed from (in that
+  list's `deleted`) stays in your library here, as a pull never removes
+  one, but is left out of the list Readstr publishes, unless you subscribed
+  to it here after that list came. A feed whose URL holds a user name or
+  password, or whose host is on this machine or the local network (such as
+  `nas.local`, `192.168.x.x`, or a name without a dot), is never published
+  from here, nor marked deleted (one the last list held already stays as it
+  was). A token in a URL's query string is published, though,
+  as Readstr cannot tell it from any other parameter: subscribe to such a
+  feed only if you do not mind that. The list must fit in 60,000 bytes, as
+  the read articles do: what the last list carried for other devices is cut
+  to fit, `deleted` first, and a library too large on its own is not
+  published, which the dialog says.
+- The read articles (kind 30405), only once "Also publish my read
+  articles" is ticked in the dialog, which is off until you turn it on, as
+  the web app's read-sync setting is, since the list is public. They go out
+  30 seconds after the last article marked read or unread, and at most 5
+  minutes after the first while you keep reading, as the union of
+  the articles read here (the last marked read first) and the last list the
+  relays held, cut to the newest that fit in 60,000 bytes, which common
+  relays take, as the web app cuts them. Nothing goes out when the relays
+  already hold every one. An article marked unread here stays in that list,
+  as on the web: read status only ever adds up. Turning the box off stops
+  publishing at once, even a list already waiting to go out, but leaves the
+  last list published on the relays.
+- The saved views (kind 30406) without their mute words, which never leave
+  this machine. Readstr cannot edit views, so it publishes them only when
+  you ask ("Publish now") and no list of them has ever been pulled,
+  applied, or published for the account, as when the relays lost it;
+  publishing over a
+  list would bring back views deleted in the web app, since deletions do not
+  sync.
+
+Before publishing, Readstr pulls, so an event another device published
+meanwhile is merged first and never replaced unseen, and a new event is
+dated after the newest one of its kind it has seen. The read articles wait,
+as on the web, for a pull every connected relay answered; any kind whose
+event the relays hold in a form Readstr cannot read is not replaced. An
+event is published once at least one relay accepts it (each relay gets 10
+seconds to say OK); refusals are logged on stderr. "Publish now" pulls and
+publishes at once. The dialog shows when Readstr last published and why it
+could not: a kind that failed is tried again after the next refresh or
+change, and one that could not be signed (no key, a locked or dismissed
+keyring) only after the next change, "Publish now", or a new key, so a
+locked keyring does not prompt at every refresh. A change not published
+yet, failed or still waiting when Readstr quits, is remembered and goes out
+after the first pull of the next launch. A subscription list applied by a
+Readstr from before publishing is not replaced until a pull has brought it
+again, so what only the web app keeps in it is not lost. The command line
+does not publish; a change made there goes out with the window's next
+publish.
 
 ## Command line
 

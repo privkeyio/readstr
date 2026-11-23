@@ -46,6 +46,9 @@ struct NostrResult {
     // failing, with its reason in `error` when none answers.
     int relays = 0;
     int answered = 0;
+    // Relays that failed without ever connecting, which cannot hold
+    // anything this pull missed. The others that did not answer may.
+    int unreachable = 0;
     // Set when no relay answered; the reasons, joined.
     QString error;
     // The events were cut off at the query's count or size cap.
@@ -63,6 +66,27 @@ struct NostrResult {
     // Every relay asked answered, nothing was cut off at a cap, and no hint
     // was left out, so nothing they hold was missed.
     bool complete() const { return ok() && answered == relays && !truncated && !deferred; }
+    // Every relay that connected answered, as the web app asks of a pull
+    // before it publishes a replacement, and nothing was cut off or left out.
+    bool settled() const { return ok() && answered + unreachable == relays && !truncated && !deferred; }
+};
+
+// What the relays said to an event sent to them.
+struct PublishResult {
+    struct Relay {
+        QString relay;
+        bool accepted = false;
+        // The relay's OK message, or why it gave no answer.
+        QString message;
+    };
+    QList<Relay> relays;
+    // Not sent to some relay, as it was no longer wanted when it connected.
+    bool cancelled = false;
+    int accepted() const;
+    // At least one relay accepted it, as the web app counts a publish.
+    bool ok() const { return accepted() > 0; }
+    // Why no relay accepted it, each relay's reason joined; empty when one did.
+    QString error() const;
 };
 
 // Asks Nostr relays over WebSockets for the events of a list of queries.
@@ -95,6 +119,8 @@ public:
         int maxConnections = 24;
         // How much longer the other relays get once one has answered.
         int graceMs = 4 * 1000;
+        // From EVENT to the relay's OK.
+        int publishTimeoutMs = 10 * 1000;
     };
     // Events dated further ahead than this are refused, so one cannot stay
     // the newest version of an article forever.
@@ -133,12 +159,22 @@ public:
     void queryEach(const QList<NostrQuery> &queries, const std::function<void(qsizetype, const NostrResult &)> &each);
     NostrResult query(const NostrQuery &query);
 
+    // Sends a signed event to the pool's relays and the public ones among
+    // `extraRelays`, and returns at once. `done` runs later on this
+    // object's thread, once every relay has answered with OK or given up,
+    // and never once the pool is gone. When given, `stillWanted` is asked as
+    // each relay connects, right before the event is sent to it, and a
+    // false answer ends that relay unsent (PublishResult::cancelled).
+    void publish(const NostrEvent &event, const QStringList &extraRelays,
+                 std::function<void(const PublishResult &)> done, std::function<bool()> stillWanted = {});
+
 private:
     struct Batch;
     class Connection;
+    class Publication;
     friend class Connection;
     void pump(const std::shared_ptr<Batch> &batch);
-    void relayDone(const std::shared_ptr<Batch> &batch, int queryIndex, const QString &error);
+    void relayDone(const std::shared_ptr<Batch> &batch, int queryIndex, const QString &error, bool reached);
     void deliver(const std::shared_ptr<Batch> &batch, int queryIndex, const QString &error);
     // False when the event is forged; true when it was kept or is simply
     // not wanted.
