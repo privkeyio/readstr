@@ -1,8 +1,10 @@
 # Shared by readstr.pro and tests/readstr_tests.pro.
-QT += network sql dbus qml websockets
+QT += network sql dbus qml quick websockets
 
-# BIP-340 signatures on Nostr events, checked and made.
-LIBS += -lsecp256k1
+# BIP-340 signatures on Nostr events, checked and made, and the ECDH of
+# NIP-44; OpenSSL's libcrypto for NIP-44's ChaCha20, HMAC-SHA256, and HKDF;
+# libqrencode for the QR code of a nostrconnect:// link.
+LIBS += -lsecp256k1 -lcrypto -lqrencode
 
 VERSION = 0.1.0
 DEFINES += READSTR_VERSION=\\\"$$VERSION\\\"
@@ -20,6 +22,7 @@ HEADERS += \
     $$PWD/keystore.h \
     $$PWD/library.h \
     $$PWD/nip19.h \
+    $$PWD/nip44.h \
     $$PWD/nostrevent.h \
     $$PWD/nostrsource.h \
     $$PWD/localnetwork.h \
@@ -27,7 +30,9 @@ HEADERS += \
     $$PWD/opml.h \
     $$PWD/paths.h \
     $$PWD/portalfilepicker.h \
+    $$PWD/qrcode.h \
     $$PWD/relaypool.h \
+    $$PWD/remotesigner.h \
     $$PWD/sanitizer.h \
     $$PWD/signer.h \
     $$PWD/smallfile.h \
@@ -49,6 +54,7 @@ SOURCES += \
     $$PWD/keystore.cpp \
     $$PWD/library.cpp \
     $$PWD/nip19.cpp \
+    $$PWD/nip44.cpp \
     $$PWD/nostrevent.cpp \
     $$PWD/nostrsource.cpp \
     $$PWD/localnetwork.cpp \
@@ -56,7 +62,9 @@ SOURCES += \
     $$PWD/opml.cpp \
     $$PWD/paths.cpp \
     $$PWD/portalfilepicker.cpp \
+    $$PWD/qrcode.cpp \
     $$PWD/relaypool.cpp \
+    $$PWD/remotesigner.cpp \
     $$PWD/sanitizer.cpp \
     $$PWD/signer.cpp \
     $$PWD/sourcemodel.cpp \

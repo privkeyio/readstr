@@ -15,6 +15,7 @@
 #include "keystore.h"
 #include "localnetwork.h"
 #include "portalfilepicker.h"
+#include "qrcode.h"
 #include "theme.h"
 #include "translator.h"
 
@@ -65,6 +66,9 @@ int main(int argc, char *argv[]) {
     LocalNetworkFactory localNetwork;
     QQmlApplicationEngine engine;
     engine.setNetworkAccessManagerFactory(&localNetwork);
+    // The engine owns the provider. image://qr/ draws a nostrconnect://
+    // link's QR code in process, so the link never leaves for a service.
+    engine.addImageProvider(QStringLiteral("qr"), new QrImageProvider);
     QObject::connect(&translator, &Translator::changed, &engine, &QQmlEngine::retranslate);
     engine.rootContext()->setContextProperty("translator", &translator);
     engine.rootContext()->setContextProperty("theme", &theme);

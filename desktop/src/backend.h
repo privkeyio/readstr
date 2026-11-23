@@ -22,6 +22,7 @@
 #include "library.h"
 #include "nip19.h"
 #include "relaypool.h"
+#include "remotesigner.h"
 #include "signer.h"
 #include "sourcemodel.h"
 #include "store.h"
@@ -94,6 +95,24 @@ class Backend : public QObject {
     Q_PROPERTY(bool signingKeyChecked READ signingKeyChecked NOTIFY signingChanged)
     Q_PROPERTY(bool signingBusy READ signingBusy NOTIFY signingChanged)
     Q_PROPERTY(QString signingError READ signingError NOTIFY signingChanged)
+    // What signs for the account: "key" for the nsec in the keyring, which
+    // wins when there is one, "remote" for a paired remote signer (NIP-46),
+    // or "none".
+    Q_PROPERTY(QString signerKind READ signerKind NOTIFY signingChanged)
+    Q_PROPERTY(bool remoteSignerPaired READ remoteSignerPaired NOTIFY signingChanged)
+    // The keyring answered that it holds neither a key nor a pairing.
+    Q_PROPERTY(bool signerMissing READ signerMissing NOTIFY signingChanged)
+    // A connection to a remote signer is being made; for a nostrconnect://
+    // link, the link and its QR code's image:// URL.
+    Q_PROPERTY(bool remoteConnecting READ remoteConnecting NOTIFY remoteSignerChanged)
+    Q_PROPERTY(QString nostrConnectUri READ nostrConnectUri NOTIFY remoteSignerChanged)
+    Q_PROPERTY(QString nostrConnectQr READ nostrConnectQr NOTIFY remoteSignerChanged)
+    // Why connecting failed, empty when it did not.
+    Q_PROPERTY(QString remoteSignerError READ remoteSignerError NOTIFY remoteSignerChanged)
+    // A request waits on the remote signer, likely for the user's approval
+    // on the phone, and the page it asked the user to approve at, if any.
+    Q_PROPERTY(bool remoteSignerWaiting READ remoteSignerWaiting NOTIFY remoteSignerChanged)
+    Q_PROPERTY(QString remoteAuthUrl READ remoteAuthUrl NOTIFY remoteSignerChanged)
     // Whether read articles are published too (kind 30405), which makes
     // them public; off until turned on, as in the web app.
     Q_PROPERTY(bool publishReads READ publishReads WRITE setPublishReads NOTIFY syncChanged)
@@ -156,6 +175,15 @@ public:
     bool signingKeyChecked() const { return m_signingKeyChecked; }
     bool signingBusy() const { return m_signingBusy; }
     QString signingError() const { return m_signingError; }
+    QString signerKind() const;
+    bool remoteSignerPaired() const { return m_pairingStored; }
+    bool signerMissing() const { return keyMissing(); }
+    bool remoteConnecting() const { return m_pairingSigner != nullptr; }
+    QString nostrConnectUri() const { return m_nostrConnectUri; }
+    QString nostrConnectQr() const;
+    QString remoteSignerError() const { return m_remoteError; }
+    bool remoteSignerWaiting() const { return m_remoteWaiting; }
+    QString remoteAuthUrl() const { return m_remoteAuthUrl; }
     bool publishReads() const { return m_syncAccount.publishReads; }
     bool publishConfirmed() const { return m_syncAccount.publishConfirmed; }
     bool publishing() const { return m_publishing; }
@@ -197,6 +225,19 @@ public:
     // signingError, when it is not a key or not the account's.
     Q_INVOKABLE bool addSigningKey(const QString &text);
     Q_INVOKABLE void forgetSigningKey();
+    // Pairs with the remote signer a bunker:// URI names, and keeps the
+    // pairing in the keyring once the signer holds the account's key.
+    // False, starting nothing and saying why in remoteSignerError, when the
+    // URI is not one Readstr can use.
+    Q_INVOKABLE bool connectBunker(const QString &uri);
+    // Makes a nostrconnect:// link over the account's sync relays, shown as
+    // nostrConnectUri and its QR code, and pairs with the signer app that
+    // answers it.
+    Q_INVOKABLE bool startNostrConnect();
+    Q_INVOKABLE void cancelRemoteConnect();
+    Q_INVOKABLE void copyNostrConnectUri();
+    // Forgets the pairing, here and in the keyring.
+    Q_INVOKABLE void disconnectSigner();
     // Signs `event` as the sync account, reading its key from the keyring
     // the first time and keeping it in memory until the account or its key
     // changes. Nothing is published here. `done` runs exactly once, never
@@ -256,6 +297,7 @@ public:
         m_readPublishDelayMs = readMs;
         m_publishMaxWaitMs = maxWaitMs;
     }
+    void setRemoteSignerLimits(const RemoteSigner::Limits &limits) { m_remoteLimits = limits; }
     void setRelays(const QStringList &relays) {
         m_relays->setRelays(relays);
         m_syncRelays->setRelays(relays);
@@ -274,6 +316,7 @@ signals:
     void syncChanged();
     void syncFinished();
     void signingChanged();
+    void remoteSignerChanged();
     void publishChanged();
     void statusChanged();
 
@@ -356,8 +399,10 @@ private:
     static void markReadsPending(Store &store, const QString &pubkey);
     // Starts the debounce for what is marked, when nothing is under way.
     void resumePublish();
-    // The keyring said it holds no key for the account.
-    bool keyMissing() const { return m_signingKeyChecked && !m_signingKeyStored; }
+    // The keyring said it holds neither a key nor a pairing for the account.
+    bool keyMissing() const {
+        return m_signingKeyChecked && !m_signingKeyStored && m_pairingChecked && !m_pairingStored;
+    }
     void startPublish(bool asked = false);
     void continuePublish(const Sync::Outcome &outcome);
     void publishNext(const std::shared_ptr<PublishRun> &run);
@@ -375,6 +420,33 @@ private:
     QString keyStoreError(const KeyStore::Result &result) const;
     // Drops the signer and the signing state of an account no longer synced.
     void resetSigning();
+    // What the keyring said of the pairing; like setSigning(), a pairing
+    // newly known to be there lets what waited for a signer go out.
+    void setPairing(bool stored, bool checked);
+    // Lets go of the active signer at once, deleting it from the event loop,
+    // as a remote one may be inside one of its own callbacks.
+    void releaseSigner();
+    // A key in the keyring wins over a remote signer, and a new pairing over
+    // an old one: the remote signer is let go once nothing waits on it, so
+    // the next sign reads the keyring again; signs that come before then
+    // wait for that read.
+    void preferKey();
+    // Removes the pairing written as `write`, which a "Stop connecting"
+    // came too late to stop, unless a newer one is to be written by then.
+    void unstorePairing(const QString &npub, quint64 write);
+    RemoteSigner *remoteSigner() const;
+    void adoptRemoteSigner(std::unique_ptr<RemoteSigner> signer);
+    // Starts pairing with `pairing`'s signer, in place of any pairing under
+    // way, and keeps it once the signer holds the account's key.
+    void beginPairing(RemoteSigner::Pairing pairing);
+    void pairingDone(const QString &error);
+    void endPairing();
+    // Whether there is an account to pair for and a keyring to keep the
+    // pairing in; if not, says why in remoteSignerError.
+    bool canPair();
+    void setRemoteError(const QString &error);
+    void setRemoteAuthUrl(const QString &url);
+    void updateRemoteWaiting();
     // Drops the signer and any read of the key still out, so neither signs
     // again, failing with `error` every sign not answered yet.
     void dropSigner(const QString &error);
@@ -454,6 +526,28 @@ private:
     KeyStore *m_keyStore = nullptr;
     // The sync account's, once something has been signed.
     std::unique_ptr<Signer> m_signer;
+    bool m_signerRemote = false;
+    // The remote signer gave way, and goes once it has answered what it
+    // was given.
+    bool m_signerStale = false;
+    // Whether the keyring holds a pairing with a remote signer, and whether
+    // it has answered that.
+    bool m_pairingStored = false;
+    bool m_pairingChecked = false;
+    // The signer being paired with, until it holds the account's key and the
+    // pairing is stored, or that fails.
+    std::unique_ptr<RemoteSigner> m_pairingSigner;
+    // Bumped whenever a pairing starts or ends, which leaves the answers
+    // still out for an earlier one unheard.
+    quint64 m_pairingEpoch = 0;
+    // Counts the pairings handed to the keyring to write.
+    quint64 m_pairingWrites = 0;
+    QString m_nostrConnectUri;
+    QString m_remoteError;
+    bool m_remoteWaiting = false;
+    QString m_remoteAuthUrl;
+    std::pair<QString, bool> m_statusBeforeApproval;
+    RemoteSigner::Limits m_remoteLimits;
     bool m_signingKeyStored = false;
     bool m_signingKeyChecked = false;
     bool m_signingBusy = false;
@@ -475,6 +569,11 @@ private:
     // still out unheard, so it cannot bring the dropped key back.
     quint64 m_signerLoad = 0;
     bool m_loadingSigner = false;
+    // The read under way is past the key, reading the pairing.
+    bool m_loadingPairing = false;
+    // The read the remote signer was disconnected during, while it read
+    // the key: it does not go on to the pairing.
+    quint64 m_pairingDisconnectedLoad = 0;
     // Signs waiting for the key to be read.
     QList<std::pair<NostrEvent, Signer::Done>> m_pendingSigns;
     // Signs handed to the signer and not answered yet, kept here so that

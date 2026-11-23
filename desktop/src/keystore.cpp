@@ -11,6 +11,7 @@
 #include <optional>
 
 #include "nip19.h"
+#include "remotesigner.h"
 #include "signer.h"
 #include "wipe.h"
 
@@ -112,6 +113,10 @@ QMap<QString, QString> SecretServiceKeyStore::attributes(const QString &npub) {
     return {{QStringLiteral("application"), QStringLiteral("readstr")}, {QStringLiteral("npub"), npub}};
 }
 
+QMap<QString, QString> SecretServiceKeyStore::pairingAttributes(const QString &npub) {
+    return {{QStringLiteral("application"), QStringLiteral("readstr-nip46")}, {QStringLiteral("npub"), npub}};
+}
+
 bool SecretServiceKeyStore::connected() const {
     return QDBusConnection::sessionBus().isConnected();
 }
@@ -203,10 +208,10 @@ void SecretServiceKeyStore::closeSession(const QString &session) {
              [](const QDBusMessage &) {});
 }
 
-void SecretServiceKeyStore::search(const QString &npub,
+void SecretServiceKeyStore::search(const Attributes &attributes,
                                    std::function<void(const Paths &, const Paths &, const Result &)> next) {
     QDBusMessage message = serviceCall(QStringLiteral("SearchItems"));
-    message << QVariant::fromValue(attributes(npub));
+    message << QVariant::fromValue(attributes);
     call(message, [next = std::move(next)](const QDBusMessage &reply) {
         if (isError(reply))
             return next({}, {}, failure(reply));
@@ -269,9 +274,17 @@ void SecretServiceKeyStore::prompt(const QString &path, std::function<void(const
 }
 
 void SecretServiceKeyStore::contains(const QString &npub, Done done) {
+    containsItem(attributes(npub), std::move(done));
+}
+
+void SecretServiceKeyStore::containsPairing(const QString &npub, Done done) {
+    containsItem(pairingAttributes(npub), std::move(done));
+}
+
+void SecretServiceKeyStore::containsItem(const Attributes &attributes, Done done) {
     if (!connected())
         return later(done, failure(Error::Unavailable));
-    search(npub, [done](const Paths &unlocked, const Paths &locked, const Result &status) {
+    search(attributes, [done](const Paths &unlocked, const Paths &locked, const Result &status) {
         Result result = status;
         result.found = status.error == Error::None && (!unlocked.isEmpty() || !locked.isEmpty());
         done(result);
@@ -279,41 +292,70 @@ void SecretServiceKeyStore::contains(const QString &npub, Done done) {
 }
 
 void SecretServiceKeyStore::lookup(const QString &npub, Done done) {
-    if (!connected())
-        return later(done, failure(Error::Unavailable));
     const auto profile = Nip19::decodeProfile(npub);
     const QString pubkey = profile ? profile->pubkey : QString();
-    search(npub, [this, done, pubkey](const Paths &unlocked, const Paths &locked, const Result &status) {
+    lookupItem(attributes(npub), [pubkey](QByteArray &value, Result &result) {
+        // store() writes hex, and an nsec someone put there by hand is taken
+        // too; anything else is not a key.
+        QString text = QString::fromLatin1(value);
+        auto key = Nip19::secretKey(text);
+        wipe(text);
+        const auto signer = key ? LocalSigner::create(*key) : nullptr;
+        if (!signer || signer->pubkey() != pubkey) {
+            if (key)
+                wipe(*key);
+            return false;
+        }
+        result.secret = std::move(*key);
+        return true;
+    }, std::move(done));
+}
+
+void SecretServiceKeyStore::lookupPairing(const QString &npub, Done done) {
+    lookupItem(pairingAttributes(npub), [](QByteArray &value, Result &result) {
+        auto pairing = RemoteSigner::Pairing::fromJson(value);
+        if (!pairing)
+            return false;
+        pairing->wipe();
+        result.secret = QByteArray(value.constData(), value.size());
+        return true;
+    }, std::move(done));
+}
+
+void SecretServiceKeyStore::lookupItem(const Attributes &attributes, const Accept &accept, Done done) {
+    if (!connected())
+        return later(done, failure(Error::Unavailable));
+    search(attributes, [this, done, accept](const Paths &unlocked, const Paths &locked, const Result &status) {
         if (status.error != Error::None)
             return done(status);
         if (unlocked.isEmpty() && locked.isEmpty())
             return done({});
         // Any program of this user's can add an item with these attributes,
-        // so one that is not the account's key is passed over rather than
-        // left to hide the real one. The unlocked ones come first, as they
-        // cost no prompt.
-        readItems(unlocked + locked, unlocked.size(), 0, pubkey, done);
+        // so one that is not the account's is passed over rather than left
+        // to hide the real one. The unlocked ones come first, as they cost
+        // no prompt.
+        readItems(unlocked + locked, unlocked.size(), 0, accept, done);
     });
 }
 
-void SecretServiceKeyStore::readItems(const Paths &items, qsizetype unlocked, qsizetype next, const QString &pubkey,
+void SecretServiceKeyStore::readItems(const Paths &items, qsizetype unlocked, qsizetype next, const Accept &accept,
                                       Done done) {
     if (next == items.size())
         return done(failure(Error::Failed, tr("No item in the keyring holds this account's key.")));
     const QDBusObjectPath item = items.at(next);
-    const auto skip = [this, items, unlocked, next, pubkey, done] {
-        readItems(items, unlocked, next + 1, pubkey, done);
+    const auto skip = [this, items, unlocked, next, accept, done] {
+        readItems(items, unlocked, next + 1, accept, done);
     };
-    const auto read = [this, item, pubkey, done, skip](const Result &status) {
+    const auto read = [this, item, accept, done, skip](const Result &status) {
         if (status.error != Error::None)
             return done(status);
-        openSession([this, item, pubkey, done, skip](const QString &session, const Result &status) {
+        openSession([this, item, accept, done, skip](const QString &session, const Result &status) {
             if (status.error != Error::None)
                 return done(status);
             QDBusMessage message =
                 QDBusMessage::createMethodCall(service, item.path(), itemInterface, QStringLiteral("GetSecret"));
             message << QVariant::fromValue(QDBusObjectPath(session));
-            call(message, [this, session, pubkey, done, skip](const QDBusMessage &reply) {
+            call(message, [this, session, accept, done, skip](const QDBusMessage &reply) {
                 closeSession(session);
                 if (isError(reply)) {
                     // An item deleted since the search is passed over, like
@@ -325,25 +367,16 @@ void SecretServiceKeyStore::readItems(const Paths &items, qsizetype unlocked, qs
                 auto secret = argument<Secret>(reply, 0, "(oayays)");
                 if (!secret)
                     return skip();
-                // store() writes hex, and an nsec someone put there by hand
-                // is taken too; anything else is not a key. The value is
-                // wiped where it is, which also reaches a reply that shares
-                // it; the copy libdbus read it from is freed unwiped, out of
-                // Readstr's reach.
-                QString text = QString::fromLatin1(secret->value);
-                auto key = Nip19::secretKey(text);
-                wipe(text);
+                // The value is wiped where it is, which also reaches a reply
+                // that shares it; the copy libdbus read it from is freed
+                // unwiped, out of Readstr's reach.
+                Result result;
+                const bool accepted = accept(secret->value, result);
                 wipeShared(secret->value);
                 secret->value.clear();
-                const auto signer = key ? LocalSigner::create(*key) : nullptr;
-                if (!signer || signer->pubkey() != pubkey) {
-                    if (key)
-                        wipe(*key);
+                if (!accepted)
                     return skip();
-                }
-                Result result;
                 result.found = true;
-                result.secret = std::move(*key);
                 done(result);
                 wipe(result.secret);
             });
@@ -355,51 +388,72 @@ void SecretServiceKeyStore::readItems(const Paths &items, qsizetype unlocked, qs
         unlock({item}, read);
 }
 
-void SecretServiceKeyStore::store(const QString &npub, const QByteArray &secret, Done done) {
-    if (!connected())
-        return later(done, failure(Error::Unavailable));
-    // A copy of its own rather than one sharing the caller's buffer, so the
-    // wipes here and the caller's each reach the bytes they mean to. Wiped
-    // when the last holder lets go too, as when the store is destroyed with
-    // the session or an unlock prompt still out.
-    const std::shared_ptr<QByteArray> key(new QByteArray(secret.constData(), secret.size()), [](QByteArray *bytes) {
-        wipe(*bytes);
-        delete bytes;
+namespace {
+// A copy of its own rather than one sharing the caller's buffer, so the
+// wipes in the store and the caller's each reach the bytes they mean to.
+// Wiped when the last holder lets go too, as when the store is destroyed
+// with the session or an unlock prompt still out.
+std::shared_ptr<QByteArray> ownCopy(const QByteArray &bytes) {
+    return std::shared_ptr<QByteArray>(new QByteArray(bytes.constData(), bytes.size()), [](QByteArray *copy) {
+        wipe(*copy);
+        delete copy;
     });
-    openSession([this, npub, key, done](const QString &session, const Result &status) {
+}
+}
+
+void SecretServiceKeyStore::store(const QString &npub, const QByteArray &secret, Done done) {
+    QByteArray hex = secret.toHex();
+    const auto value = ownCopy(hex);
+    wipe(hex);
+    storeItem(attributes(npub), tr("Readstr Nostr key (%1)").arg(npub), value, std::move(done));
+}
+
+void SecretServiceKeyStore::storePairing(const QString &npub, const QByteArray &pairing, Done done) {
+    storeItem(pairingAttributes(npub), tr("Readstr remote signer pairing (%1)").arg(npub), ownCopy(pairing),
+              std::move(done));
+}
+
+void SecretServiceKeyStore::storeItem(const Attributes &attributes, const QString &label,
+                                      const std::shared_ptr<QByteArray> &value, Done done) {
+    if (!connected()) {
+        wipe(*value);
+        return later(done, failure(Error::Unavailable));
+    }
+    openSession([this, attributes, label, value, done](const QString &session, const Result &status) {
         if (status.error != Error::None) {
-            wipe(*key);
+            wipe(*value);
             return done(status);
         }
-        createItem(session, npub, key, false, done);
+        createItem(session, attributes, label, value, false, done);
     });
 }
 
-void SecretServiceKeyStore::createItem(const QString &session, const QString &npub,
-                                       const std::shared_ptr<QByteArray> &key, bool unlocked, Done done) {
+void SecretServiceKeyStore::createItem(const QString &session, const Attributes &attributes, const QString &label,
+                                       const std::shared_ptr<QByteArray> &value, bool unlocked, Done done) {
     QVariantMap properties;
-    properties.insert(QStringLiteral("org.freedesktop.Secret.Item.Label"), tr("Readstr Nostr key (%1)").arg(npub));
-    properties.insert(QStringLiteral("org.freedesktop.Secret.Item.Attributes"), QVariant::fromValue(attributes(npub)));
-    // The hex is shared with the message, which QtDBus keeps until the reply
-    // is in, so it is wiped in place once the reply comes, or once the call
-    // is dropped with this store; wiping a copy would leave the message's.
-    // libdbus serializes the message into a buffer of its own, which it
-    // frees unwiped: that copy is out of Readstr's reach.
-    const std::shared_ptr<const QByteArray> hex(new QByteArray(key->toHex()), [](const QByteArray *bytes) {
-        wipeShared(*bytes);
-        delete bytes;
-    });
+    properties.insert(QStringLiteral("org.freedesktop.Secret.Item.Label"), label);
+    properties.insert(QStringLiteral("org.freedesktop.Secret.Item.Attributes"), QVariant::fromValue(attributes));
+    // The value is shared with the message, which QtDBus keeps until the
+    // reply is in, so it is wiped in place once the reply comes, or once the
+    // call is dropped with this store; wiping a copy would leave the
+    // message's. libdbus serializes the message into a buffer of its own,
+    // which it frees unwiped: that copy is out of Readstr's reach.
+    const std::shared_ptr<const QByteArray> sent(new QByteArray(value->constData(), value->size()),
+                                                [](const QByteArray *bytes) {
+                                                    wipeShared(*bytes);
+                                                    delete bytes;
+                                                });
     QDBusMessage message =
         QDBusMessage::createMethodCall(service, defaultCollection, collectionInterface, QStringLiteral("CreateItem"));
     // Replacing the item with the same attributes, so a key stored again is
     // one item, not two.
     message << properties
-            << QVariant::fromValue(Secret{QDBusObjectPath(session), {}, *hex, QStringLiteral("text/plain")}) << true;
-    call(message, [this, session, npub, key, unlocked, done, hex](const QDBusMessage &reply) {
-        wipeShared(*hex);
-        const auto finish = [this, session, key, done](const Result &result) {
+            << QVariant::fromValue(Secret{QDBusObjectPath(session), {}, *sent, QStringLiteral("text/plain")}) << true;
+    call(message, [this, session, attributes, label, value, unlocked, done, sent](const QDBusMessage &reply) {
+        wipeShared(*sent);
+        const auto finish = [this, session, value, done](const Result &result) {
             closeSession(session);
-            wipe(*key);
+            wipe(*value);
             done(result);
         };
         if (isError(reply)) {
@@ -408,10 +462,10 @@ void SecretServiceKeyStore::createItem(const QString &session, const QString &np
             // again; still locked after that, it stays a failure.
             if (result.error == Error::Locked && !unlocked)
                 return unlock({QDBusObjectPath(defaultCollection)},
-                              [this, session, npub, key, done, finish](const Result &status) {
+                              [this, session, attributes, label, value, done, finish](const Result &status) {
                                   if (status.error != Error::None)
                                       return finish(status);
-                                  createItem(session, npub, key, true, done);
+                                  createItem(session, attributes, label, value, true, done);
                               });
             return finish(result);
         }
@@ -426,9 +480,17 @@ void SecretServiceKeyStore::createItem(const QString &session, const QString &np
 }
 
 void SecretServiceKeyStore::remove(const QString &npub, Done done) {
+    removeItems(attributes(npub), std::move(done));
+}
+
+void SecretServiceKeyStore::removePairing(const QString &npub, Done done) {
+    removeItems(pairingAttributes(npub), std::move(done));
+}
+
+void SecretServiceKeyStore::removeItems(const Attributes &attributes, Done done) {
     if (!connected())
         return later(done, failure(Error::Unavailable));
-    search(npub, [this, done](const Paths &unlocked, const Paths &locked, const Result &status) {
+    search(attributes, [this, done](const Paths &unlocked, const Paths &locked, const Result &status) {
         if (status.error != Error::None)
             return done(status);
         const Paths items = unlocked + locked;

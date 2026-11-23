@@ -9,7 +9,9 @@ import QtQuick.Layouts
 // needs the account's secret key, which goes to the keyring alone, and the
 // field lets go of it as soon as it is submitted or the dialog closes. That
 // is as far as QML goes: the JavaScript strings it passed through are freed
-// by the garbage collector, not wiped.
+// by the garbage collector, not wiped. A remote signer app (NIP-46) can sign
+// instead, paired through a bunker:// link pasted here or a nostrconnect://
+// link the app scans; only the pairing goes to the keyring.
 Dialog {
     id: dialog
 
@@ -32,10 +34,11 @@ Dialog {
         close()
     }
 
-    // Asked unless the keyring has answered that it holds no key: while a
-    // check is out, or after one failed, a key may well be there.
+    // Asked unless the keyring has answered that it holds neither a key nor
+    // a pairing: while a check is out, or after one failed, one may well be
+    // there.
     function askToStop() {
-        if (backend.signingKeyChecked && !backend.signingKeyStored && !backend.signingBusy)
+        if (backend.signerMissing && !backend.signingBusy)
             return stopSyncing(false)
         confirmingStop = true
         removeKeyButton.forceActiveFocus()
@@ -53,6 +56,16 @@ Dialog {
     // field, while setting the text starts that history afresh.
     function clearKey() {
         keyField.text = ""
+        bunkerField.text = ""
+    }
+
+    // The link's secret lets whoever holds it pair with the signer, so it
+    // leaves the field the way a key does.
+    function connectBunker() {
+        const uri = bunkerField.text
+        bunkerField.text = ""
+        if (uri.trim() !== "")
+            backend.connectBunker(uri)
     }
 
     parent: Overlay.overlay
@@ -219,6 +232,186 @@ Dialog {
                     color: dialog.errorColor
                 }
 
+                Label {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 8
+                    text: qsTr("Remote signer")
+                    textFormat: Text.PlainText
+                    font.bold: true
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    text: {
+                        if (!backend.remoteSignerPaired)
+                            return qsTr("Or let a signer app such as Amber sign for this account: paste its bunker:// link, or show a link for the app to scan. Only the pairing is kept, in your keyring.")
+                        if (backend.signingKeyStored)
+                            return qsTr("A remote signer is paired too. The signing key in your keyring is used first.")
+                        return qsTr("Readstr signs through your signer app. The pairing is kept in your keyring.")
+                    }
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    opacity: 0.7
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: !backend.remoteSignerPaired && !backend.remoteConnecting
+                    spacing: 8
+
+                    TextField {
+                        id: bunkerField
+                        objectName: "bunkerField"
+                        Layout.fillWidth: true
+                        echoMode: TextInput.Password
+                        placeholderText: qsTr("bunker:// link")
+                        inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
+                        Material.roundedScale: theme.radius
+                        onAccepted: dialog.connectBunker()
+                    }
+                    Button {
+                        objectName: "connectBunkerButton"
+                        text: qsTr("Connect")
+                        flat: true
+                        focusPolicy: Qt.NoFocus
+                        enabled: bunkerField.text !== ""
+                        Material.roundedScale: theme.radius
+                        onClicked: dialog.connectBunker()
+                    }
+                }
+
+                Button {
+                    objectName: "nostrConnectButton"
+                    text: qsTr("Connect with a signer app")
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    visible: !backend.remoteSignerPaired && !backend.remoteConnecting
+                    Material.roundedScale: theme.radius
+                    onClicked: backend.startNostrConnect()
+                }
+
+                ColumnLayout {
+                    objectName: "nostrConnectPanel"
+                    Layout.fillWidth: true
+                    visible: backend.remoteConnecting
+                    spacing: 8
+
+                    Label {
+                        Layout.fillWidth: true
+                        visible: backend.nostrConnectUri !== ""
+                        text: qsTr("Scan this code with your signer app, or copy the link into it.")
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                    }
+
+                    // Drawn in process from the link; white around the code
+                    // keeps the quiet zone a scanner needs on a dark theme.
+                    Image {
+                        objectName: "nostrConnectQr"
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.preferredWidth: 200
+                        Layout.preferredHeight: 200
+                        visible: backend.nostrConnectQr !== ""
+                        source: backend.nostrConnectQr
+                        sourceSize: Qt.size(200, 200)
+                        fillMode: Image.PreserveAspectFit
+                        smooth: false
+                        cache: false
+                    }
+
+                    TextEdit {
+                        Layout.fillWidth: true
+                        visible: backend.nostrConnectUri !== ""
+                        text: backend.nostrConnectUri
+                        textFormat: TextEdit.PlainText
+                        wrapMode: TextEdit.WrapAnywhere
+                        readOnly: true
+                        selectByMouse: true
+                        color: theme.foreground
+                        opacity: 0.7
+                        font.pixelSize: 11
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Waiting for your signer app…")
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        opacity: 0.7
+                    }
+
+                    RowLayout {
+                        spacing: 8
+
+                        Button {
+                            objectName: "copyNostrConnectButton"
+                            text: qsTr("Copy link")
+                            flat: true
+                            focusPolicy: Qt.NoFocus
+                            visible: backend.nostrConnectUri !== ""
+                            Material.roundedScale: theme.radius
+                            onClicked: backend.copyNostrConnectUri()
+                        }
+                        Button {
+                            objectName: "cancelRemoteConnectButton"
+                            text: qsTr("Stop connecting")
+                            flat: true
+                            focusPolicy: Qt.NoFocus
+                            Material.roundedScale: theme.radius
+                            onClicked: backend.cancelRemoteConnect()
+                        }
+                    }
+                }
+
+                Button {
+                    objectName: "disconnectSignerButton"
+                    text: qsTr("Disconnect signer")
+                    flat: true
+                    focusPolicy: Qt.NoFocus
+                    visible: backend.remoteSignerPaired
+                    Material.roundedScale: theme.radius
+                    onClicked: backend.disconnectSigner()
+                }
+
+                Label {
+                    objectName: "remoteSignerWaitingLabel"
+                    Layout.fillWidth: true
+                    visible: backend.remoteSignerWaiting
+                    text: qsTr("Approve the request in your signer app")
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                }
+
+                // Shown as text to open by hand, never opened from here.
+                Label {
+                    Layout.fillWidth: true
+                    visible: backend.remoteAuthUrl !== ""
+                    text: qsTr("Your signer app asks you to approve the request at this address:")
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                }
+                TextEdit {
+                    objectName: "remoteAuthUrl"
+                    Layout.fillWidth: true
+                    visible: backend.remoteAuthUrl !== ""
+                    text: backend.remoteAuthUrl
+                    textFormat: TextEdit.PlainText
+                    wrapMode: TextEdit.WrapAnywhere
+                    readOnly: true
+                    selectByMouse: true
+                    color: theme.foreground
+                }
+
+                Label {
+                    objectName: "remoteSignerErrorLabel"
+                    Layout.fillWidth: true
+                    visible: backend.remoteSignerError !== ""
+                    text: backend.remoteSignerError
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    color: dialog.errorColor
+                }
+
                 CheckBox {
                     objectName: "publishReadsBox"
                     Layout.fillWidth: true
@@ -235,7 +428,7 @@ Dialog {
                 Label {
                     objectName: "confirmPublishLabel"
                     Layout.fillWidth: true
-                    visible: !(backend.signingKeyChecked && !backend.signingKeyStored) && !backend.publishConfirmed
+                    visible: !backend.signerMissing && !backend.publishConfirmed
                     text: qsTr("Changes are published after the first “Publish now” for this npub.")
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
@@ -244,7 +437,7 @@ Dialog {
 
                 RowLayout {
                     Layout.fillWidth: true
-                    visible: !(backend.signingKeyChecked && !backend.signingKeyStored)
+                    visible: !backend.signerMissing
                     spacing: 8
 
                     Label {
@@ -298,7 +491,7 @@ Dialog {
 
             Label {
                 Layout.fillWidth: true
-                text: qsTr("Also remove this account's signing key from your keyring? Syncing stops either way.")
+                text: qsTr("Also remove this account's signing key and remote signer pairing from your keyring? Syncing stops either way.")
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
             }

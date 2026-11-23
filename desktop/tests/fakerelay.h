@@ -11,6 +11,7 @@
 #include <QWebSocket>
 #include <QWebSocketServer>
 #include <algorithm>
+#include <functional>
 
 // A Nostr relay on 127.0.0.1 for tests. Every REQ gets the same stored
 // events (whatever the filter says, as a careless relay would), then EOSE,
@@ -64,8 +65,59 @@ public:
     bool keepPublished = false;
     // The type of every message received, in order.
     QStringList log;
+    // Called with each EVENT received, after its OK, as a fake remote
+    // signer listens for requests.
+    std::function<void(const QJsonObject &)> onEvent;
+
+    // Sends `event` to every subscription still open whose filter has its
+    // kind, and its p tag when the filter names one, as a relay passes on a
+    // new event.
+    void push(const QJsonObject &event) {
+        for (const Live &live : std::as_const(m_live))
+            if (live.socket && matches(live.filters, event))
+                send(live.socket, {"EVENT", live.id, event});
+    }
+    // Sends `text` as it is to every socket with a subscription open.
+    void pushRaw(const QString &text) {
+        for (const Live &live : std::as_const(m_live))
+            if (live.socket)
+                live.socket->sendTextMessage(text);
+    }
+    // Closes every connection, as a relay that restarts.
+    void dropAll() {
+        for (QWebSocket *socket : findChildren<QWebSocket *>())
+            socket->close();
+        m_live.clear();
+    }
 
 private:
+    struct Live {
+        QPointer<QWebSocket> socket;
+        QString id;
+        QJsonArray filters;
+    };
+    QList<Live> m_live;
+
+    static bool matches(const QJsonArray &filters, const QJsonObject &event) {
+        for (const QJsonValue &value : filters) {
+            const QJsonObject filter = value.toObject();
+            if (filter.contains(QStringLiteral("kinds"))
+                && !filter.value(QStringLiteral("kinds")).toArray().contains(event.value(QStringLiteral("kind"))))
+                continue;
+            if (filter.contains(QStringLiteral("#p"))) {
+                bool tagged = false;
+                for (const QJsonValue &tag : event.value(QStringLiteral("tags")).toArray())
+                    tagged = tagged
+                        || (tag.toArray().at(0).toString() == QLatin1String("p")
+                            && filter.value(QStringLiteral("#p")).toArray().contains(tag.toArray().at(1)));
+                if (!tagged)
+                    continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
     int m_answered = 0;
     void received(QWebSocket *socket, const QString &text) {
         const QJsonArray message = QJsonDocument::fromJson(text.toUtf8()).array();
@@ -87,10 +139,13 @@ private:
                 send(socket, ok);
             if (accepted && keepPublished)
                 events << event;
+            if (onEvent)
+                onEvent(event);
             return;
         }
         if (type == QLatin1String("CLOSE")) {
             closed << id;
+            m_live.removeIf([socket, id](const Live &live) { return live.socket == socket && live.id == id; });
             return;
         }
         if (type != QLatin1String("REQ"))
@@ -99,6 +154,7 @@ private:
         requests << QJsonArray(message);
         requests.last().removeFirst();
         requests.last().removeFirst();
+        m_live << Live{socket, id, requests.last()};
         if (silent)
             return;
         if (delayMs > 0) {

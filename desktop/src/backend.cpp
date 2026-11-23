@@ -13,6 +13,7 @@
 
 #include "filepicker.h"
 #include "markdown.h"
+#include "qrcode.h"
 #include "sanitizer.h"
 #include "wipe.h"
 
@@ -982,14 +983,307 @@ void Backend::runKeyJobs() {
 void Backend::resetSigning() {
     ++m_signingEpoch;
     dropSigner(tr("The sync account changed before the event was signed"));
+    endPairing();
+    setRemoteError({});
+    setPairing(false, false);
     setSigning(false, {}, false);
 }
 
+void Backend::setPairing(bool stored, bool checked) {
+    if (stored == m_pairingStored && checked == m_pairingChecked)
+        return;
+    const bool found = stored && !m_pairingStored;
+    m_pairingStored = stored;
+    m_pairingChecked = checked;
+    emit signingChanged();
+    if (found)
+        resumePublish();
+}
+
 void Backend::dropSigner(const QString &error) {
-    m_signer.reset();
+    releaseSigner();
     ++m_signerLoad;
     m_loadingSigner = false;
+    m_loadingPairing = false;
     failPendingSigns(error);
+}
+
+void Backend::releaseSigner() {
+    if (m_signerRemote) {
+        m_signer->disconnect(this);
+        m_signer.release()->deleteLater();
+    }
+    m_signer.reset();
+    m_signerRemote = false;
+    m_signerStale = false;
+    updateRemoteWaiting();
+}
+
+void Backend::preferKey() {
+    if (!m_signerRemote)
+        return;
+    if (m_signing.isEmpty())
+        releaseSigner();
+    else
+        m_signerStale = true;
+}
+
+RemoteSigner *Backend::remoteSigner() const {
+    return m_signerRemote ? static_cast<RemoteSigner *>(m_signer.get()) : nullptr;
+}
+
+void Backend::adoptRemoteSigner(std::unique_ptr<RemoteSigner> signer) {
+    connect(signer.get(), &RemoteSigner::waitingChanged, this, &Backend::updateRemoteWaiting);
+    connect(signer.get(), &RemoteSigner::authUrl, this, &Backend::setRemoteAuthUrl);
+    m_signer = std::move(signer);
+    m_signerRemote = true;
+}
+
+void Backend::updateRemoteWaiting() {
+    const RemoteSigner *signer = remoteSigner();
+    const bool waiting = signer && signer->waiting() > 0;
+    if (waiting == m_remoteWaiting)
+        return;
+    m_remoteWaiting = waiting;
+    if (!waiting && !m_pairingSigner)
+        m_remoteAuthUrl.clear();
+    // In the status bar too, as a publish signs on its own, dialog or not;
+    // what it said before comes back once the signer has answered.
+    const QString approve = tr("Approve the request in your signer app");
+    if (waiting) {
+        m_statusBeforeApproval = {m_status, m_statusError};
+        setStatus(approve);
+    } else if (m_status == approve) {
+        setStatus(m_statusBeforeApproval.first, m_statusBeforeApproval.second);
+    }
+    emit remoteSignerChanged();
+}
+
+QString Backend::signerKind() const {
+    if (m_signingKeyStored)
+        return QStringLiteral("key");
+    return m_pairingStored ? QStringLiteral("remote") : QStringLiteral("none");
+}
+
+QString Backend::nostrConnectQr() const {
+    return m_nostrConnectUri.isEmpty() ? QString() : QrCode::source(m_nostrConnectUri);
+}
+
+void Backend::setRemoteAuthUrl(const QString &url) {
+    m_remoteAuthUrl = url;
+    emit remoteSignerChanged();
+}
+
+void Backend::setRemoteError(const QString &error) {
+    if (error == m_remoteError)
+        return;
+    m_remoteError = error;
+    emit remoteSignerChanged();
+}
+
+bool Backend::canPair() {
+    if (m_syncAccount.npub.isEmpty()) {
+        setRemoteError(tr("Sync with an npub before connecting a remote signer"));
+        return false;
+    }
+    if (!m_keyStore) {
+        setRemoteError(keyStoreError(keyStoreUnavailable()));
+        return false;
+    }
+    return true;
+}
+
+bool Backend::connectBunker(const QString &uri) {
+    if (!canPair())
+        return false;
+    // Relays the user configured are trusted as for publishing; any other
+    // must be a public wss:// one, as the URI is pasted from elsewhere.
+    auto pairing = RemoteSigner::parseBunkerUri(uri, m_syncRelays->relays());
+    if (!pairing) {
+        setRemoteError(tr("That is not a bunker:// link with a relay Readstr can use"));
+        return false;
+    }
+    beginPairing(std::move(*pairing));
+    return m_pairingSigner != nullptr;
+}
+
+bool Backend::startNostrConnect() {
+    if (!canPair())
+        return false;
+    // The sync relays, which the user already trusts with the account's
+    // events; two keep the QR code small enough to scan easily.
+    auto pairing = RemoteSigner::newPairing(m_syncRelays->relays().mid(0, 2));
+    if (!pairing) {
+        setRemoteError(tr("There is no sync relay to reach a signer app through"));
+        return false;
+    }
+    const QString uri = RemoteSigner::nostrConnectUri(*pairing);
+    beginPairing(std::move(*pairing));
+    if (!m_pairingSigner)
+        return false;
+    m_nostrConnectUri = uri;
+    emit remoteSignerChanged();
+    return true;
+}
+
+void Backend::beginPairing(RemoteSigner::Pairing pairing) {
+    endPairing();
+    std::unique_ptr<RemoteSigner> signer = RemoteSigner::create(pairing, m_syncAccount.pubkey);
+    pairing.wipe();
+    if (!signer) {
+        setRemoteError(tr("Cannot use that remote signer"));
+        return;
+    }
+    signer->setLimits(m_remoteLimits);
+    connect(signer.get(), &RemoteSigner::authUrl, this, &Backend::setRemoteAuthUrl);
+    m_pairingSigner = std::move(signer);
+    m_remoteError.clear();
+    emit remoteSignerChanged();
+    m_pairingSigner->pair([self = QPointer(this), epoch = m_pairingEpoch](const QString &error) {
+        if (self && epoch == self->m_pairingEpoch)
+            self->pairingDone(error);
+    });
+}
+
+void Backend::endPairing() {
+    ++m_pairingEpoch;
+    // From the event loop, as this may run inside one of its callbacks.
+    if (m_pairingSigner) {
+        m_pairingSigner->disconnect(this);
+        m_pairingSigner.release()->deleteLater();
+    }
+    m_nostrConnectUri.clear();
+    if (!m_remoteWaiting)
+        m_remoteAuthUrl.clear();
+    emit remoteSignerChanged();
+}
+
+void Backend::cancelRemoteConnect() {
+    endPairing();
+    setRemoteError({});
+}
+
+void Backend::copyNostrConnectUri() {
+    if (!m_nostrConnectUri.isEmpty())
+        m_writeClipboard(m_nostrConnectUri);
+}
+
+void Backend::pairingDone(const QString &error) {
+    if (!error.isEmpty()) {
+        endPairing();
+        return setRemoteError(error);
+    }
+    if (!m_keyStore) {
+        endPairing();
+        return setRemoteError(keyStoreError(keyStoreUnavailable()));
+    }
+    // The link has been answered, and the pairing waits only on the keyring.
+    m_nostrConnectUri.clear();
+    emit remoteSignerChanged();
+    RemoteSigner::Pairing pairing = m_pairingSigner->pairing();
+    // Held until the job's turn comes, in a buffer that is wiped however the
+    // job ends, as the client key in it can ask the signer to sign.
+    const std::shared_ptr<QByteArray> json(new QByteArray(pairing.toJson()), [](QByteArray *bytes) {
+        wipe(*bytes);
+        delete bytes;
+    });
+    pairing.wipe();
+    queueKeyJob([this, npub = m_syncAccount.npub, json, epoch = m_pairingEpoch, signingEpoch = m_signingEpoch,
+                 write = ++m_pairingWrites](const std::function<void()> &finished) {
+        if (epoch != m_pairingEpoch || signingEpoch != m_signingEpoch || !m_keyStore)
+            return finished();
+        // The keyring item is replaced in place, so once the write starts an
+        // earlier pairing is gone whatever happens next.
+        const bool replacing = m_pairingStored;
+        m_keyStore->storePairing(npub, *json, [self = QPointer(this), npub, epoch, signingEpoch, write, replacing,
+                                               finished](const KeyStore::Result &result) {
+            if (self && signingEpoch == self->m_signingEpoch) {
+                const bool stored = result.error == KeyStore::Error::None;
+                if (epoch != self->m_pairingEpoch) {
+                    // Stopped while the keyring wrote it. Over an earlier
+                    // pairing it is kept: that one is already overwritten,
+                    // and this signer proved it holds the account's key, so
+                    // removing it would leave no signer at all; the signer
+                    // in memory gives way to it. Otherwise it is taken out
+                    // again, unless a newer pairing is to be written over it.
+                    if (stored && replacing) {
+                        self->setPairing(true, true);
+                        self->preferKey();
+                    } else if (stored) {
+                        self->unstorePairing(npub, write);
+                    }
+                } else if (!stored) {
+                    self->endPairing();
+                    self->setRemoteError(self->keyStoreError(result));
+                } else {
+                    self->setPairing(true, true);
+                    std::unique_ptr<RemoteSigner> signer = std::move(self->m_pairingSigner);
+                    self->endPairing();
+                    signer->disconnect(self);
+                    // A signer of an earlier pairing gives way to this one.
+                    self->preferKey();
+                    // The key, when there is one, signs first; a read of
+                    // the keyring already under way finds the pairing
+                    // itself.
+                    if (!self->m_signer && !self->m_signingKeyStored && !self->m_loadingSigner)
+                        self->adoptRemoteSigner(std::move(signer));
+                    else
+                        signer.release()->deleteLater();
+                    self->setStatus(tr("Connected to the remote signer"));
+                    self->resumePublish();
+                }
+            }
+            finished();
+        });
+        wipe(*json);
+    });
+}
+
+void Backend::disconnectSigner() {
+    const QString npub = m_syncAccount.npub;
+    endPairing();
+    setRemoteError({});
+    if (npub.isEmpty())
+        return;
+    // At once, before the keyring answers, as for "Forget key". A read of
+    // the key goes on, and only the pairing is not read after it.
+    if (m_signerRemote || m_loadingPairing)
+        dropSigner(tr("The remote signer was disconnected before the event was signed"));
+    else if (m_loadingSigner)
+        m_pairingDisconnectedLoad = m_signerLoad;
+    if (!m_keyStore)
+        return setPairing(false, m_pairingChecked);
+    queueKeyJob([this, npub, epoch = m_signingEpoch](const std::function<void()> &finished) {
+        if (epoch != m_signingEpoch || !m_keyStore)
+            return finished();
+        m_keyStore->removePairing(npub, [self = QPointer(this), epoch, finished](const KeyStore::Result &result) {
+            if (self && epoch == self->m_signingEpoch) {
+                if (result.error == KeyStore::Error::None)
+                    self->setPairing(false, true);
+                else
+                    self->setSigning(self->m_signingKeyStored, self->keyStoreError(result));
+            }
+            finished();
+        });
+    });
+}
+
+void Backend::unstorePairing(const QString &npub, quint64 write) {
+    queueKeyJob([this, npub, write, epoch = m_signingEpoch](const std::function<void()> &finished) {
+        if (epoch != m_signingEpoch || write != m_pairingWrites || !m_keyStore)
+            return finished();
+        m_keyStore->removePairing(npub, [self = QPointer(this), epoch, finished](const KeyStore::Result &result) {
+            if (self && epoch == self->m_signingEpoch) {
+                if (result.error == KeyStore::Error::None) {
+                    self->setPairing(false, true);
+                    self->preferKey();
+                } else {
+                    self->setSigning(self->m_signingKeyStored, self->keyStoreError(result));
+                }
+            }
+            finished();
+        });
+    });
 }
 
 void Backend::failPendingSigns(const QString &error, bool queuedToo) {
@@ -1012,8 +1306,10 @@ void Backend::failPendingSigns(const QString &error, bool queuedToo) {
 
 void Backend::checkSigningKey() {
     const QString npub = m_syncAccount.npub;
-    if (npub.isEmpty() || !m_keyStore)
+    if (npub.isEmpty() || !m_keyStore) {
+        setPairing(false, true);
         return setSigning(false, {}, true);
+    }
     queueKeyJob([this, npub, epoch = m_signingEpoch](const std::function<void()> &finished) {
         if (epoch != m_signingEpoch || !m_keyStore)
             return finished();
@@ -1024,11 +1320,39 @@ void Backend::checkSigningKey() {
                 // key. Signs still queued are left to their load job, which
                 // runs after any write queued behind this check and knows
                 // then whether a key is stored.
-                if (result.error == KeyStore::Error::None && !result.found && self->m_signer) {
-                    self->m_signer.reset();
+                if (result.error == KeyStore::Error::None && !result.found && self->m_signer
+                    && !self->m_signerRemote) {
+                    self->releaseSigner();
                     self->failPendingSigns(noKeyStored(npub), false);
                 }
                 self->setSigning(result.found, self->keyStoreError(result), result.error == KeyStore::Error::None);
+                if (result.found)
+                    self->preferKey();
+            }
+            finished();
+        });
+    });
+    // The pairing is asked about the same way, after the key, without being
+    // read.
+    queueKeyJob([this, npub, epoch = m_signingEpoch](const std::function<void()> &finished) {
+        if (epoch != m_signingEpoch || !m_keyStore)
+            return finished();
+        m_keyStore->containsPairing(npub, [self = QPointer(this), epoch, npub,
+                                           finished](const KeyStore::Result &result) {
+            if (self && epoch == self->m_signingEpoch) {
+                if (result.error == KeyStore::Error::None) {
+                    if (!result.found && self->m_signerRemote) {
+                        self->releaseSigner();
+                        self->failPendingSigns(noKeyStored(npub), false);
+                        // Signs queued behind a signer that was giving way
+                        // have no load job of their own.
+                        if (!self->m_pendingSigns.isEmpty())
+                            self->loadSigner();
+                    }
+                    self->setPairing(result.found, true);
+                } else if (self->m_signingError.isEmpty()) {
+                    self->setSigning(self->m_signingKeyStored, self->keyStoreError(result));
+                }
             }
             finished();
         });
@@ -1079,9 +1403,11 @@ bool Backend::addSigningKey(const QString &text) {
                 self->setSigning(stored || self->m_signingKeyStored, self->keyStoreError(result),
                                  stored || self->m_signingKeyChecked);
                 // What waited for a key, or for a key that could not be
-                // read, goes out with it.
-                if (stored)
+                // read, goes out with it, signed with it.
+                if (stored) {
+                    self->preferKey();
                     self->resumePublish();
+                }
             }
             finished();
         });
@@ -1115,7 +1441,7 @@ void Backend::forgetSigningKey() {
 }
 
 void Backend::sign(const NostrEvent &event, Signer::Done done) {
-    if (m_signer)
+    if (m_signer && !m_signerStale)
         return handToSigner(event, std::move(done));
     const QString npub = m_syncAccount.npub;
     if (npub.isEmpty() || !m_keyStore) {
@@ -1125,9 +1451,11 @@ void Backend::sign(const NostrEvent &event, Signer::Done done) {
         return;
     }
     // Queued even when no key is known to be stored, as the check at launch
-    // may still be out: the read waits behind it and asks only then.
+    // may still be out: the read waits behind it and asks only then. A
+    // remote signer that gave way waits first for what it still signs.
     m_pendingSigns.append({event, std::move(done)});
-    loadSigner();
+    if (!m_signer)
+        loadSigner();
 }
 
 void Backend::handToSigner(const NostrEvent &event, Signer::Done done) {
@@ -1136,7 +1464,16 @@ void Backend::handToSigner(const NostrEvent &event, Signer::Done done) {
     m_signer->sign(event, [self = QPointer(this), id](const NostrEvent &signedEvent, const QString &error) {
         if (!self)
             return;
-        if (const Signer::Done done = self->m_signing.take(id))
+        const Signer::Done done = self->m_signing.take(id);
+        // A remote signer that gave way to a key or a newer pairing goes
+        // once it has answered all it was given, and the keyring is read
+        // again for what came since.
+        if (self->m_signerStale && self->m_signing.isEmpty()) {
+            self->releaseSigner();
+            if (!self->m_pendingSigns.isEmpty())
+                self->loadSigner();
+        }
+        if (done)
             done(signedEvent, error);
     });
 }
@@ -1152,28 +1489,78 @@ void Backend::loadSigner() {
         // Every keyring call asked for before this one has answered, so
         // whether a key is stored is known now, unless the last check
         // failed: then the read itself finds out.
-        if (!m_keyStore || (m_signingKeyChecked && !m_signingKeyStored)) {
+        if (!m_keyStore) {
             m_loadingSigner = false;
             failPendingSigns(missing);
             return finished();
         }
-        m_keyStore->lookup(npub, [self = QPointer(this), load, pubkey, missing, npub,
-                                  finished](const KeyStore::Result &result) {
-            if (self && load == self->m_signerLoad) {
+        // Without a key, the remote signer the pairing names, if any.
+        const auto remote = [self = QPointer(this), load, pubkey, missing, npub, finished] {
+            if (!self || load != self->m_signerLoad || !self->m_keyStore)
+                return finished();
+            if (load == self->m_pairingDisconnectedLoad) {
                 self->m_loadingSigner = false;
+                self->failPendingSigns(tr("The remote signer was disconnected before the event was signed"));
+                return finished();
+            }
+            if (self->m_pairingChecked && !self->m_pairingStored) {
+                self->m_loadingSigner = false;
+                self->failPendingSigns(missing);
+                return finished();
+            }
+            self->m_loadingPairing = true;
+            self->m_keyStore->lookupPairing(npub, [self, load, pubkey, missing,
+                                                   finished](const KeyStore::Result &result) {
+                if (self && load == self->m_signerLoad) {
+                    self->m_loadingSigner = false;
+                    self->m_loadingPairing = false;
+                    if (result.error != KeyStore::Error::None) {
+                        const QString error = self->keyStoreError(result);
+                        self->setSigning(self->m_signingKeyStored, error);
+                        self->failPendingSigns(error);
+                    } else if (!result.found) {
+                        self->setPairing(false, true);
+                        self->failPendingSigns(missing);
+                    } else {
+                        self->setPairing(true, true);
+                        auto pairing = RemoteSigner::Pairing::fromJson(result.secret);
+                        std::unique_ptr<RemoteSigner> signer =
+                            pairing ? RemoteSigner::create(*pairing, pubkey) : nullptr;
+                        if (pairing)
+                            pairing->wipe();
+                        if (!signer) {
+                            self->failPendingSigns(tr("The remote signer pairing in the keyring cannot be used"));
+                        } else {
+                            signer->setLimits(self->m_remoteLimits);
+                            self->adoptRemoteSigner(std::move(signer));
+                            for (auto &[event, done] : std::exchange(self->m_pendingSigns, {}))
+                                self->handToSigner(event, std::move(done));
+                        }
+                    }
+                }
+                finished();
+            });
+        };
+        if (m_signingKeyChecked && !m_signingKeyStored)
+            return remote();
+        m_keyStore->lookup(npub, [self = QPointer(this), load, pubkey, missing, npub, finished,
+                                  remote](const KeyStore::Result &result) {
+            if (self && load == self->m_signerLoad) {
                 // Another program of this user's can write the item, so the
                 // key must still be the account's before anything is signed
                 // with it.
                 std::unique_ptr<LocalSigner> signer = result.found ? LocalSigner::create(result.secret) : nullptr;
+                if (result.error == KeyStore::Error::None && !result.found) {
+                    self->setSigning(false, {}, true);
+                    return remote();
+                }
+                self->m_loadingSigner = false;
                 if (result.error != KeyStore::Error::None) {
                     // Shown in the dialog too, which would otherwise say
                     // nothing of why every sign fails.
                     const QString error = self->keyStoreError(result);
                     self->setSigning(self->m_signingKeyStored, error);
                     self->failPendingSigns(error);
-                } else if (!result.found) {
-                    self->setSigning(false, {}, true);
-                    self->failPendingSigns(missing);
                 } else {
                     self->setSigning(true, {}, true);
                     if (!signer || signer->pubkey() != pubkey) {
@@ -1249,9 +1636,18 @@ void Backend::stopSync(bool removeKey) {
                               removed(keyStoreUnavailable());
                               return finished();
                           }
-                          m_keyStore->remove(npub, [removed, finished](const KeyStore::Result &outcome) {
-                              removed(outcome);
-                              finished();
+                          // The pairing with a remote signer goes too.
+                          m_keyStore->remove(npub, [self = QPointer(this), npub, removed,
+                                                    finished](const KeyStore::Result &outcome) {
+                              if (!self || !self->m_keyStore) {
+                                  removed(outcome);
+                                  return finished();
+                              }
+                              self->m_keyStore->removePairing(npub, [outcome, removed,
+                                                                     finished](const KeyStore::Result &pairing) {
+                                  removed(outcome.error != KeyStore::Error::None ? outcome : pairing);
+                                  finished();
+                              });
                           });
                       });
                   });
