@@ -69,8 +69,7 @@ model Subscription {
     // feed, or null while it has not been. It is kept per account, not per
     // browser, so no browser applies the list again to a feed where the user
     // may have marked items unread on purpose. Resubscribing a soft-deleted
-    // subscription is a no-op today (readstr-3ze); the fix for that should
-    // clear this field too, so the resubscribed feed gets the list again.
+    // subscription clears it, so the resubscribed feed gets the list again.
     readListAppliedAt DateTime?
 
     // Relations

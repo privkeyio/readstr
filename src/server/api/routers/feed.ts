@@ -21,6 +21,7 @@ import { nip19 } from 'nostr-tools'
 import {
   fetchSubscriptionListFromServer,
   getSyncRelaysFromServer,
+  isAcceptableListCreatedAt,
   normalizeUrlForComparison,
   normalizeNpub
 } from '@/lib/nostr-sync'
@@ -34,6 +35,13 @@ function limitPerUser(name: string, pubkey: string, max: number, windowMs: numbe
     })
   }
 }
+
+// Unsubscribing only soft-deletes the row, so subscribing again revives it.
+// Clearing readListAppliedAt lets read sync apply the pulled list to the feed
+// again, as it would to a feed subscribed for the first time.
+const REACTIVATE_SUBSCRIPTION = { deletedAt: null, readListAppliedAt: null }
+// Feed ids per batched revive query during a subscription list import.
+const REVIVE_BATCH_SIZE = 500
 
 // Profile discovery opens up to MAX_REQUEST_RELAYS sockets and lookups per
 // call, so it gets its own per-user budget.
@@ -159,7 +167,7 @@ const assertCategoryOwnership = async (db: any, userPubkey: string, categoryId: 
 const refreshAllUserFeedsInternal = async (db: any, userPubkey: string, force = false) => {
   // 1. Get all active subscriptions for this user
   const subscriptions = await db.subscription.findMany({
-    where: { userPubkey: userPubkey },
+    where: { userPubkey: userPubkey, deletedAt: null },
     include: { feed: true },
   })
 
@@ -315,66 +323,98 @@ export const feedRouter = createTRPCRouter({
           if (!lastSync || lastSync < syncThreshold || input?.forceSync === true) {
             // Use default relays for sync
             const remoteResult = await fetchSubscriptionListFromServer(ctx.nostrPubkey)
+            // created_at comes from a relay; the fetch already skips invalid or
+            // future-dated events, and this keeps any that slip through away
+            // from Date, Prisma and BigInt.
+            const remoteCreatedAt = isAcceptableListCreatedAt(remoteResult.createdAt)
+              ? remoteResult.createdAt
+              : undefined
 
             // Ignore stale events: a relay must not roll back state with an
             // equal-or-older subscription list than the one we last applied.
             const remoteIsFresh =
-              remoteResult.createdAt != null &&
+              remoteCreatedAt != null &&
               (prefs?.lastSubscriptionSyncCreatedAt == null ||
-                remoteResult.createdAt > Number(prefs.lastSubscriptionSyncCreatedAt))
+                remoteCreatedAt > Number(prefs.lastSubscriptionSyncCreatedAt))
 
             if (remoteResult.success && remoteResult.data) {
               const remoteList = remoteResult.data
 
-              // Get current subscriptions to compare
-              const currentSubs = await ctx.db.subscription.findMany({
+              // A feed unsubscribed before the list was published is missing
+              // locally, so the list revives it. One unsubscribed since counts
+              // as local, so an older list cannot undo the unsubscribe.
+              const remoteListAt = new Date((remoteCreatedAt ?? 0) * 1000)
+
+              const allSubs: SubscriptionWithFeed[] = await ctx.db.subscription.findMany({
                 where: { userPubkey: ctx.nostrPubkey },
                 include: { feed: true },
               })
+              const isLocal = (s: SubscriptionWithFeed) => s.deletedAt === null || s.deletedAt >= remoteListAt
+              const rssKey = (url: string) => `RSS:${normalizeUrlForComparison(url)}`
+              const npubKey = (value: string) => `NOSTR:${normalizeNpub(value)}`
+              const subKey = (s: SubscriptionWithFeed) =>
+                s.feed.type === 'RSS' ? rssKey(s.feed.url!) : npubKey(s.feed.npub || s.feed.url!)
+              const remoteDeletedNpubs = new Set((remoteList.deleted ?? []).map(npubKey))
 
-              const localRssUrls = new Set(
-                currentSubs
-                  .filter((s: SubscriptionWithFeed) => s.feed.type === 'RSS')
-                  .map((s: SubscriptionWithFeed) => normalizeUrlForComparison(s.feed.url!))
+              // The list names an npub for the main or the video feed alike, so
+              // a local video row only stands in for its main feed when the list
+              // also records that npub as deleted, as it does after the user
+              // dropped the main feed but kept the videos.
+              const localKeys = new Set(
+                allSubs
+                  .filter((s) => isLocal(s) && (s.feed.type !== 'NOSTR_VIDEO' || remoteDeletedNpubs.has(subKey(s))))
+                  .map(subKey)
               )
 
-              const localNpubs = new Set(
-                currentSubs
-                  .filter((s: SubscriptionWithFeed) => s.feed.type === 'NOSTR' || s.feed.type === 'NOSTR_VIDEO')
-                  .map((s: SubscriptionWithFeed) => normalizeNpub(s.feed.npub || s.feed.url!))
-              )
+              // Rows unsubscribed before the list, by normalized URL or npub, so
+              // a list entry spelled differently still revives the same row.
+              const revivable = new Map<string, SubscriptionWithFeed>()
+              const revivableVideo = new Map<string, SubscriptionWithFeed>()
+              for (const s of allSubs) {
+                if (isLocal(s)) continue
+                if (s.feed.type === 'NOSTR_VIDEO') revivableVideo.set(subKey(s), s)
+                else revivable.set(subKey(s), s)
+              }
 
               // Identify new feeds from remote
-              const feedsToAdd: Array<{ type: 'RSS' | 'NOSTR'; url: string; tags: string[]; category?: { name: string; color?: string; icon?: string } }> = []
-
-              for (const rssUrl of remoteList.rss) {
-                if (!localRssUrls.has(normalizeUrlForComparison(rssUrl))) {
-                  feedsToAdd.push({ 
-                    type: 'RSS', 
-                    url: rssUrl, 
-                    tags: remoteList.tags?.[rssUrl] || [],
-                    category: remoteList.categories?.[rssUrl]
-                  })
-                }
+              const feedsToAdd: Array<{ key: string; type: 'RSS' | 'NOSTR'; url: string; tags: string[]; category?: { name: string; color?: string; icon?: string } }> = []
+              const queuedKeys = new Set<string>()
+              const queueFeed = (type: 'RSS' | 'NOSTR', url: string, key: string) => {
+                if (localKeys.has(key) || queuedKeys.has(key)) return
+                queuedKeys.add(key)
+                feedsToAdd.push({
+                  key,
+                  type,
+                  url,
+                  tags: remoteList.tags?.[url] || [],
+                  category: remoteList.categories?.[url],
+                })
               }
+              for (const rssUrl of remoteList.rss) queueFeed('RSS', rssUrl, rssKey(rssUrl))
+              for (const npub of remoteList.nostr) queueFeed('NOSTR', npub, npubKey(npub))
 
-              for (const npub of remoteList.nostr) {
-                if (!localNpubs.has(normalizeNpub(npub))) {
-                  feedsToAdd.push({ 
-                    type: 'NOSTR', 
-                    url: npub, 
-                    tags: remoteList.tags?.[npub] || [],
-                    category: remoteList.categories?.[npub]
-                  })
-                }
-              }
-
+              let reviveFailed = false
               if (remoteIsFresh && feedsToAdd.length > 0) {
+                const categoryIds = new Map<string, string>()
+                // Revivals batched by the tags and category they get
+                const revives = new Map<string, { tags: string[]; categoryId: string | null; feedIds: string[] }>()
+                const queueRevive = (feedId: string, tags: string[], categoryId: string | null) => {
+                  const group = JSON.stringify([tags, categoryId])
+                  const entry = revives.get(group) ?? { tags, categoryId, feedIds: [] }
+                  entry.feedIds.push(feedId)
+                  revives.set(group, entry)
+                }
+
                 for (const feed of feedsToAdd) {
+                  // An npub in both nostr and deleted means the user kept the
+                  // videos but dropped the main feed, so only the video comes back.
+                  const videoOnly = feed.type === 'NOSTR' && remoteDeletedNpubs.has(feed.key)
+                  const video = feed.type === 'NOSTR' ? revivableVideo.get(feed.key) : undefined
+                  if (videoOnly && !video) continue
                   try {
                     // Handle category if present
-                    let categoryId: string | undefined
-                    if (feed.category) {
+                    let categoryId: string | undefined = feed.category ? categoryIds.get(feed.category.name) : undefined
+                    if (feed.category && !categoryId) {
                       // Try to find existing category by name
                       let category = await ctx.db.category.findFirst({
                         where: {
@@ -402,6 +442,16 @@ export const feedRouter = createTRPCRouter({
                       }
 
                       categoryId = category.id
+                      categoryIds.set(feed.category.name, category.id)
+                    }
+
+                    // A revived row takes the list's tags and category, as a
+                    // resubscribe takes the ones the user picks.
+                    const deleted = videoOnly ? undefined : revivable.get(feed.key)
+                    if (deleted || videoOnly) {
+                      if (deleted) queueRevive(deleted.feedId, feed.tags, categoryId ?? null)
+                      if (video) queueRevive(video.feedId, [...new Set([...feed.tags, 'video'])], categoryId ?? null)
+                      continue
                     }
 
                     let feedUrl = feed.url
@@ -436,6 +486,14 @@ export const feedRouter = createTRPCRouter({
                     }
 
                     if (feedRecord) {
+                      // Discovery can land on a row the list spelled differently.
+                      // Only one unsubscribed before the list is revived; an
+                      // active one, perhaps subscribed meanwhile, keeps its tags,
+                      // category and read sync coverage.
+                      await ctx.db.subscription.updateMany({
+                        where: { userPubkey: ctx.nostrPubkey, feedId: feedRecord.id, deletedAt: { lt: remoteListAt } },
+                        data: { ...REACTIVATE_SUBSCRIPTION, tags: feed.tags, categoryId: categoryId ?? null },
+                      })
                       await ctx.db.subscription.upsert({
                         where: {
                           userPubkey_feedId: {
@@ -449,30 +507,50 @@ export const feedRouter = createTRPCRouter({
                           tags: feed.tags,
                           categoryId,
                         },
-                        update: {
-                          tags: feed.tags,
-                          categoryId,
-                        }
+                        update: {},
                       })
                     }
                   } catch (e) {
                     console.error(`❌ Auto-sync error adding feed ${feed.url}:`, e)
                   }
                 }
+
+                // The deletedAt condition makes each revive atomic: a row the
+                // user resubscribed to meanwhile is active and keeps its choices,
+                // and a retry of the same list skips the batches already done.
+                for (const { tags, categoryId, feedIds } of revives.values()) {
+                  for (let i = 0; i < feedIds.length; i += REVIVE_BATCH_SIZE) {
+                    try {
+                      await ctx.db.subscription.updateMany({
+                        where: {
+                          userPubkey: ctx.nostrPubkey,
+                          feedId: { in: feedIds.slice(i, i + REVIVE_BATCH_SIZE) },
+                          deletedAt: { lt: remoteListAt },
+                        },
+                        data: { ...REACTIVATE_SUBSCRIPTION, tags, categoryId },
+                      })
+                    } catch (e) {
+                      reviveFailed = true
+                      console.error('❌ Auto-sync error reviving feeds:', e)
+                    }
+                  }
+                }
               }
 
               // Update updatedAt manually to track last sync even if no feeds were added.
               // Advance the freshness watermark only for fresh events so older
-              // events are rejected later and cannot roll back state.
+              // events are rejected later and cannot roll back state, and not
+              // when a revive failed so the next sync retries the same list.
+              const advanceWatermark = remoteIsFresh && !reviveFailed
               await ctx.db.userPreference.upsert({
                 where: { userPubkey: ctx.nostrPubkey },
                 create: {
                   userPubkey: ctx.nostrPubkey,
-                  ...(remoteIsFresh ? { lastSubscriptionSyncCreatedAt: BigInt(remoteResult.createdAt!) } : {}),
+                  ...(advanceWatermark ? { lastSubscriptionSyncCreatedAt: BigInt(remoteCreatedAt) } : {}),
                 },
                 update: {
                   updatedAt: new Date(),
-                  ...(remoteIsFresh ? { lastSubscriptionSyncCreatedAt: BigInt(remoteResult.createdAt!) } : {}),
+                  ...(advanceWatermark ? { lastSubscriptionSyncCreatedAt: BigInt(remoteCreatedAt) } : {}),
                 },
               })
 
@@ -1058,7 +1136,7 @@ export const feedRouter = createTRPCRouter({
         },
       })
 
-      if (existingSubscription) {
+      if (existingSubscription && !existingSubscription.deletedAt) {
         // If already subscribed, just return the feed info without error
         return {
           id: feed.id,
@@ -1070,16 +1148,36 @@ export const feedRouter = createTRPCRouter({
         }
       }
 
-      // Create subscription for main feed
+      // Create subscription for main feed, or revive the unsubscribed one as if new
       const subscriptionTags = (input.tags || []).concat(mainFeedHasVideos ? ['video'] : [])
-      await ctx.db.subscription.create({
-        data: {
-          userPubkey: ctx.nostrPubkey,
-          feedId: feed.id,
-          tags: subscriptionTags,
-          categoryId: input.categoryId,
-        },
-      })
+      if (existingSubscription) {
+        // Conditional so a concurrent subscribe that revived the row first wins
+        // and this one reports it as already subscribed.
+        const revived = await ctx.db.subscription.updateMany({
+          where: { id: existingSubscription.id, deletedAt: { not: null } },
+          data: { ...REACTIVATE_SUBSCRIPTION, tags: subscriptionTags, categoryId: input.categoryId },
+        })
+        if (revived.count === 0) {
+          const current = await ctx.db.subscription.findUnique({ where: { id: existingSubscription.id } })
+          return {
+            id: feed.id,
+            title: feed.title,
+            type: feed.type,
+            url: feed.url,
+            npub: feed.npub,
+            tags: current?.tags || [],
+          }
+        }
+      } else {
+        await ctx.db.subscription.create({
+          data: {
+            userPubkey: ctx.nostrPubkey,
+            feedId: feed.id,
+            tags: subscriptionTags,
+            categoryId: input.categoryId,
+          },
+        })
+      }
 
       // If this is a Nostr feed with videos, also subscribe to video feed
       if (input.type === 'NOSTR' && input.npub) {
@@ -1102,9 +1200,14 @@ export const feedRouter = createTRPCRouter({
             },
           })
 
-          if (!existingVideoSub) {
-            // Auto-tag video feed with 'video' tag plus user's tags
-            const videoTags = [...(input.tags || []), 'video']
+          // Auto-tag video feed with 'video' tag plus user's tags
+          const videoTags = [...(input.tags || []), 'video']
+          if (existingVideoSub?.deletedAt) {
+            await ctx.db.subscription.updateMany({
+              where: { id: existingVideoSub.id, deletedAt: { not: null } },
+              data: { ...REACTIVATE_SUBSCRIPTION, tags: videoTags, categoryId: input.categoryId },
+            })
+          } else if (!existingVideoSub) {
             await ctx.db.subscription.create({
               data: {
                 userPubkey: ctx.nostrPubkey,
@@ -1178,6 +1281,7 @@ export const feedRouter = createTRPCRouter({
       const subscriptions = await ctx.db.subscription.findMany({
         where: {
           userPubkey: ctx.nostrPubkey,
+          deletedAt: null,
         },
         include: {
           feed: {
@@ -1720,7 +1824,7 @@ export const feedRouter = createTRPCRouter({
         where: { userPubkey: ctx.nostrPubkey },
         include: {
           _count: {
-            select: { subscriptions: true },
+            select: { subscriptions: { where: { deletedAt: null } } },
           },
         },
         orderBy: { sortOrder: 'asc' },
@@ -1860,6 +1964,7 @@ export const feedRouter = createTRPCRouter({
         where: { userPubkey: ctx.nostrPubkey },
         include: {
           subscriptions: {
+            where: { deletedAt: null },
             include: {
               feed: {
                 include: {
