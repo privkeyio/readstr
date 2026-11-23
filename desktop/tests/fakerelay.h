@@ -154,6 +154,8 @@ private:
         requests << QJsonArray(message);
         requests.last().removeFirst();
         requests.last().removeFirst();
+        // A REQ with an id already open on the socket replaces it (NIP-01).
+        m_live.removeIf([socket, id](const Live &live) { return live.socket == socket && live.id == id; });
         m_live << Live{socket, id, requests.last()};
         if (silent)
             return;
@@ -170,6 +172,7 @@ private:
     void respond(QWebSocket *socket, const QJsonArray &message) {
         const QString id = message.at(1).toString();
         if (!closeWith.isEmpty()) {
+            m_live.removeIf([socket, id](const Live &live) { return live.socket == socket && live.id == id; });
             send(socket, {"CLOSED", id, closeWith});
             return;
         }

@@ -11,6 +11,7 @@
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQuickItem>
 #include <QQuickWindow>
 #include <QTextDocument>
 #include <QDir>
@@ -371,7 +372,7 @@ private:
     void answer(const Held &request) {
         if (!authUrl.isEmpty()) {
             respond(request.client, request.id, "auth_url", authUrl);
-            QTimer::singleShot(100, &m_relay, [this, request] { answerNow(request); });
+            QTimer::singleShot(100, &m_context, [this, request] { answerNow(request); });
             return;
         }
         answerNow(request);
@@ -411,6 +412,8 @@ private:
     }
 
     FakeRelay &m_relay;
+    // Goes with the bunker, and the answers it was to send later with it.
+    QObject m_context;
     QByteArray m_signerSecret;
     std::unique_ptr<LocalSigner> m_signer;
     std::unique_ptr<LocalSigner> m_user;
@@ -2646,6 +2649,129 @@ private slots:
         QVERIFY(signedOnce.event.verify());
     }
 
+    // A request queued for a relay still connecting is not sent there once
+    // another relay has brought its answer.
+    void remoteSignerSendsOnlyWhatStillWaits()
+    {
+        FakeRelay fast, slow;
+        FakeBunker bunker(fast);
+        slow.pauseAccepting();
+        const QString uri = bunker.uri(fast.url()) + "&relay=" + QUrl::toPercentEncoding(slow.url());
+        auto pairing = RemoteSigner::parseBunkerUri(uri, {fast.url(), slow.url()});
+        QCOMPARE(pairing->relays.size(), 2);
+        auto signer = RemoteSigner::create(*pairing, syncPubkey());
+        pairing->wipe();
+        RemoteSigner::Limits limits = quickRemoteLimits();
+        limits.connectTimeoutMs = 10000;
+        signer->setLimits(limits);
+        Signed result;
+        signer->sign(signingDraft(), result.done());
+        QTRY_COMPARE(result.answers, 1);
+        QCOMPARE(result.error, QString());
+        QVERIFY(slow.log.isEmpty());
+        slow.resumeAccepting();
+        QTRY_VERIFY(slow.log.contains("REQ"));
+        QTest::qWait(100);
+        QCOMPARE(slow.published.size(), 0);
+        QCOMPARE(fast.published.size(), 1);
+    }
+
+    // A relay that ends the subscription with CLOSED is asked again, and
+    // the answer still comes through it; one that keeps closing it counts
+    // as refusing the request, which a later request asks it again for.
+    void remoteSignerResubscribesAfterClosed()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        bunker.hold = true;
+        relay.closeWith = "error: restarting";
+        RemoteSigner::Limits limits = quickRemoteLimits();
+        limits.requestTimeoutMs = 30000;
+        auto signer = pairedSigner(bunker, relay);
+        signer->setLimits(limits);
+        Signed result;
+        signer->sign(signingDraft(), result.done());
+        QTRY_COMPARE(bunker.held.size(), 1);
+        QTRY_VERIFY(relay.requests.size() >= 2);
+        relay.closeWith.clear();
+        const qsizetype asked = relay.requests.size();
+        QTRY_VERIFY(relay.requests.size() > asked);
+        QCOMPARE(result.answers, 0);
+        bunker.answerHeld();
+        QTRY_COMPARE(result.answers, 1);
+        QCOMPARE(result.error, QString());
+        QVERIFY(result.event.verify());
+        QCOMPARE(relay.connections, 1);
+
+        relay.closeWith = "blocked: not for you";
+        auto closing = pairedSigner(bunker, relay);
+        closing->setLimits(limits);
+        QElapsedTimer clock;
+        clock.start();
+        Signed refused;
+        const qsizetype before = relay.requests.size();
+        closing->sign(signingDraft(), refused.done());
+        QTRY_COMPARE(refused.answers, 1);
+        QVERIFY(clock.elapsed() < 10000);
+        QCOMPARE(refused.error, QString("The relays of the remote signer refused the request: blocked: not for you"));
+        QCOMPARE(relay.requests.size() - before, 4);
+        QCOMPARE(closing->waiting(), 0);
+
+        bunker.held.clear();
+        bunker.hold = false;
+        relay.closeWith.clear();
+        Signed again;
+        closing->sign(signingDraft(), again.done());
+        QTRY_COMPARE(again.answers, 1);
+        QCOMPARE(again.error, QString());
+        QVERIFY(again.event.verify());
+    }
+
+    // A draft whose signed answer cannot come back, past NIP-44's bound or
+    // the relay message cap, is refused before it reaches the signer, even
+    // when the request itself would fit.
+    void remoteSignerRefusesWhatCannotComeBack()
+    {
+        FakeRelay relay;
+        FakeBunker bunker(relay);
+        auto signer = pairedSigner(bunker, relay);
+        NostrEvent over = signingDraft();
+        over.tags = {};
+        over.content = QString(Nip44::maxPlaintext - 200, 'x');
+        Signed tooLarge;
+        signer->sign(over, tooLarge.done());
+        QTRY_COMPARE(tooLarge.answers, 1);
+        QCOMPARE(tooLarge.error, QString("This event is too large for a remote signer to sign"));
+        QTest::qWait(100);
+        QCOMPARE(bunker.methods, QStringList());
+
+        NostrEvent under = over;
+        under.content = QString(Nip44::maxPlaintext - 600, 'x');
+        Signed fits;
+        signer->sign(under, fits.done());
+        QTRY_COMPARE(fits.answers, 1);
+        QCOMPARE(fits.error, QString());
+        QVERIFY(fits.event.verify());
+        QCOMPARE(fits.event.content, under.content);
+
+        RemoteSigner::Limits limits = quickRemoteLimits();
+        limits.maxMessageBytes = 4 * 1024;
+        signer->setLimits(limits);
+        bunker.methods.clear();
+        NostrEvent capped = over;
+        capped.content = QString(3000, 'x');
+        Signed pastCap;
+        signer->sign(capped, pastCap.done());
+        QTRY_COMPARE(pastCap.answers, 1);
+        QCOMPARE(pastCap.error, QString("This event is too large for a remote signer to sign"));
+        capped.content = QString(1000, 'x');
+        Signed withinCap;
+        signer->sign(capped, withinCap.done());
+        QTRY_COMPARE(withinCap.answers, 1);
+        QCOMPARE(withinCap.error, QString());
+        QCOMPARE(bunker.methods, QStringList{"sign_event"});
+    }
+
     // The pairing is an item of its own, which a search for the key cannot
     // find, and only one that parses is handed back.
     void secretServiceKeepsThePairingApart()
@@ -3117,6 +3243,89 @@ private slots:
         keys.error = KeyStore::Error::None;
     }
 
+    // Disconnected while giving way to a key added mid sign, the remote
+    // signer fails only what it has out; what waits behind it is signed
+    // with the key.
+    void backendDisconnectKeepsSignsForTheKey()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        FakeBunker bunker(relay);
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setRemoteSignerLimits(quickRemoteLimits());
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyChecked() && !backend.signingBusy());
+        QVERIFY(backend.connectBunker(bunker.uri(relay.url())));
+        QTRY_VERIFY(backend.remoteSignerPaired());
+        bunker.hold = true;
+        Signed remote;
+        backend.sign(signingDraft(), remote.done());
+        QTRY_COMPARE(bunker.held.size(), 1);
+        QVERIFY(backend.addSigningKey(QByteArray(32, '\1').toHex()));
+        QTRY_COMPARE(backend.signerKind(), QString("key"));
+        Signed queued;
+        backend.sign(signingDraft(), queued.done());
+        QTest::qWait(100);
+        QCOMPARE(queued.answers, 0);
+        backend.disconnectSigner();
+        QTRY_COMPARE(remote.answers, 1);
+        QCOMPARE(remote.error, QString("The remote signer was disconnected before the event was signed"));
+        QTRY_COMPARE(queued.answers, 1);
+        QVERIFY2(queued.error.isEmpty(), qPrintable(queued.error));
+        QVERIFY(queued.event.verify());
+        QTRY_VERIFY(!backend.remoteSignerPaired());
+        bunker.held.clear();
+    }
+
+    // The approval page shown is that of a request still waiting: once the
+    // one that named it is answered, it goes, though another still waits.
+    void backendShowsTheAuthUrlOfAWaitingRequest()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        FakeBunker bunker(relay);
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setRemoteSignerLimits(quickRemoteLimits());
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyChecked() && !backend.signingBusy());
+        QVERIFY(backend.connectBunker(bunker.uri(relay.url())));
+        QTRY_VERIFY(backend.remoteSignerPaired());
+        QTRY_VERIFY(!backend.remoteConnecting());
+        bunker.hold = true;
+        Signed a, b;
+        backend.sign(signingDraft(), a.done());
+        QTRY_COMPARE(bunker.held.size(), 1);
+        backend.sign(signingDraft(), b.done());
+        QTRY_COMPARE(bunker.held.size(), 2);
+        const FakeBunker::Held first = bunker.held.at(0), second = bunker.held.at(1);
+        const QString url = "https://signer.example.invalid/approve?id=a";
+        bunker.respond(first.client, first.id, "auth_url", url);
+        QTRY_COMPARE(backend.remoteAuthUrl(), url);
+        bunker.held = {first};
+        bunker.answerHeld();
+        QTRY_COMPARE(a.answers + b.answers, 1);
+        QTRY_COMPARE(backend.remoteAuthUrl(), QString());
+        QVERIFY(backend.remoteSignerWaiting());
+        bunker.held = {second};
+        bunker.answerHeld();
+        QTRY_COMPARE(a.answers + b.answers, 2);
+        QVERIFY(a.error.isEmpty() && b.error.isEmpty());
+        QTRY_VERIFY(!backend.remoteSignerWaiting());
+        QCOMPARE(backend.remoteAuthUrl(), QString());
+    }
+
     // "Stop connecting" while the keyring writes the pairing takes it out
     // again, and nothing shows as paired.
     void backendUndoesAPairingStoppedWhileStored()
@@ -3248,7 +3457,7 @@ private slots:
         engine.rootContext()->setContextProperty("translator", QVariantMap{{"language", "en"}});
         QQmlComponent component(&engine);
         component.setData("import QtQuick\nimport QtQuick.Controls\n"
-                          "ApplicationWindow { width: 800; height: 900; property alias dialog: dialog\n"
+                          "ApplicationWindow { width: 800; height: 760; property alias dialog: dialog\n"
                           " SyncDialog { id: dialog } }\n",
                           QUrl("qrc:/probe.qml"));
         std::unique_ptr<QObject> window(component.create());
@@ -3273,6 +3482,20 @@ private slots:
         QVERIFY(!start->property("visible").toBool());
         QTRY_COMPARE(qr->property("status").toInt(), 1);
         QVERIFY(qr->property("sourceSize").toSize().width() > 0);
+        // The dialog stays within the window, its form scrolls, and the
+        // footer's buttons stay in view below it.
+        auto *scroll = window->findChild<QQuickItem *>("syncDialogScroll");
+        auto *stop = window->findChild<QQuickItem *>("stopSyncButton");
+        auto *publish = window->findChild<QQuickItem *>("publishReadsBox");
+        QVERIFY(scroll && stop && publish);
+        QTRY_VERIFY(scroll->property("contentHeight").toReal() > scroll->height());
+        const qreal dialogTop = dialog->property("y").toReal();
+        QVERIFY(dialogTop >= 0);
+        QVERIFY(dialogTop + dialog->property("height").toReal() <= 760);
+        QVERIFY(stop->isVisible());
+        const QPointF stopBottom = stop->mapToScene(QPointF(0, stop->height()));
+        QVERIFY2(stopBottom.y() <= 760 && stopBottom.y() > 0, qPrintable(QString::number(stopBottom.y())));
+        QVERIFY(publish->mapToScene(QPointF(0, publish->height())).y() > 760);
         QVERIFY(QMetaObject::invokeMethod(copy, "clicked"));
         QCOMPARE(clipboard, QStringList{backend.nostrConnectUri()});
         QVERIFY(QMetaObject::invokeMethod(cancel, "clicked"));

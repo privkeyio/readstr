@@ -445,7 +445,8 @@ private:
     // pairing in; if not, says why in remoteSignerError.
     bool canPair();
     void setRemoteError(const QString &error);
-    void setRemoteAuthUrl(const QString &url);
+    // The approval page of a request still waiting, the pairing's first.
+    QString currentAuthUrl() const;
     void updateRemoteWaiting();
     // Drops the signer and any read of the key still out, so neither signs
     // again, failing with `error` every sign not answered yet.

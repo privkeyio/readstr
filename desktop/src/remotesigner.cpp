@@ -31,6 +31,9 @@ constexpr int requestKind = 24133;
 // Queued for a relay that is still connecting; past this the oldest go, and
 // their requests time out.
 constexpr int maxQueued = 16;
+// Times a relay that closed the subscription is asked again, each a little
+// later, before it counts as refusing the requests waiting on it.
+constexpr int maxResubscribes = 3;
 // How far back the subscription asks, so an answer sent while a relay was
 // reconnecting, or by a phone whose clock is a little behind, is not missed.
 constexpr qint64 lookBackSeconds = 5 * 60;
@@ -265,6 +268,11 @@ public:
         applyLimits();
         m_connectTimer.setSingleShot(true);
         m_retry.setSingleShot(true);
+        m_resubscribe.setSingleShot(true);
+        connect(&m_resubscribe, &QTimer::timeout, this, [this] {
+            if (m_connected && m_owner->waiting() > 0)
+                subscribe();
+        });
         connect(&m_connectTimer, &QTimer::timeout, this, [this] {
             m_socket.abort();
             dropped();
@@ -277,13 +285,13 @@ public:
             m_connectTimer.stop();
             m_connected = true;
             m_owner->m_reached = true;
-            const QJsonObject filter{{"kinds", QJsonArray{requestKind}},
-                                     {"#p", QJsonArray{m_owner->clientPubkey()}},
-                                     {"since", QDateTime::currentSecsSinceEpoch() - lookBackSeconds}};
-            m_socket.sendTextMessage(QString::fromUtf8(
-                QJsonDocument(QJsonArray{"REQ", m_owner->m_subscription, filter}).toJson(QJsonDocument::Compact)));
-            for (const QString &message : std::exchange(m_queue, {}))
-                m_socket.sendTextMessage(message);
+            m_closes = 0;
+            subscribe();
+            // Only what still waits: a request another relay already
+            // answered, or that timed out, would ask the user for nothing.
+            for (const auto &[id, message] : std::exchange(m_queue, {}))
+                if (m_owner->m_requests.contains(id))
+                    m_socket.sendTextMessage(message);
         });
         connect(&m_socket, &QWebSocket::disconnected, this, &Relay::dropped);
         connect(&m_socket, &QWebSocket::errorOccurred, this, [this] {
@@ -321,37 +329,65 @@ public:
         m_socket.open(request);
     }
 
-    void send(const QString &message) {
+    void send(const QString &id, const QString &message) {
         if (m_connected) {
+            // A relay that gave up on the subscription is asked again, afresh,
+            // for each new request.
+            if (!m_subscribed && !m_resubscribe.isActive()) {
+                m_closes = 0;
+                subscribe();
+            }
             m_socket.sendTextMessage(message);
             return;
         }
-        m_queue << message;
+        m_queue.append({id, message});
         while (m_queue.size() > maxQueued)
             m_queue.removeFirst();
         open();
     }
 
+    // The relay ended the subscription with CLOSED, the socket still open:
+    // asked again a few times, each a little later, then given up on.
+    void closed(const QString &message) {
+        if (!std::exchange(m_subscribed, false))
+            return;
+        if (++m_closes <= maxResubscribes)
+            m_resubscribe.start(m_owner->m_limits.reconnectMs * m_closes);
+        else
+            m_owner->unsubscribed(this, message);
+    }
+
 private:
+    void subscribe() {
+        const QJsonObject filter{{"kinds", QJsonArray{requestKind}},
+                                 {"#p", QJsonArray{m_owner->clientPubkey()}},
+                                 {"since", QDateTime::currentSecsSinceEpoch() - lookBackSeconds}};
+        m_socket.sendTextMessage(QString::fromUtf8(
+            QJsonDocument(QJsonArray{"REQ", m_owner->m_subscription, filter}).toJson(QJsonDocument::Compact)));
+        m_subscribed = true;
+    }
+
     // As RelayPool's connections do: nothing the socket says while it goes
     // reaches the signer, which may be gone.
     void detach() {
         m_socket.disconnect(this);
         m_connectTimer.stop();
         m_retry.stop();
+        m_resubscribe.stop();
         if (m_connected) {
             m_socket.flush();
             m_socket.close();
         } else {
             m_socket.abort();
         }
-        m_connected = m_opening = false;
+        m_connected = m_opening = m_subscribed = false;
     }
 
     void dropped() {
         const bool wasOpen = m_connected || m_opening;
-        m_connected = m_opening = false;
+        m_connected = m_opening = m_subscribed = false;
         m_connectTimer.stop();
+        m_resubscribe.stop();
         if (wasOpen && m_owner->waiting() > 0)
             m_retry.start(m_owner->m_limits.reconnectMs);
     }
@@ -361,9 +397,13 @@ private:
     QWebSocket m_socket;
     QTimer m_connectTimer;
     QTimer m_retry;
-    QStringList m_queue;
+    QTimer m_resubscribe;
+    // Each message with the id of the request it carries.
+    QList<std::pair<QString, QString>> m_queue;
     bool m_connected = false;
     bool m_opening = false;
+    bool m_subscribed = false;
+    int m_closes = 0;
 };
 
 RemoteSigner::RemoteSigner(const Pairing &pairing, const QString &userPubkey, std::unique_ptr<LocalSigner> client)
@@ -421,9 +461,16 @@ void RemoteSigner::openRelays() {
         relay->open();
 }
 
-void RemoteSigner::send(const QString &message) {
+void RemoteSigner::send(const QString &id, const QString &message) {
     for (Relay *relay : std::as_const(m_relaySockets))
-        relay->send(message);
+        relay->send(id, message);
+}
+
+QString RemoteSigner::pendingAuthUrl() const {
+    for (const Request &request : m_requests)
+        if (!request.authUrl.isEmpty())
+            return request.authUrl;
+    return {};
 }
 
 void RemoteSigner::request(const QString &method, const QJsonArray &params, Answer answer) {
@@ -452,9 +499,9 @@ void RemoteSigner::request(const QString &method, const QJsonArray &params, Answ
     timer->setSingleShot(true);
     connect(timer, &QTimer::timeout, this, [this, id] { timedOut(id); });
     timer->start(m_limits.requestTimeoutMs);
-    m_requests.insert(id, {std::move(answer), timer, false, signedEvent.id, {}});
+    m_requests.insert(id, {std::move(answer), timer, {}, signedEvent.id, {}});
     emit waitingChanged();
-    send(QString::fromUtf8(QJsonDocument(QJsonArray{"EVENT", signedEvent.toJson()}).toJson(QJsonDocument::Compact)));
+    send(id, QString::fromUtf8(QJsonDocument(QJsonArray{"EVENT", signedEvent.toJson()}).toJson(QJsonDocument::Compact)));
 }
 
 void RemoteSigner::conclude(const QString &id, const QString &result, const QString &error, bool local) {
@@ -478,22 +525,33 @@ void RemoteSigner::timedOut(const QString &id) {
 void RemoteSigner::accepted(const Relay *relay, const QString &eventId, bool ok, const QString &message) {
     if (ok || eventId.isEmpty())
         return;
-    for (auto request = m_requests.begin(); request != m_requests.end(); ++request) {
-        if (request->eventId != eventId)
-            continue;
-        if (!request->refusedBy.contains(relay))
-            request->refusedBy << relay;
-        if (request->refusedBy.size() < m_relaySockets.size())
-            return;
-        return conclude(request.key(), {},
-                        tr("The relays of the remote signer refused the request: %1").arg(cleanError(message)), true);
-    }
+    for (auto request = m_requests.cbegin(); request != m_requests.cend(); ++request)
+        if (request->eventId == eventId)
+            return refused(request.key(), relay, message);
 }
 
-void RemoteSigner::received(const Relay *relay, const QString &text) {
+void RemoteSigner::unsubscribed(const Relay *relay, const QString &message) {
+    for (const QString &id : m_requests.keys())
+        refused(id, relay, message);
+}
+
+void RemoteSigner::refused(const QString &id, const Relay *relay, const QString &message) {
+    const auto request = m_requests.find(id);
+    if (request == m_requests.end())
+        return;
+    if (!request->refusedBy.contains(relay))
+        request->refusedBy << relay;
+    if (request->refusedBy.size() >= m_relaySockets.size())
+        conclude(id, {}, tr("The relays of the remote signer refused the request: %1").arg(cleanError(message)), true);
+}
+
+void RemoteSigner::received(Relay *relay, const QString &text) {
     const QJsonArray message = QJsonDocument::fromJson(text.toUtf8()).array();
     if (message.size() >= 3 && message.at(0).toString() == QLatin1String("OK") && message.at(2).isBool())
         return accepted(relay, message.at(1).toString(), message.at(2).toBool(), message.at(3).toString());
+    if (message.size() >= 2 && message.at(0).toString() == QLatin1String("CLOSED")
+        && message.at(1).toString() == m_subscription)
+        return relay->closed(message.at(2).toString());
     if (message.size() < 3 || message.at(0).toString() != QLatin1String("EVENT")
         || message.at(1).toString() != m_subscription)
         return;
@@ -560,11 +618,11 @@ void RemoteSigner::finish(const QString &id, const QString &result, const QStrin
     if (result == QLatin1String("auth_url")) {
         const QUrl url(error, QUrl::StrictMode);
         const QString scheme = url.scheme().toLower();
-        if (!found->authShown && error.size() <= maxUriLength && url.isValid() && !url.host().isEmpty()
+        if (found->authUrl.isEmpty() && error.size() <= maxUriLength && url.isValid() && !url.host().isEmpty()
             && scheme == QLatin1String("https")) {
-            found->authShown = true;
+            found->authUrl = url.toString(QUrl::FullyEncoded);
             found->timer->start(m_limits.requestTimeoutMs);
-            emit authUrl(url.toString(QUrl::FullyEncoded));
+            emit authUrl(found->authUrl);
         }
         return;
     }
@@ -651,6 +709,34 @@ void RemoteSigner::ping(Finished done) {
     });
 }
 
+bool RemoteSigner::answerFits(const NostrEvent &event) const {
+    // The signer's answer carries the event signed, with its id, pubkey and
+    // sig, escaped in a JSON-RPC result, then encrypted, padded, in base64,
+    // in an event of its own: all of it must come within what is received.
+    NostrEvent signedEvent = event;
+    signedEvent.id = signedEvent.pubkey = QString(64, '0');
+    signedEvent.sig = QString(128, '0');
+    const QByteArray answer =
+        QJsonDocument(QJsonObject{{"id", QString(32, '0')},
+                                  {"result", QString::fromUtf8(QJsonDocument(signedEvent.toJson())
+                                                                   .toJson(QJsonDocument::Compact))}})
+            .toJson(QJsonDocument::Compact);
+    if (answer.size() > Nip44::maxPlaintext)
+        return false;
+    // Version, nonce, length prefix, padded plaintext and MAC, in base64.
+    const qsizetype payloadBytes = 1 + 32 + 2 + Nip44::paddedLength(answer.size()) + 32;
+    NostrEvent carrier;
+    carrier.id = carrier.pubkey = QString(64, '0');
+    carrier.sig = QString(128, '0');
+    carrier.kind = requestKind;
+    carrier.createdAt = QDateTime::currentSecsSinceEpoch();
+    carrier.tags = {{"p", clientPubkey()}};
+    carrier.content = QString((payloadBytes + 2) / 3 * 4, 'A');
+    const QByteArray message =
+        QJsonDocument(QJsonArray{"EVENT", m_subscription, carrier.toJson()}).toJson(QJsonDocument::Compact);
+    return message.size() <= m_limits.maxMessageBytes;
+}
+
 void RemoteSigner::sign(const NostrEvent &event, Done done) {
     const auto fail = [this, &done](const QString &error) {
         later([done = std::move(done), error] { done({}, error); });
@@ -665,6 +751,8 @@ void RemoteSigner::sign(const NostrEvent &event, Done done) {
     const QJsonObject draft{
         {"kind", event.kind}, {"created_at", event.createdAt}, {"tags", tags}, {"content", event.content}};
     const QString draftJson = QString::fromUtf8(QJsonDocument(draft).toJson(QJsonDocument::Compact));
+    if (!answerFits(event))
+        return fail(tr("This event is too large for a remote signer to sign"));
     request(QStringLiteral("sign_event"), QJsonArray{draftJson},
             [this, event, done](const QString &result, const QString &error, bool local) {
                 if (!error.isEmpty())

@@ -1034,7 +1034,7 @@ RemoteSigner *Backend::remoteSigner() const {
 
 void Backend::adoptRemoteSigner(std::unique_ptr<RemoteSigner> signer) {
     connect(signer.get(), &RemoteSigner::waitingChanged, this, &Backend::updateRemoteWaiting);
-    connect(signer.get(), &RemoteSigner::authUrl, this, &Backend::setRemoteAuthUrl);
+    connect(signer.get(), &RemoteSigner::authUrl, this, &Backend::updateRemoteWaiting);
     m_signer = std::move(signer);
     m_signerRemote = true;
 }
@@ -1042,21 +1042,31 @@ void Backend::adoptRemoteSigner(std::unique_ptr<RemoteSigner> signer) {
 void Backend::updateRemoteWaiting() {
     const RemoteSigner *signer = remoteSigner();
     const bool waiting = signer && signer->waiting() > 0;
-    if (waiting == m_remoteWaiting)
+    const QString url = currentAuthUrl();
+    if (waiting == m_remoteWaiting && url == m_remoteAuthUrl)
         return;
-    m_remoteWaiting = waiting;
-    if (!waiting && !m_pairingSigner)
-        m_remoteAuthUrl.clear();
-    // In the status bar too, as a publish signs on its own, dialog or not;
-    // what it said before comes back once the signer has answered.
-    const QString approve = tr("Approve the request in your signer app");
-    if (waiting) {
-        m_statusBeforeApproval = {m_status, m_statusError};
-        setStatus(approve);
-    } else if (m_status == approve) {
-        setStatus(m_statusBeforeApproval.first, m_statusBeforeApproval.second);
+    m_remoteAuthUrl = url;
+    if (waiting != m_remoteWaiting) {
+        m_remoteWaiting = waiting;
+        // In the status bar too, as a publish signs on its own, dialog or
+        // not; what it said before comes back once the signer has answered.
+        const QString approve = tr("Approve the request in your signer app");
+        if (waiting) {
+            m_statusBeforeApproval = {m_status, m_statusError};
+            setStatus(approve);
+        } else if (m_status == approve) {
+            setStatus(m_statusBeforeApproval.first, m_statusBeforeApproval.second);
+        }
     }
     emit remoteSignerChanged();
+}
+
+QString Backend::currentAuthUrl() const {
+    const QString url = m_pairingSigner ? m_pairingSigner->pendingAuthUrl() : QString();
+    if (!url.isEmpty())
+        return url;
+    const RemoteSigner *signer = remoteSigner();
+    return signer ? signer->pendingAuthUrl() : QString();
 }
 
 QString Backend::signerKind() const {
@@ -1067,11 +1077,6 @@ QString Backend::signerKind() const {
 
 QString Backend::nostrConnectQr() const {
     return m_nostrConnectUri.isEmpty() ? QString() : QrCode::source(m_nostrConnectUri);
-}
-
-void Backend::setRemoteAuthUrl(const QString &url) {
-    m_remoteAuthUrl = url;
-    emit remoteSignerChanged();
 }
 
 void Backend::setRemoteError(const QString &error) {
@@ -1135,7 +1140,8 @@ void Backend::beginPairing(RemoteSigner::Pairing pairing) {
         return;
     }
     signer->setLimits(m_remoteLimits);
-    connect(signer.get(), &RemoteSigner::authUrl, this, &Backend::setRemoteAuthUrl);
+    connect(signer.get(), &RemoteSigner::authUrl, this, &Backend::updateRemoteWaiting);
+    connect(signer.get(), &RemoteSigner::waitingChanged, this, &Backend::updateRemoteWaiting);
     m_pairingSigner = std::move(signer);
     m_remoteError.clear();
     emit remoteSignerChanged();
@@ -1153,8 +1159,7 @@ void Backend::endPairing() {
         m_pairingSigner.release()->deleteLater();
     }
     m_nostrConnectUri.clear();
-    if (!m_remoteWaiting)
-        m_remoteAuthUrl.clear();
+    m_remoteAuthUrl = currentAuthUrl();
     emit remoteSignerChanged();
 }
 
@@ -1247,10 +1252,20 @@ void Backend::disconnectSigner() {
         return;
     // At once, before the keyring answers, as for "Forget key". A read of
     // the key goes on, and only the pairing is not read after it.
-    if (m_signerRemote || m_loadingPairing)
-        dropSigner(tr("The remote signer was disconnected before the event was signed"));
-    else if (m_loadingSigner)
+    const QString gone = tr("The remote signer was disconnected before the event was signed");
+    if (m_signerRemote && m_signerStale && m_signingKeyStored) {
+        // It was giving way to the key, which signs what waits behind it.
+        releaseSigner();
+        failPendingSigns(gone, false);
+        if (!m_pendingSigns.isEmpty())
+            loadSigner();
+        if (m_loadingSigner)
+            m_pairingDisconnectedLoad = m_signerLoad;
+    } else if (m_signerRemote || m_loadingPairing) {
+        dropSigner(gone);
+    } else if (m_loadingSigner) {
         m_pairingDisconnectedLoad = m_signerLoad;
+    }
     if (!m_keyStore)
         return setPairing(false, m_pairingChecked);
     queueKeyJob([this, npub, epoch = m_signingEpoch](const std::function<void()> &finished) {

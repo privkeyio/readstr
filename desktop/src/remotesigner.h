@@ -122,6 +122,9 @@ public:
     QString clientPubkey() const { return m_client->pubkey(); }
     // Requests waiting on the signer, a person's approval among them.
     int waiting() const { return int(m_requests.size()) + (m_awaitingConnect ? 1 : 0); }
+    // The approval page of a request still waiting, if any; empty once
+    // every request that named one has ended.
+    QString pendingAuthUrl() const;
 
 signals:
     // The signer asked the user to approve the request at `url` (an
@@ -138,7 +141,8 @@ private:
     struct Request {
         Answer answer;
         QTimer *timer = nullptr;
-        bool authShown = false;
+        // The page the signer asked the user to approve it at, once shown.
+        QString authUrl;
         // The kind 24133 event carrying it, and the relays that refused it.
         QString eventId;
         QList<const Relay *> refusedBy;
@@ -148,12 +152,17 @@ private:
     // Sends `method` with `params`; `answer` runs later, once, with the
     // result or why there is none.
     void request(const QString &method, const QJsonArray &params, Answer answer);
-    void send(const QString &message);
+    // Sends `message`, which carries request `id`, through every relay.
+    void send(const QString &id, const QString &message);
     void openRelays();
-    void received(const Relay *relay, const QString &text);
+    void received(Relay *relay, const QString &text);
     // A relay's OK for the event `eventId`: once every relay refused a
     // request, it fails with what the last one said.
     void accepted(const Relay *relay, const QString &eventId, bool ok, const QString &message);
+    // A relay that kept closing the subscription counts as refusing every
+    // request still waiting, as for accepted().
+    void unsubscribed(const Relay *relay, const QString &message);
+    void refused(const QString &id, const Relay *relay, const QString &message);
     // Runs `call` from the event loop, unless the signer is gone by then.
     void later(std::function<void()> call);
     void handleEvent(const NostrEvent &event);
@@ -161,6 +170,9 @@ private:
     // Ends request `id`, if still waiting, and answers it from the event loop.
     void conclude(const QString &id, const QString &result, const QString &error, bool local);
     void timedOut(const QString &id);
+    // Whether the signer's answer with `event` signed can come back within
+    // the bounds of NIP-44 and of what a relay message may be.
+    bool answerFits(const NostrEvent &event) const;
     void askPublicKey(Finished done);
     // Has the signer sign a throwaway event as the account.
     void provePossession(Finished done);
