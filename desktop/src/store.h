@@ -7,6 +7,7 @@
 #include <QSqlDatabase>
 #include <QString>
 #include <QStringList>
+#include <QVariant>
 #include <functional>
 #include <optional>
 
@@ -32,6 +33,8 @@ struct Feed {
     // A Nostr author's last refresh that saved missed something: a relay
     // did not answer, or a cap cut the answers off.
     bool incomplete = false;
+    // When it was subscribed to on this machine.
+    QDateTime createdAt = {};
 };
 
 struct Article {
@@ -59,8 +62,7 @@ struct Article {
     QString feedUrl;
 };
 
-// The npub the library pulls sync events for: a public key only, since
-// Readstr reads them and never signs. Empty when none is set.
+// The npub the library syncs with. Empty when none is set.
 struct SyncAccount {
     QString npub;
     // 64 lowercase hex characters.
@@ -72,6 +74,26 @@ struct SyncAccount {
     // The created_at and the id of the last event applied, by d tag.
     QHash<QString, qint64> applied;
     QHash<QString, QString> appliedIds;
+    // Whether this machine publishes its read articles too.
+    bool publishReads = false;
+    // Whether "Publish now" was pressed once for this account, which
+    // automatic publishing waits for, so a library is never published under
+    // an npub the user has not confirmed.
+    bool publishConfirmed = false;
+    // The kinds changed here and not published yet (publishBit()), kept
+    // across restarts.
+    int publishPending = 0;
+};
+
+// The bit of `kind` in SyncAccount::publishPending, 0 for an unknown kind.
+int publishBit(int kind);
+
+// The content of the newest event of a d tag the relays are known to hold,
+// its id, and when it was stored here (seconds since the epoch).
+struct SyncRemote {
+    QString eventId;
+    QString content;
+    qint64 storedAt = 0;
 };
 
 // A saved view as kind 30406 carries it, without keywords.exclude, and the
@@ -176,6 +198,27 @@ public:
     int applyReadGuids(const QStringList &guids);
     // The remembered read GUIDs no article has yet, or -1 on failure.
     int pendingReadCount();
+    // Remembers `guids` in place of the last list without marking anything
+    // read, as for a list published here, which holds only what is read.
+    bool rememberReadGuids(const QStringList &guids);
+    // The remembered read GUIDs, in no particular order.
+    std::optional<QStringList> rememberedReadGuids();
+    // Hands `take` the GUID of each read article, the one marked read here
+    // last first, then those read some other way, newest first, until it
+    // returns false.
+    bool eachReadGuid(const std::function<bool(const QString &)> &take);
+    // Each changes only the account `pubkey`, failing when it is not the
+    // one set.
+    bool setPublishReads(const QString &pubkey, bool publish);
+    bool setPublishConfirmed(const QString &pubkey);
+    // Adds the bits of `mask` to SyncAccount::publishPending, or clears them.
+    bool markPublishPending(const QString &pubkey, int mask, bool pending);
+    // Records the event of the d tag the relays are known to hold. storedAt
+    // is when the content was current; by default, now.
+    bool setSyncRemote(const QString &dTag, const QString &eventId, const QString &content, qint64 storedAt = -1);
+    // The event of the d tag the relays are known to hold; null when there
+    // is none or on failure (lastError() tells which).
+    std::optional<SyncRemote> syncRemote(const QString &dTag);
     QList<SavedView> savedViews();
     // Meant for inside transaction(), like applyReadGuids(), so a failure
     // part way rolls the delete back with the rest.
@@ -197,6 +240,9 @@ private:
     void rollback();
     bool fail(const QString &message);
     bool setFlag(const char *column, qint64 articleId, bool value);
+    // Runs "UPDATE sync_account SET `assignments`" with `values` bound, for
+    // the account `pubkey` only, failing when it is not the one set.
+    bool updateSyncAccount(const QString &pubkey, const QString &assignments, const QVariantList &values);
     qint64 categoryId(const QString &name);
     bool clearSyncState();
 

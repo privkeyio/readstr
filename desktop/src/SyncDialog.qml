@@ -4,12 +4,12 @@ import QtQuick.Controls.Material
 import QtQuick.Layouts
 
 // Sets or clears the npub whose subscriptions, read articles, and saved
-// views come from the Readstr web app. The events are public, so reading
-// them needs only the public key. The account's secret key can be added for
-// signing later; it goes to the keyring alone, and the field lets go of it as
-// soon as it is submitted or the dialog closes. That is as far as QML goes:
-// the JavaScript strings it passed through are freed by the garbage
-// collector, not wiped.
+// views are synced with the Readstr web app. The events are public, so
+// reading them needs only the public key; publishing this machine's own
+// needs the account's secret key, which goes to the keyring alone, and the
+// field lets go of it as soon as it is submitted or the dialog closes. That
+// is as far as QML goes: the JavaScript strings it passed through are freed
+// by the garbage collector, not wiped.
 Dialog {
     id: dialog
 
@@ -103,7 +103,7 @@ Dialog {
 
             Label {
                 Layout.fillWidth: true
-                text: qsTr("After every refresh, Readstr reads the subscriptions and saved views the Readstr web app publishes for this npub, and its read articles once it publishes them. Readstr itself publishes nothing yet.")
+                text: qsTr("After every refresh, Readstr reads the subscriptions, read articles, and saved views the Readstr web app publishes for this npub. With the account's signing key, Readstr publishes its own subscriptions in return, and its read articles if you allow it, so a change here shows in the web app. What is published is public.")
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
                 opacity: 0.7
@@ -214,6 +214,69 @@ Dialog {
                     Layout.fillWidth: true
                     visible: backend.signingError !== ""
                     text: backend.signingError
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    color: dialog.errorColor
+                }
+
+                CheckBox {
+                    objectName: "publishReadsBox"
+                    Layout.fillWidth: true
+                    text: qsTr("Also publish my read articles (public)")
+                    checked: backend.publishReads
+                    focusPolicy: Qt.NoFocus
+                    onToggled: {
+                        backend.setPublishReads(checked)
+                        // Toggling broke the binding; the box shows what is stored.
+                        checked = Qt.binding(() => backend.publishReads)
+                    }
+                }
+
+                Label {
+                    objectName: "confirmPublishLabel"
+                    Layout.fillWidth: true
+                    visible: !(backend.signingKeyChecked && !backend.signingKeyStored) && !backend.publishConfirmed
+                    text: qsTr("Changes are published after the first “Publish now” for this npub.")
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    opacity: 0.7
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: !(backend.signingKeyChecked && !backend.signingKeyStored)
+                    spacing: 8
+
+                    Label {
+                        objectName: "publishedLabel"
+                        Layout.fillWidth: true
+                        text: {
+                            translator.language
+                            if (backend.publishing)
+                                return qsTr("Publishing…")
+                            const date = backend.publishedAt
+                            return date ? qsTr("Last published %1").arg(date.toLocaleString(Qt.locale(), Locale.ShortFormat)) : ""
+                        }
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        opacity: 0.7
+                    }
+                    Button {
+                        objectName: "publishNowButton"
+                        text: qsTr("Publish now")
+                        flat: true
+                        focusPolicy: Qt.NoFocus
+                        enabled: !backend.publishing
+                        Material.roundedScale: theme.radius
+                        onClicked: backend.publishNow()
+                    }
+                }
+
+                Label {
+                    objectName: "publishErrorLabel"
+                    Layout.fillWidth: true
+                    visible: backend.publishError !== ""
+                    text: backend.publishError
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                     color: dialog.errorColor

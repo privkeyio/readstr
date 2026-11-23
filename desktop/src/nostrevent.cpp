@@ -107,6 +107,20 @@ std::optional<NostrEvent> NostrEvent::fromJson(const QJsonValue &value) {
     return event;
 }
 
+QJsonObject NostrEvent::toJson() const {
+    QJsonArray tagArray;
+    for (const QStringList &tag : tags)
+        tagArray << QJsonArray::fromStringList(tag);
+    return {{"id", id}, {"pubkey", pubkey},   {"created_at", createdAt}, {"kind", kind},
+            {"tags", tagArray}, {"content", content}, {"sig", sig}};
+}
+
+QByteArray NostrEvent::jsonString(const QString &text) {
+    QByteArray out;
+    appendString(out, text);
+    return out;
+}
+
 bool NostrEvent::tagsWithinLimits() const {
     if (tags.size() > maxTags)
         return false;

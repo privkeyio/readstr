@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QJsonObject>
 #include <QJsonValue>
 #include <QList>
 #include <QString>
@@ -29,8 +30,12 @@ struct NostrEvent {
     // as lowercase hex of the right length, and at most maxTags tags of at
     // most maxTagValues strings each, maxTagCharacters in all.
     static std::optional<NostrEvent> fromJson(const QJsonValue &value);
+    // The NIP-01 object, as a relay is sent it.
+    QJsonObject toJson() const;
     // Whether the tags are within the limits fromJson() holds them to.
     bool tagsWithinLimits() const;
+    // `text` as JSON.stringify writes it, in UTF-8.
+    static QByteArray jsonString(const QString &text);
     // [0, pubkey, created_at, kind, tags, content] as NIP-01 serializes it,
     // the bytes whose SHA-256 is the id.
     QByteArray serialized() const;
