@@ -30,6 +30,7 @@ import { SimplePool } from 'nostr-tools'
 import { 
   fetchSubscriptionList,
   mergeSubscriptionLists,
+  excludeUnsubscribedSince,
   getLastSyncTime,
   isSyncEventFresh,
   advanceSyncWatermarkIfFresh,
@@ -334,15 +335,25 @@ export function FeedReader() {
         }))
 
         const mergeResult = mergeSubscriptionLists(currentFeeds, result.data)
+        // currentFeeds holds only active feeds, so the merge offers every
+        // unsubscribed one; drop those unsubscribed since the list was published.
+        const toAdd = mergeResult.toAdd.length > 0
+          ? excludeUnsubscribedSince(
+              mergeResult.toAdd,
+              await utils.feed.getSubscriptionsForSync.fetch(),
+              result.createdAt
+            )
+          : []
 
-        if (mergeResult.toAdd.length > 0) {
+        if (toAdd.length > 0) {
           // Defer the watermark advance to the accept handler so a dismissed
           // import can still be re-imported later.
-          setPendingSyncImport(mergeResult.toAdd)
+          setPendingSyncImport(toAdd)
           setPendingSyncCreatedAt(result.createdAt!)
           setShowSyncPrompt(true)
         } else {
-          // Everything remote is already subscribed locally; safe to advance.
+          // Everything remote is already subscribed locally, or was dropped
+          // since the list was published; safe to advance.
           advanceSyncWatermarkIfFresh('readstr-subscriptions', result.createdAt)
         }
       } catch (error) {

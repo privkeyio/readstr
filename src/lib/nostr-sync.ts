@@ -205,7 +205,8 @@ async function getNewestReplaceableEvent(
   relays: string[],
   pubkeyHex: string,
   kind: number,
-  dTag: string
+  dTag: string,
+  accept?: (event: Event) => boolean
 ): Promise<Event | null> {
   // maxWait bounds the query so an unresponsive relay can't hang the fetch (and
   // leak the pool, which is closed in the caller's finally) indefinitely.
@@ -214,7 +215,7 @@ async function getNewestReplaceableEvent(
     authors: [pubkeyHex],
     '#d': [dTag],
   }, { maxWait: SYNC_QUERY_TIMEOUT_MS })
-  return selectNewestEvent(events, pubkeyHex, kind, dTag).newest
+  return selectNewestEvent(events, pubkeyHex, kind, dTag, accept).newest
 }
 
 /**
@@ -284,12 +285,14 @@ function selectNewestEvent(
   events: Event[],
   pubkeyHex: string,
   kind: number,
-  dTag: string
+  dTag: string,
+  accept?: (event: Event) => boolean
 ): { newest: Event | null; oversizedSkipped: number } {
   let newest: Event | null = null
   let oversizedSkipped = 0
   for (const event of events) {
     if (!isExpectedEvent(event, pubkeyHex, kind, dTag)) continue
+    if (accept && !accept(event)) continue
     // Skip oversized payloads during selection so a malicious relay can't make us
     // hold or parse a huge content frame even if it carries the highest created_at.
     if (event.content.length > MAX_CONTENT_BYTES) {
@@ -303,6 +306,25 @@ function selectNewestEvent(
   }
   return { newest, oversizedSkipped }
 }
+
+// The server orders a subscription list's created_at against local unsubscribe
+// times, so a list dated in the future would undo later unsubscribes, and a
+// value Date or BigInt cannot hold would break every sync. Allow clock skew only.
+export const MAX_FUTURE_SKEW_SECONDS = 600
+
+export function isAcceptableListCreatedAt(
+  createdAt: unknown,
+  nowSeconds = Math.floor(Date.now() / 1000)
+): createdAt is number {
+  return (
+    typeof createdAt === 'number' &&
+    Number.isSafeInteger(createdAt) &&
+    createdAt >= 0 &&
+    createdAt <= nowSeconds + MAX_FUTURE_SKEW_SECONDS
+  )
+}
+
+const acceptSubscriptionListEvent = (event: Event) => isAcceptableListCreatedAt(event.created_at)
 
 /**
  * Publish a subscription list to Nostr relays using kind 30404
@@ -372,7 +394,8 @@ export async function fetchSubscriptionList(
       relays,
       pubkeyHex,
       SUBSCRIPTION_LIST_KIND,
-      'readstr-subscriptions'
+      'readstr-subscriptions',
+      acceptSubscriptionListEvent
     )
 
     if (!event) {
@@ -428,7 +451,8 @@ export async function fetchSubscriptionListFromServer(
       syncRelays,
       pubkeyHex,
       SUBSCRIPTION_LIST_KIND,
-      'readstr-subscriptions'
+      'readstr-subscriptions',
+      acceptSubscriptionListEvent
     )
 
     if (!event) {
@@ -577,6 +601,28 @@ export function normalizeNpub(value: string): string {
     return match[0].toLowerCase()
   }
   return value.toLowerCase().trim()
+}
+
+/**
+ * Drop from an import the feeds the user unsubscribed from at or after the
+ * list's created_at: the list predates that choice, so it must not undo it.
+ * `subscriptions` includes soft-deleted rows with their deletedAt.
+ */
+export function excludeUnsubscribedSince<T extends { type: 'RSS' | 'NOSTR'; url: string }>(
+  toAdd: T[],
+  subscriptions: Array<{ type: 'RSS' | 'NOSTR' | 'NOSTR_VIDEO'; url: string; deletedAt?: Date | null }>,
+  listCreatedAt: number | undefined
+): T[] {
+  const feedKey = (type: 'RSS' | 'NOSTR', url: string) =>
+    type === 'RSS' ? `RSS:${normalizeUrlForComparison(url)}` : `NOSTR:${normalizeNpub(url)}`
+  const listAtMs = listCreatedAt == null ? null : listCreatedAt * 1000
+  const unsubscribed = new Set<string>()
+  for (const sub of subscriptions) {
+    if (!sub.deletedAt || !sub.url || sub.type === 'NOSTR_VIDEO') continue
+    if (listAtMs != null && sub.deletedAt.getTime() < listAtMs) continue
+    unsubscribed.add(feedKey(sub.type, sub.url))
+  }
+  return toAdd.filter((feed) => !unsubscribed.has(feedKey(feed.type, feed.url)))
 }
 
 /**
