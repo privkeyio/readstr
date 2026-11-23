@@ -196,5 +196,9 @@
   "Changes are published after the first “Publish now” for this npub.": "Ændringer offentliggøres efter det første “Offentliggør nu” for denne npub.",
   "Cannot remember what is left to publish: %1": "Kan ikke huske, hvad der mangler at blive offentliggjort: %1",
   "the last subscription list applied here has not been pulled again yet, so it is not replaced": "den seneste abonnementsliste, der blev anvendt her, er ikke hentet igen endnu, så den erstattes ikke",
-  "the subscription list is too large for the relays (over 60,000 bytes)": "abonnementslisten er for stor til relæerne (over 60.000 byte)"
+  "the subscription list is too large for the relays (over 60,000 bytes)": "abonnementslisten er for stor til relæerne (over 60.000 byte)",
+  "%n feeds are left out of the subscription list, as their addresses are too long": {
+    "one": "%n feed er udeladt af abonnementslisten, da dens adresse er for lang",
+    "other": "%n feeds er udeladt af abonnementslisten, da deres adresser er for lange"
+  }
 }

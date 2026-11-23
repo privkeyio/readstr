@@ -212,5 +212,11 @@
   "Changes are published after the first “Publish now” for this npub.": "Изменения публикуются после первого нажатия «Опубликовать сейчас» для этого npub.",
   "Cannot remember what is left to publish: %1": "Не удаётся запомнить, что осталось опубликовать: %1",
   "the last subscription list applied here has not been pulled again yet, so it is not replaced": "последний применённый здесь список подписок ещё не получен заново, поэтому он не заменяется",
-  "the subscription list is too large for the relays (over 60,000 bytes)": "список подписок слишком велик для релеев (больше 60 000 байт)"
+  "the subscription list is too large for the relays (over 60,000 bytes)": "список подписок слишком велик для релеев (больше 60 000 байт)",
+  "%n feeds are left out of the subscription list, as their addresses are too long": {
+    "one": "%n лента не включена в список подписок, так как её адрес слишком длинный",
+    "few": "%n ленты не включены в список подписок, так как их адреса слишком длинные",
+    "many": "%n лент не включены в список подписок, так как их адреса слишком длинные",
+    "other": "%n ленты не включены в список подписок, так как их адреса слишком длинные"
+  }
 }

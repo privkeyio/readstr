@@ -459,10 +459,12 @@ void Backend::saveFlags(const Article &before, bool read, bool starred, const QS
     showFlags(id, read, starred);
     // The worker takes writes in order, so each only needs what it changes.
     writeOnWorker(
-        [id, read, starred, readChanged, starredChanged](Store &store) {
-            return (!readChanged || store.setRead(id, read)) && (!starredChanged || store.setStarred(id, starred))
-                       ? 1
-                       : -1;
+        [id, read, starred, readChanged, starredChanged,
+         readsPending = readChanged ? readsPublishedFor() : QString()](Store &store) {
+            if ((readChanged && !store.setRead(id, read)) || (starredChanged && !store.setStarred(id, starred)))
+                return -1;
+            markReadsPending(store, readsPending);
+            return 1;
         },
         failure,
         [this, id, failure, readChanged](const WriteResult &result) {
@@ -560,18 +562,25 @@ void Backend::markViewRead() {
     const ArticleFilter filter = currentFilter();
     const qint64 upToId = m_viewLastId;
     const QString failure = tr("Cannot mark the view read: %1");
-    writeOnWorker([filter, upToId](Store &store) { return store.markRead(filter, upToId); }, failure,
-                  [this, failure](const WriteResult &result) {
-                      if (!result.error.isEmpty()) {
-                          setStatus(failure.arg(result.error), true);
-                          return;
-                      }
-                      setStatus(tr("Marked %n articles read", nullptr, result.changed));
-                      if (result.changed > 0)
-                          schedulePublish(Sync::readStatusKind);
-                      reloadCounts();
-                      loadArticles();
-                  });
+    writeOnWorker(
+        [filter, upToId, readsPending = readsPublishedFor()](Store &store) {
+            const int marked = store.markRead(filter, upToId);
+            if (marked > 0)
+                markReadsPending(store, readsPending);
+            return marked;
+        },
+        failure,
+        [this, failure](const WriteResult &result) {
+            if (!result.error.isEmpty()) {
+                setStatus(failure.arg(result.error), true);
+                return;
+            }
+            setStatus(tr("Marked %n articles read", nullptr, result.changed));
+            if (result.changed > 0)
+                schedulePublish(Sync::readStatusKind);
+            reloadCounts();
+            loadArticles();
+        });
 }
 
 void Backend::addFeed(const QString &address) {
@@ -1450,6 +1459,18 @@ void Backend::savePublishPending(const QString &pubkey, int mask, bool pending) 
     });
 }
 
+QString Backend::readsPublishedFor() const {
+    return m_storeOpen && m_syncAccount.publishReads ? m_syncAccount.pubkey : QString();
+}
+
+void Backend::markReadsPending(Store &store, const QString &pubkey) {
+    // Failing only when the account changed meanwhile, as then the read is
+    // not this account's to publish, or with the library, which the window
+    // says when it marks the kind again.
+    if (!pubkey.isEmpty())
+        store.markPublishPending(pubkey, publishBit(Sync::readStatusKind), true);
+}
+
 void Backend::schedulePublish(int kind) {
     if (!m_storeOpen || m_syncAccount.pubkey.isEmpty()
         || (kind == Sync::readStatusKind && !m_syncAccount.publishReads))
@@ -1591,9 +1612,16 @@ void Backend::publishNext(const std::shared_ptr<PublishRun> &run) {
                 run->failed << run->events.at(i).kind;
             return self->publishDone(run);
         }
+        // Read articles turned off while a relay still connects are not sent
+        // to it either.
+        const auto stillWanted = [self, kind, readsOff] { return self && !readsOff(self, kind); };
         self->m_syncRelays->publish(event, run->account.relays, [self, run, event](const PublishResult &result) {
             if (!self || run->epoch != self->m_publishEpoch)
                 return;
+            if (!result.ok() && result.cancelled) {
+                run->settled << event.kind;
+                return self->publishNext(run);
+            }
             for (const PublishResult::Relay &relay : result.relays)
                 if (!relay.accepted)
                     qWarning("readstr: publish: %s: %s", qPrintable(relay.relay), qPrintable(relay.message));
@@ -1605,7 +1633,9 @@ void Backend::publishNext(const std::shared_ptr<PublishRun> &run) {
             self->onWorker<WriteResult>(
                 [pubkey = run->account.pubkey, event, builtAt = run->builtAt](Store &store) {
                     WriteResult written;
-                    written.error = Sync::recordPublished(store, pubkey, event, builtAt);
+                    bool superseded = false;
+                    written.error = Sync::recordPublished(store, pubkey, event, builtAt, &superseded);
+                    written.changed = superseded ? 1 : 0;
                     return written;
                 },
                 [self, run, event](const WriteResult &written) {
@@ -1613,12 +1643,17 @@ void Backend::publishNext(const std::shared_ptr<PublishRun> &run) {
                         return;
                     // The relays have it either way.
                     ++run->published;
-                    run->settled << event.kind;
+                    // A newer version won meanwhile, which may lack what this
+                    // one carried: built again on it after the next pull.
+                    if (written.changed > 0)
+                        run->failed << event.kind;
+                    else
+                        run->settled << event.kind;
                     if (!written.error.isEmpty())
                         run->errors << tr("published, but cannot record it: %1").arg(written.error);
                     self->publishNext(run);
                 });
-        });
+        }, stillWanted);
     });
 }
 

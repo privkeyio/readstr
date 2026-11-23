@@ -137,9 +137,11 @@ QStringList publishedReadGuids(const QStringList &local, const QStringList &remo
 // a user name or password, or whose host is on the local network, is never
 // listed, nor marked deleted. What `remote` carries is cut, `deleted` first,
 // so the event fits what common relays take (maxPublishedReadContent); null
-// when this library's own feeds do not fit.
+// when this library's own feeds do not fit. What `remote` carries with a user
+// name or password is dropped too. A local feed whose URL is past
+// maxUrlLength is left out, and counted in `tooLong`.
 std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QString &remote, qint64 remoteStoredAt,
-                                            qint64 now);
+                                            qint64 now, int *tooLong = nullptr);
 QString readStatusContent(const QStringList &guids, qint64 now);
 // Kind 30406's content: the views without their mute words, which never
 // leave this machine.
@@ -170,5 +172,8 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
 // Records `event`, published, as the newest of its kind: its watermark,
 // its content to build the next one on, and for a read status its GUIDs as
 // the last list (marking nothing read). Empty on success, else why not.
-QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &event, qint64 builtAt);
+// `superseded` says whether a newer version applied meanwhile won instead,
+// so what this one carried may be missing from what the relays hold.
+QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &event, qint64 builtAt,
+                        bool *superseded = nullptr);
 }

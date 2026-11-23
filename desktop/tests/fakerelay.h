@@ -58,6 +58,8 @@ public:
     QString rejectWith;
     // No OK at all, as a relay that never answers.
     bool ignoreEvents = false;
+    // Sends each OK this long after the EVENT, to keep a publish out.
+    int okDelayMs = 0;
     // Events accepted join `events`, so later REQs return them.
     bool keepPublished = false;
     // The type of every message received, in order.
@@ -75,7 +77,14 @@ private:
             if (ignoreEvents)
                 return;
             const bool accepted = rejectWith.isEmpty();
-            send(socket, {"OK", event.value(QStringLiteral("id")), accepted, rejectWith});
+            const QJsonArray ok{"OK", event.value(QStringLiteral("id")), accepted, rejectWith};
+            if (okDelayMs > 0)
+                QTimer::singleShot(okDelayMs, this, [socket = QPointer<QWebSocket>(socket), ok] {
+                    if (socket)
+                        send(socket, ok);
+                });
+            else
+                send(socket, ok);
             if (accepted && keepPublished)
                 events << event;
             return;

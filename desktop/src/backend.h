@@ -349,6 +349,11 @@ private:
     void markPublishPending(int kind);
     // Sets or clears the bits of `mask` in the library's pending kinds.
     void savePublishPending(const QString &pubkey, int mask, bool pending);
+    // The account a read changed now is to be published for, if any, and
+    // on the worker, in the read's own write, its kind marked for it, so a
+    // read saved as the window closes still goes out after a restart.
+    QString readsPublishedFor() const;
+    static void markReadsPending(Store &store, const QString &pubkey);
     // Starts the debounce for what is marked, when nothing is under way.
     void resumePublish();
     // The keyring said it holds no key for the account.

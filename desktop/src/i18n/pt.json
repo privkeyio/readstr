@@ -204,5 +204,10 @@
   "Changes are published after the first “Publish now” for this npub.": "As alterações são publicadas depois do primeiro “Publicar agora” para esta npub.",
   "Cannot remember what is left to publish: %1": "Não é possível guardar o que falta publicar: %1",
   "the last subscription list applied here has not been pulled again yet, so it is not replaced": "a última lista de subscrições aplicada aqui ainda não foi obtida de novo, por isso não é substituída",
-  "the subscription list is too large for the relays (over 60,000 bytes)": "a lista de subscrições é demasiado grande para os relays (mais de 60 000 bytes)"
+  "the subscription list is too large for the relays (over 60,000 bytes)": "a lista de subscrições é demasiado grande para os relays (mais de 60 000 bytes)",
+  "%n feeds are left out of the subscription list, as their addresses are too long": {
+    "one": "%n feed fica fora da lista de subscrições, porque o endereço é demasiado longo",
+    "many": "%n de feeds ficam fora da lista de subscrições, porque os endereços são demasiado longos",
+    "other": "%n feeds ficam fora da lista de subscrições, porque os endereços são demasiado longos"
+  }
 }

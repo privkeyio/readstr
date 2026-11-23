@@ -80,6 +80,8 @@ struct PublishResult {
         QString message;
     };
     QList<Relay> relays;
+    // Not sent to some relay, as it was no longer wanted when it connected.
+    bool cancelled = false;
     int accepted() const;
     // At least one relay accepted it, as the web app counts a publish.
     bool ok() const { return accepted() > 0; }
@@ -160,9 +162,11 @@ public:
     // Sends a signed event to the pool's relays and the public ones among
     // `extraRelays`, and returns at once. `done` runs later on this
     // object's thread, once every relay has answered with OK or given up,
-    // and never once the pool is gone.
+    // and never once the pool is gone. When given, `stillWanted` is asked as
+    // each relay connects, right before the event is sent to it, and a
+    // false answer ends that relay unsent (PublishResult::cancelled).
     void publish(const NostrEvent &event, const QStringList &extraRelays,
-                 std::function<void(const PublishResult &)> done);
+                 std::function<void(const PublishResult &)> done, std::function<bool()> stillWanted = {});
 
 private:
     struct Batch;

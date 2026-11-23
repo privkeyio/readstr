@@ -8061,7 +8061,9 @@ private slots:
         for (const NostrEvent &draft : std::as_const(drafts.events)) {
             const NostrEvent event = signer->signNow(draft).first;
             // Stamped with when the drafts were built, not when recorded.
-            QCOMPARE(Sync::recordPublished(store, syncPubkey(), event, now - 30), QString());
+            bool superseded = true;
+            QCOMPARE(Sync::recordPublished(store, syncPubkey(), event, now - 30, &superseded), QString());
+            QVERIFY(!superseded);
             QCOMPARE(store.syncAccount().applied.value(Sync::dTag(event.kind)), now);
             QCOMPARE(store.syncRemote(QString::fromLatin1(Sync::dTag(event.kind)))->storedAt, now - 30);
         }
@@ -8072,6 +8074,7 @@ private slots:
         QCOMPARE(drafts.unchanged.size(), 2);
         // A list from another device that came in meanwhile: not replaced
         // with an older date, and kept in the union.
+        QVERIFY(store.setSyncApplied(Sync::readStatusTag, now + 5, QString(64, 'e')));
         QVERIFY(store.setSyncRemote(Sync::readStatusTag, QString(64, 'e'),
                                     Sync::readStatusContent({"web1"}, now + 5)));
         drafts = Sync::drafts(store, syncPubkey(), {Sync::readStatusKind}, {{Sync::readStatusKind, now + 5}}, now);
@@ -8613,7 +8616,9 @@ private slots:
         QVERIFY(store.setSyncApplied(Sync::readStatusTag, now + 10, QString(64, 'e')));
         QVERIFY(store.setSyncRemote(Sync::readStatusTag, QString(64, 'e'), web));
         QVERIFY(store.rememberReadGuids({"web1", "web2"}));
-        QCOMPARE(Sync::recordPublished(store, syncPubkey(), mine, mine.createdAt), QString());
+        bool superseded = false;
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), mine, mine.createdAt, &superseded), QString());
+        QVERIFY(superseded);
         QCOMPARE(store.syncAccount().appliedIds.value(Sync::readStatusTag), QString(64, 'e'));
         QCOMPARE(store.syncRemote(Sync::readStatusTag)->content, web);
         QStringList remembered = *store.rememberedReadGuids();
@@ -8868,6 +8873,253 @@ private slots:
             QTest::qWait(150);
         }
         QVERIFY(reads() > 0);
+    }
+
+    // A draft is built only on the content of the event its date goes past:
+    // a cached event that is not the one applied, as when a pull applied a
+    // newer one between the two reads or has not cached it yet, waits for
+    // the next pull.
+    void syncDraftsWaitWhenTheCacheIsNotTheEventApplied()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QVERIFY(store.setPublishReads(syncPubkey(), true));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        ParsedItem item;
+        item.guid = "g1";
+        item.title = "One";
+        QCOMPARE(store.saveItems(feed, {item}), 1);
+        QVERIFY(store.setRead(store.articles({}).first().id, true));
+        const qint64 now = 1800000000;
+        for (const char *tag : {Sync::subscriptionsTag, Sync::readStatusTag}) {
+            QVERIFY(store.setSyncApplied(tag, now + 10, QString(64, 'b')));
+            QVERIFY(store.setSyncRemote(tag, QString(64, 'a'), R"({"rss":[],"nostr":[],"itemGuids":[]})"));
+        }
+        Sync::Drafts drafts =
+            Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind, Sync::readStatusKind}, {}, now);
+        QVERIFY(drafts.error.isEmpty());
+        QVERIFY(drafts.events.isEmpty());
+        QCOMPARE(drafts.waiting, (QList<int>{Sync::subscriptionsKind, Sync::readStatusKind}));
+        QVERIFY(drafts.failed.isEmpty() && drafts.errors.isEmpty());
+
+        // Once the pull caches the event applied, both are built on it.
+        for (const char *tag : {Sync::subscriptionsTag, Sync::readStatusTag})
+            QVERIFY(store.setSyncRemote(tag, QString(64, 'b'), R"({"rss":[],"nostr":[],"itemGuids":[]})"));
+        drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind, Sync::readStatusKind}, {}, now);
+        QVERIFY(drafts.waiting.isEmpty());
+        QCOMPARE(drafts.events.size(), 2);
+        QCOMPARE(drafts.events.first().createdAt, now + 11);
+    }
+
+    // What the last list carried with a user name or password is never
+    // published again, deleted or carried; plain tombstones and feeds this
+    // machine cannot follow still are.
+    void syncDropsCarriedEntriesWithCredentials()
+    {
+        const qint64 now = 1800000000;
+        Feed open;
+        open.url = "https://open.invalid/feed";
+        const QJsonObject remote{
+            {"rss", QJsonArray{"https://me:pw1@gone.invalid/feed", "http://me:pw2@192.168.1.5/feed",
+                               "ftp://me:pw3@far.invalid/f", "http://192.168.1.6/feed", "ftp://far.invalid/g"}},
+            {"nostr", QJsonArray()},
+            {"tags", QJsonObject{{"http://me:pw2@192.168.1.5/feed", QJsonArray{"t"}}}},
+            {"deleted", QJsonArray{"https://me:pw4@old.invalid/x", "https://old.invalid/y"}}};
+        const auto built =
+            Sync::subscriptionsContent({open}, QString::fromUtf8(QJsonDocument(remote).toJson()), 0, now);
+        QVERIFY(built);
+        for (const char *secret : {"pw1", "pw2", "pw3", "pw4", "me:"})
+            QVERIFY2(!built->contains(secret), secret);
+        const QJsonObject list = QJsonDocument::fromJson(built->toUtf8()).object();
+        QCOMPARE(list.value("rss").toArray(),
+                 (QJsonArray{open.url, "http://192.168.1.6/feed", "ftp://far.invalid/g"}));
+        QCOMPARE(list.value("deleted").toArray(), QJsonArray{"https://old.invalid/y"});
+        QVERIFY(!list.contains("tags"));
+    }
+
+    // Tags and categories may name the same feed in different spellings,
+    // and each is found by its own.
+    void syncFindsTagsAndCategoriesSpelledApart()
+    {
+        const qint64 now = 1800000000;
+        Feed a;
+        a.url = "https://a.invalid/feed";
+        a.category = "News";
+        const QJsonObject remote{
+            {"rss", QJsonArray{"https://A.invalid/feed/"}},
+            {"nostr", QJsonArray()},
+            {"tags", QJsonObject{{"https://A.invalid/feed/", QJsonArray{"t1"}}}},
+            {"categories", QJsonObject{{"https://a.invalid/feed", QJsonObject{{"name", "News"}, {"icon", "N"}}}}}};
+        const QJsonObject list = QJsonDocument::fromJson(
+                                     Sync::subscriptionsContent({a}, QString::fromUtf8(QJsonDocument(remote).toJson()),
+                                                                0, now)
+                                         ->toUtf8())
+                                     .object();
+        QCOMPARE(list.value("tags").toObject(), (QJsonObject{{a.url, QJsonArray{"t1"}}}));
+        QCOMPARE(list.value("categories").toObject(),
+                 (QJsonObject{{a.url, QJsonObject{{"name", "News"}, {"icon", "N"}}}}));
+    }
+
+    // A feed whose address is past what the web app takes is left out of
+    // the list, the rest still published, and the dialog says so.
+    void syncSaysWhichFeedsAreTooLongToPublish()
+    {
+        const qint64 now = 1800000000;
+        Feed open, longer, longest;
+        open.url = "https://open.invalid/feed";
+        longer.url = "https://long.invalid/" + QString(Sync::maxUrlLength, 'x');
+        longest.url = "https://long.invalid/" + QString(Sync::maxUrlLength, 'y');
+        int tooLong = -1;
+        const auto built = Sync::subscriptionsContent({open, longer, longest}, {}, 0, now, &tooLong);
+        QVERIFY(built);
+        QCOMPARE(tooLong, 2);
+        QCOMPARE(QJsonDocument::fromJson(built->toUtf8()).object().value("rss").toArray(), QJsonArray{open.url});
+
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QVERIFY(store.addFeed(open.url, "Open") > 0);
+        QVERIFY(store.addFeed(longer.url, "Long") > 0);
+        QVERIFY(store.addFeed(longest.url, "Longest") > 0);
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, now);
+        QVERIFY(drafts.error.isEmpty() && drafts.errors.isEmpty() && drafts.failed.isEmpty());
+        QCOMPARE(drafts.events.size(), 1);
+        QCOMPARE(drafts.notes,
+                 QStringList{"2 feeds are left out of the subscription list, as their addresses are too long"});
+    }
+
+    // An event no longer wanted when its relay connects is not sent there,
+    // and the publish says it was called off rather than refused.
+    void relayPoolSendsNothingNoLongerWanted()
+    {
+        FakeRelay relay;
+        const std::unique_ptr<LocalSigner> signer = LocalSigner::create(QByteArray(32, '\1'));
+        const NostrEvent event =
+            signer->signNow(Sync::draft(Sync::readStatusKind, R"({"itemGuids":[]})", 1800000000)).first;
+        RelayPool pool;
+        pool.setRelays({relay.url()});
+        bool wanted = true;
+        std::optional<PublishResult> result;
+        pool.publish(event, {}, [&](const PublishResult &done) { result = done; }, [&] { return wanted; });
+        // Turned off after the publish began, while the socket connects.
+        wanted = false;
+        QTRY_VERIFY_WITH_TIMEOUT(result.has_value(), 10000);
+        QVERIFY(!result->ok());
+        QVERIFY(result->cancelled);
+        QTest::qWait(100);
+        QVERIFY(relay.published.isEmpty());
+
+        result.reset();
+        wanted = true;
+        pool.publish(event, {}, [&](const PublishResult &done) { result = done; }, [&] { return wanted; });
+        QTRY_VERIFY_WITH_TIMEOUT(result.has_value(), 10000);
+        QVERIFY(result->ok());
+        QVERIFY(!result->cancelled);
+        QCOMPARE(relay.published.size(), 1);
+    }
+
+    // A read saved as the window closes, before its write has reported
+    // back, is still marked to be published after a restart.
+    void backendMarksAReadToPublishInItsOwnWrite()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount(true);
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.setPublishReads(syncPubkey(), true));
+            const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+            QVERIFY(store.recordFetch(feed, {}, {}, {}));
+            ParsedItem item;
+            item.guid = "g1";
+            item.title = "One";
+            QCOMPARE(store.saveItems(feed, {item}), 1);
+        }
+        {
+            FakeKeyStore keys;
+            Backend backend;
+            backend.setKeyStore(&keys);
+            QVERIFY(backend.publishReads());
+            backend.selectSource(0);
+            backend.selectArticle(0);
+        }
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.articles({}).first().read);
+        QVERIFY(store.syncAccount().publishPending & publishBit(Sync::readStatusKind));
+    }
+
+    // A published list a newer one overtook before it was recorded may lack
+    // feeds only this machine has, so the kind stays marked and is built
+    // again on the winning list after the next pull.
+    void backendPublishesAgainOverANewerListThatWon()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        relay.keepPublished = true;
+        relay.okDelayMs = 600;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount(true);
+        QList<qint64> ids;
+        {
+            Store store;
+            QVERIFY(store.open());
+            for (const char *name : {"a", "b"}) {
+                ids << store.addFeed(QStringLiteral("https://%1.invalid/feed").arg(name), name);
+                QVERIFY(store.recordFetch(ids.last(), {}, {}, {}));
+            }
+        }
+        FakeKeyStore keys;
+        keys.keys.insert(syncNpub(), QByteArray(32, '\1'));
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setPublishDelays(30, 30);
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+        QVERIFY(backend.unsubscribe(ids[1]));
+        QTRY_COMPARE_WITH_TIMEOUT(relay.published.size(), 1, 10000);
+        // While the relay has not said OK, `readstr sync` applies the web
+        // app's newer list, which lacks a.
+        const QJsonObject web = syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                                          {{"rss", QJsonArray{"https://c.invalid/feed"}}, {"nostr", QJsonArray()}},
+                                          now + 100);
+        {
+            Store other;
+            QVERIFY(other.open());
+            const Sync::Outcome outcome = Sync::apply(other, other.syncAccount(), syncResult({web}));
+            QVERIFY2(outcome.error.isEmpty(), qPrintable(outcome.error));
+        }
+        relay.events << web;
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.publishing(), 10000);
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.syncAccount().publishPending & publishBit(Sync::subscriptionsKind));
+        }
+
+        relay.okDelayMs = 0;
+        QSignalSpy synced(&backend, &Backend::syncFinished);
+        backend.refreshAll();
+        QVERIFY(synced.wait(10000));
+        QTRY_COMPARE_WITH_TIMEOUT(relay.published.size(), 2, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.publishing(), 10000);
+        const auto event = NostrEvent::fromJson(relay.published.last());
+        QVERIFY(event && event->verify());
+        QVERIFY(event->createdAt > now + 100);
+        QStringList rss = QJsonDocument::fromJson(event->content.toUtf8()).object().value("rss").toVariant().toStringList();
+        rss.sort();
+        QCOMPARE(rss, (QStringList{"https://a.invalid/feed", "https://c.invalid/feed"}));
+        Store store;
+        QVERIFY(store.open());
+        QTRY_COMPARE(store.syncAccount().publishPending & publishBit(Sync::subscriptionsKind), 0);
     }
 
     // The box shows what is stored, even when a toggle did not change it.

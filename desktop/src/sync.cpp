@@ -326,7 +326,7 @@ bool isFresh(const SyncAccount &account, const char *dTag, const NostrEvent &eve
     return event.isNewerThan(last);
 }
 
-QString tr(const char *text) { return QCoreApplication::translate("Sync", text); }
+QString tr(const char *text, int n = -1) { return QCoreApplication::translate("Sync", text, nullptr, n); }
 }
 
 Outcome apply(Store &store, const SyncAccount &account, const NostrResult &result,
@@ -561,18 +561,28 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
     // What the relays hold now, when it is what was applied here, for the
     // next publish to build on: the event just applied, or the one applied
     // before, which a library from before publishing has no content for.
-    const SyncAccount after = store.syncAccount();
-    if (!store.lastError().isEmpty())
+    // Checked under the write, so another process switching the account or
+    // applying a newer one meanwhile is never cached over.
+    const bool cached = store.transaction([&] {
+        const SyncAccount after = store.syncAccount();
+        if (!store.lastError().isEmpty())
+            return false;
+        changed = after.pubkey != account.pubkey;
+        if (changed)
+            return true;
+        for (const NostrEvent *event : {subscriptions, readStatus, views}) {
+            if (!event)
+                continue;
+            const QString tag = QString::fromLatin1(Sync::dTag(event->kind));
+            if (after.appliedIds.value(tag) == event->id && !store.setSyncRemote(tag, event->id, event->content))
+                return false;
+        }
+        return true;
+    });
+    if (!cached)
         return storeFailed();
-    if (after.pubkey != account.pubkey)
+    if (changed)
         return npubChanged();
-    for (const NostrEvent *event : {subscriptions, readStatus, views}) {
-        if (!event)
-            continue;
-        const QString tag = QString::fromLatin1(Sync::dTag(event->kind));
-        if (after.appliedIds.value(tag) == event->id && !store.setSyncRemote(tag, event->id, event->content))
-            return storeFailed();
-    }
 
     outcome.pendingRead = store.pendingReadCount();
     if (outcome.pendingRead < 0)
@@ -668,6 +678,10 @@ std::optional<QString> authorKey(const QString &entry) {
     return QStringLiteral("npub ") + Nip19::npub(profile->pubkey);
 }
 
+// A URL with a user name or password, which never goes into the public list,
+// even when the last list carried it.
+bool hasUserInfo(const QString &entry) { return !QUrl(entry).userInfo().isEmpty(); }
+
 // The tags of a feed in the list, when they fit the web app's schema.
 std::optional<QJsonArray> tagsFitting(const QJsonValue &value) {
     if (!stringArray(value, maxTagsPerFeed, 256))
@@ -687,19 +701,23 @@ QJsonObject categoryStyle(const QJsonObject &category) {
 }
 
 std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QString &remote, qint64 remoteStoredAt,
-                                            qint64 now) {
+                                            qint64 now, int *tooLong) {
     const QJsonObject list = parseObject(remote).value_or(QJsonObject{});
     const QJsonObject remoteTags = list.value("tags").toObject(),
                       remoteCategories = list.value("categories").toObject();
     // Each tag and category entry under both keys its name may be, as the
-    // list does not say which kind of feed it is about.
-    QHash<QString, QString> entryOf;
-    for (const QJsonObject *map : {&remoteTags, &remoteCategories})
-        for (auto it = map->begin(); it != map->end(); ++it) {
+    // list does not say which kind of feed it is about; one lookup per map,
+    // as the two may spell the same feed differently.
+    const auto entriesOf = [](const QJsonObject &map) {
+        QHash<QString, QString> entryOf;
+        for (auto it = map.begin(); it != map.end(); ++it) {
             entryOf.insert(webKey(it.key()), it.key());
             if (const auto key = authorKey(it.key()))
                 entryOf.insert(*key, it.key());
         }
+        return entryOf;
+    };
+    const QHash<QString, QString> tagEntryOf = entriesOf(remoteTags), categoryEntryOf = entriesOf(remoteCategories);
     // A category's color and icon, by name, from whichever feed has them.
     QHash<QString, QJsonObject> styles;
     for (auto it = remoteCategories.begin(); it != remoteCategories.end(); ++it) {
@@ -725,6 +743,8 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
     // Feeds listed, and local feeds kept off the list.
     QSet<QString> listed, kept;
     QStringList deleted;
+    if (tooLong)
+        *tooLong = 0;
     for (const Feed &feed : feeds) {
         const bool author = Library::isNostrFeed(feed);
         const QString key = author ? QStringLiteral("npub ") + feed.url : webKey(feed.url);
@@ -738,7 +758,12 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
                 continue;
             }
         }
-        if (feed.url.size() > maxUrlLength || into.size() >= maxFeeds || listed.contains(key))
+        if (feed.url.size() > maxUrlLength) {
+            if (tooLong)
+                ++*tooLong;
+            continue;
+        }
+        if (into.size() >= maxFeeds || listed.contains(key))
             continue;
         // Unsubscribed elsewhere, and not subscribed here since that list
         // came: the pull never removes a feed, but this machine does not
@@ -748,14 +773,14 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
             continue;
         listed.insert(key);
         into << feed.url;
-        const QString entry = entryOf.value(key);
-        if (!entry.isEmpty() && tags.size() < maxFeeds)
-            if (const auto fitting = tagsFitting(remoteTags.value(entry)); fitting && !fitting->isEmpty())
+        const QString tagEntry = tagEntryOf.value(key);
+        if (!tagEntry.isEmpty() && tags.size() < maxFeeds)
+            if (const auto fitting = tagsFitting(remoteTags.value(tagEntry)); fitting && !fitting->isEmpty())
                 tags.insert(feed.url, *fitting);
         const QString name = feed.category.left(256);
         if (name.isEmpty() || categories.size() >= maxFeeds)
             continue;
-        const QJsonObject own = remoteCategories.value(entry).toObject();
+        const QJsonObject own = remoteCategories.value(categoryEntryOf.value(key)).toObject();
         QJsonObject category = own.value("name").toString() == name ? categoryStyle(own) : styles.value(name);
         category.insert("name", name);
         categories.insert(feed.url, category);
@@ -770,7 +795,7 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
     };
     QList<Carried> carried;
     const auto remoteOnly = [&](const QString &entry, bool author) {
-        if (entry.size() > maxUrlLength)
+        if (entry.size() > maxUrlLength || hasUserInfo(entry))
             return;
         const auto npubKey = authorKey(entry);
         const QString key = author ? npubKey.value_or(QStringLiteral("npub ") + entry.toLower()) : webKey(entry);
@@ -799,7 +824,7 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
             remoteOnly(entry.toString(), true);
     for (const QJsonValue &value : list.value("deleted").toArray()) {
         const QString entry = value.toString();
-        if (entry.isEmpty() || entry.size() > maxUrlLength || listed.contains(webKey(entry))
+        if (entry.isEmpty() || entry.size() > maxUrlLength || hasUserInfo(entry) || listed.contains(webKey(entry))
             || listed.contains(authorKey(entry).value_or(QString())))
             continue;
         deleted << entry;
@@ -915,12 +940,17 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
         if (!store.lastError().isEmpty())
             return failed();
         const QString remoteContent = remote ? remote->content : QString();
+        // The watermark and the content were read apart, and a pull may
+        // have applied a newer event between them, or applied one and not
+        // cached it yet: a draft dated by one and built on the other could
+        // drop what the relays hold, so it waits for the next pull.
+        const bool cacheBehind = remote && remote->eventId != account.appliedIds.value(tag);
         QString content;
         if (kind == subscriptionsKind) {
             // A library from before publishing knows which list it applied
             // but not what that list held, and a list built without it would
             // drop what only another device keeps.
-            if (!remote && account.applied.contains(tag)) {
+            if ((!remote && account.applied.contains(tag)) || cacheBehind) {
                 out.waiting << kind;
                 out.notes << tr("the last subscription list applied here has not been pulled again yet, so it is not replaced");
                 continue;
@@ -928,17 +958,26 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
             const QList<Feed> feeds = store.feeds();
             if (!store.lastError().isEmpty())
                 return failed();
-            const auto built = subscriptionsContent(feeds, remoteContent, remote ? remote->storedAt : 0, now);
+            int tooLong = 0;
+            const auto built =
+                subscriptionsContent(feeds, remoteContent, remote ? remote->storedAt : 0, now, &tooLong);
             if (!built) {
                 out.failed << kind;
                 out.errors << tr("the subscription list is too large for the relays (over 60,000 bytes)");
                 continue;
             }
+            if (tooLong > 0)
+                out.notes << tr("%n feeds are left out of the subscription list, as their addresses are too long",
+                                tooLong);
             content = *built;
         } else if (kind == readStatusKind) {
             // Allowed when the run began, but maybe not any more.
             if (!account.publishReads) {
                 out.unchanged << kind;
+                continue;
+            }
+            if (cacheBehind) {
+                out.waiting << kind;
                 continue;
             }
             QStringList remoteGuids;
@@ -989,9 +1028,10 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
     return out;
 }
 
-QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &event, qint64 builtAt) {
+QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &event, qint64 builtAt,
+                        bool *superseded) {
     const QString tag = QString::fromLatin1(dTag(event.kind));
-    bool changed = false;
+    bool changed = false, lost = false;
     const bool saved = store.transaction([&] {
         const SyncAccount account = store.syncAccount();
         if (!store.lastError().isEmpty())
@@ -1006,7 +1046,8 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
         const SyncAccount after = store.syncAccount();
         if (!store.lastError().isEmpty())
             return false;
-        if (after.appliedIds.value(tag) != event.id)
+        lost = after.appliedIds.value(tag) != event.id;
+        if (lost)
             return true;
         if (event.kind == readStatusKind
             && !store.rememberReadGuids(parseReadStatus(event.content).value_or(QStringList())))
@@ -1017,6 +1058,8 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
     });
     if (!saved)
         return store.lastError();
+    if (superseded)
+        *superseded = lost;
     return changed ? tr("the npub changed during publishing") : QString();
 }
 }

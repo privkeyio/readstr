@@ -639,8 +639,9 @@ QString PublishResult::error() const {
 class RelayPool::Publication : public QObject {
 public:
     Publication(RelayPool *pool, const NostrEvent &event, const QStringList &relays,
-                std::function<void(const PublishResult &)> done)
-        : QObject(pool), m_pool(pool), m_id(event.id), m_done(std::move(done)) {
+                std::function<void(const PublishResult &)> done, std::function<bool()> stillWanted)
+        : QObject(pool), m_pool(pool), m_id(event.id), m_done(std::move(done)),
+          m_stillWanted(std::move(stillWanted)) {
         const Limits limits = pool->limits();
         const QString message = QString::fromUtf8(
             QJsonDocument(QJsonArray{"EVENT", event.toJson()}).toJson(QJsonDocument::Compact));
@@ -663,6 +664,11 @@ public:
                                                                                 : QStringLiteral("timed out connecting"));
             });
             connect(socket, &QWebSocket::connected, this, [this, i, message, limits] {
+                if (m_stillWanted && !m_stillWanted()) {
+                    m_result.cancelled = true;
+                    end(i, false, QStringLiteral("no longer wanted"));
+                    return;
+                }
                 m_timers.at(i)->start(limits.publishTimeoutMs);
                 m_sockets.at(i)->sendTextMessage(message);
             });
@@ -732,6 +738,7 @@ private:
     QPointer<RelayPool> m_pool;
     QString m_id;
     std::function<void(const PublishResult &)> m_done;
+    std::function<bool()> m_stillWanted;
     PublishResult m_result;
     QList<QWebSocket *> m_sockets;
     QList<QTimer *> m_timers;
@@ -739,7 +746,7 @@ private:
 };
 
 void RelayPool::publish(const NostrEvent &event, const QStringList &extraRelays,
-                        std::function<void(const PublishResult &)> done) {
+                        std::function<void(const PublishResult &)> done, std::function<bool()> stillWanted) {
     // As a query picks them: the configured relays, then the public ones
     // an nprofile named, each once, less onion services among those, which
     // cannot be reached without Tor and whose names would leak to DNS.
@@ -761,5 +768,5 @@ void RelayPool::publish(const NostrEvent &event, const QStringList &extraRelays,
         add(relay, true);
     for (const QString &relay : extraRelays)
         add(relay, false);
-    new Publication(this, event, chosen, std::move(done));
+    new Publication(this, event, chosen, std::move(done), std::move(stillWanted));
 }
