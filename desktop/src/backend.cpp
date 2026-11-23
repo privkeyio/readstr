@@ -4,13 +4,16 @@
 #include <QDesktopServices>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QPointer>
 #include <QProcess>
 #include <QRandomGenerator>
+#include <QScopeGuard>
 #include <QStandardPaths>
 
 #include "filepicker.h"
 #include "markdown.h"
 #include "sanitizer.h"
+#include "wipe.h"
 
 // Lives on the worker thread and owns that thread's connection to the
 // library, opened on first use there.
@@ -47,6 +50,17 @@ QString richText(const Article &article) {
     if (!article.address.isEmpty())
         return Markdown::toRichText(article.content);
     return Sanitizer::toRichText(article.content, QUrl(article.url));
+}
+
+// What a keyring call would have answered had there been a keyring to ask.
+KeyStore::Result keyStoreUnavailable() {
+    KeyStore::Result result;
+    result.error = KeyStore::Error::Unavailable;
+    return result;
+}
+
+QString noKeyStored(const QString &npub) {
+    return Backend::tr("No signing key is stored for %1").arg(Nip19::shortNpub(npub, npub));
 }
 }
 
@@ -853,8 +867,280 @@ void Backend::reloadSyncAccount() {
         setStatus(tr("Cannot read the library: %1").arg(m_store.lastError()), true);
         return;
     }
+    const bool changed = account.npub != m_syncAccount.npub;
     m_syncAccount = account;
+    if (changed) {
+        resetSigning();
+        checkSigningKey();
+    }
     emit syncChanged();
+}
+
+void Backend::setKeyStore(KeyStore *keyStore) {
+    m_keyStore = keyStore;
+    // A job still out to the store this one replaces may never finish, so
+    // the queue starts afresh rather than waiting on it.
+    ++m_keyQueue;
+    m_keyJobs.clear();
+    m_keyJobRunning = false;
+    resetSigning();
+    checkSigningKey();
+}
+
+void Backend::setSigning(bool stored, const QString &error) {
+    const bool busy = m_keyJobRunning || !m_keyJobs.isEmpty();
+    if (stored == m_signingKeyStored && busy == m_signingBusy && error == m_signingError)
+        return;
+    m_signingKeyStored = stored;
+    m_signingBusy = busy;
+    m_signingError = error;
+    emit signingChanged();
+}
+
+QString Backend::keyStoreError(const KeyStore::Result &result) const {
+    switch (result.error) {
+    case KeyStore::Error::None:
+        return {};
+    case KeyStore::Error::Unavailable:
+        return tr("No Secret Service is running, so the signing key cannot be kept. Start a keyring and try again.");
+    case KeyStore::Error::Dismissed:
+        return tr("The keyring prompt was dismissed.");
+    case KeyStore::Error::Locked:
+        return tr("The keyring is locked. Unlock it and try again.");
+    case KeyStore::Error::Failed:
+        break;
+    }
+    return tr("The keyring failed: %1").arg(result.detail);
+}
+
+void Backend::queueKeyJob(KeyJob job) {
+    m_keyJobs.append(std::move(job));
+    runKeyJobs();
+    setSigning(m_signingKeyStored, m_signingError);
+}
+
+void Backend::runKeyJobs() {
+    // A loop rather than recursion, as a job with nothing left to do
+    // finishes before it returns; the flag keeps such a job's `finished`
+    // from starting the next one itself, inside this loop.
+    if (std::exchange(m_startingKeyJobs, true))
+        return;
+    while (!m_keyJobRunning && !m_keyJobs.isEmpty()) {
+        m_keyJobRunning = true;
+        const KeyJob job = m_keyJobs.takeFirst();
+        auto once = std::make_shared<bool>(false);
+        job([self = QPointer(this), queue = m_keyQueue, once] {
+            if (!self || std::exchange(*once, true) || queue != self->m_keyQueue)
+                return;
+            self->m_keyJobRunning = false;
+            if (self->m_startingKeyJobs)
+                return;
+            self->runKeyJobs();
+            self->setSigning(self->m_signingKeyStored, self->m_signingError);
+        });
+    }
+    m_startingKeyJobs = false;
+}
+
+void Backend::resetSigning() {
+    ++m_signingEpoch;
+    dropSigner(tr("The sync account changed before the event was signed"));
+    setSigning(false, {});
+}
+
+void Backend::dropSigner(const QString &error) {
+    m_signer.reset();
+    ++m_signerLoad;
+    m_loadingSigner = false;
+    failPendingSigns(error);
+}
+
+void Backend::failPendingSigns(const QString &error, bool queuedToo) {
+    QList<Signer::Done> dones;
+    if (queuedToo) {
+        for (auto &[event, done] : std::exchange(m_pendingSigns, {}))
+            dones << std::move(done);
+    }
+    for (auto &done : std::exchange(m_signing, {}))
+        dones << std::move(done);
+    if (dones.isEmpty())
+        return;
+    // From the event loop, so no caller's code runs in the middle of what
+    // failed them, which may be switching the account.
+    QTimer::singleShot(0, this, [dones = std::move(dones), error] {
+        for (const Signer::Done &done : dones)
+            done({}, error);
+    });
+}
+
+void Backend::checkSigningKey() {
+    const QString npub = m_syncAccount.npub;
+    if (npub.isEmpty() || !m_keyStore)
+        return setSigning(false, {});
+    queueKeyJob([this, npub, epoch = m_signingEpoch](const std::function<void()> &finished) {
+        if (epoch != m_signingEpoch || !m_keyStore)
+            return finished();
+        m_keyStore->contains(npub, [self = QPointer(this), epoch, npub, finished](const KeyStore::Result &result) {
+            if (self && epoch == self->m_signingEpoch) {
+                // Only a keyring that answered "no such key" retires the signer:
+                // a slow, locked or restarting keyring says nothing about the
+                // key. Signs still queued are left to their load job, which
+                // runs after any write queued behind this check and knows
+                // then whether a key is stored.
+                if (result.error == KeyStore::Error::None && !result.found && self->m_signer) {
+                    self->m_signer.reset();
+                    self->failPendingSigns(noKeyStored(npub), false);
+                }
+                self->setSigning(result.found, self->keyStoreError(result));
+            }
+            finished();
+        });
+    });
+}
+
+bool Backend::addSigningKey(const QString &text) {
+    const QString npub = m_syncAccount.npub;
+    if (npub.isEmpty()) {
+        setSigning(false, tr("Sync with an npub before adding its signing key"));
+        return false;
+    }
+    std::optional<QByteArray> secret = Nip19::secretKey(text);
+    const auto cleanup = qScopeGuard([&secret] {
+        if (secret)
+            wipe(*secret);
+    });
+    // Made only to learn the key's public key, and dropped at once: the
+    // key is read back from the keyring when something is to be signed.
+    const std::unique_ptr<LocalSigner> signer = secret ? LocalSigner::create(*secret) : nullptr;
+    if (!signer) {
+        setSigning(m_signingKeyStored, tr("That is not an nsec or a 64-character hex secret key"));
+        return false;
+    }
+    if (signer->pubkey() != m_syncAccount.pubkey) {
+        setSigning(m_signingKeyStored, tr("That key is not the one for %1").arg(Nip19::shortNpub(npub, npub)));
+        return false;
+    }
+    if (!m_keyStore) {
+        setSigning(false, keyStoreError(keyStoreUnavailable()));
+        return false;
+    }
+    // Held until the job's turn comes, in a copy of its own that is wiped
+    // however the job ends, even when it is dropped unrun. A signer already
+    // made stays: it was checked against the same public key, so it signs
+    // as this key would.
+    const std::shared_ptr<QByteArray> key(new QByteArray(secret->constData(), secret->size()), [](QByteArray *bytes) {
+        wipe(*bytes);
+        delete bytes;
+    });
+    setSigning(m_signingKeyStored, {});
+    queueKeyJob([this, npub, key, epoch = m_signingEpoch](const std::function<void()> &finished) {
+        if (epoch != m_signingEpoch || !m_keyStore)
+            return finished();
+        m_keyStore->store(npub, *key, [self = QPointer(this), epoch, finished](const KeyStore::Result &result) {
+            if (self && epoch == self->m_signingEpoch)
+                self->setSigning(result.error == KeyStore::Error::None || self->m_signingKeyStored,
+                                 self->keyStoreError(result));
+            finished();
+        });
+        wipe(*key);
+    });
+    return true;
+}
+
+void Backend::forgetSigningKey() {
+    const QString npub = m_syncAccount.npub;
+    if (npub.isEmpty())
+        return;
+    // At once, before the keyring answers: a read of the key still out, as
+    // for a sign waiting on an unlock prompt, must not bring it back.
+    dropSigner(tr("The signing key was forgotten before the event was signed"));
+    if (!m_keyStore)
+        return setSigning(false, {});
+    setSigning(m_signingKeyStored, {});
+    queueKeyJob([this, npub, epoch = m_signingEpoch](const std::function<void()> &finished) {
+        if (epoch != m_signingEpoch || !m_keyStore)
+            return finished();
+        m_keyStore->remove(npub, [self = QPointer(this), epoch, finished](const KeyStore::Result &result) {
+            if (self && epoch == self->m_signingEpoch) {
+                const bool removed = result.error == KeyStore::Error::None;
+                self->setSigning(!removed && self->m_signingKeyStored, self->keyStoreError(result));
+            }
+            finished();
+        });
+    });
+}
+
+void Backend::sign(const NostrEvent &event, Signer::Done done) {
+    if (m_signer)
+        return handToSigner(event, std::move(done));
+    const QString npub = m_syncAccount.npub;
+    if (npub.isEmpty() || !m_keyStore) {
+        const QString error = npub.isEmpty() ? tr("Sync with an npub before adding its signing key")
+                                             : noKeyStored(npub);
+        QTimer::singleShot(0, this, [done = std::move(done), error] { done({}, error); });
+        return;
+    }
+    // Queued even when no key is known to be stored, as the check at launch
+    // may still be out: the read waits behind it and asks only then.
+    m_pendingSigns.append({event, std::move(done)});
+    loadSigner();
+}
+
+void Backend::handToSigner(const NostrEvent &event, Signer::Done done) {
+    const quint64 id = ++m_signId;
+    m_signing.insert(id, std::move(done));
+    m_signer->sign(event, [self = QPointer(this), id](const NostrEvent &signedEvent, const QString &error) {
+        if (!self)
+            return;
+        if (const Signer::Done done = self->m_signing.take(id))
+            done(signedEvent, error);
+    });
+}
+
+void Backend::loadSigner() {
+    if (std::exchange(m_loadingSigner, true))
+        return;
+    const QString npub = m_syncAccount.npub, pubkey = m_syncAccount.pubkey;
+    const QString missing = noKeyStored(npub);
+    queueKeyJob([this, load = ++m_signerLoad, npub, pubkey, missing](const std::function<void()> &finished) {
+        if (load != m_signerLoad)
+            return finished();
+        // Every keyring call asked for before this one has answered, so
+        // whether a key is stored is known now.
+        if (!m_signingKeyStored || !m_keyStore) {
+            m_loadingSigner = false;
+            failPendingSigns(missing);
+            return finished();
+        }
+        m_keyStore->lookup(npub, [self = QPointer(this), load, pubkey, missing, npub,
+                                  finished](const KeyStore::Result &result) {
+            if (self && load == self->m_signerLoad) {
+                self->m_loadingSigner = false;
+                // Another program of this user's can write the item, so the
+                // key must still be the account's before anything is signed
+                // with it.
+                std::unique_ptr<LocalSigner> signer = result.found ? LocalSigner::create(result.secret) : nullptr;
+                if (result.error != KeyStore::Error::None) {
+                    // Shown in the dialog too, which would otherwise go on
+                    // saying the account can sign while every sign fails.
+                    const QString error = self->keyStoreError(result);
+                    self->setSigning(self->m_signingKeyStored, error);
+                    self->failPendingSigns(error);
+                } else if (!result.found) {
+                    self->setSigning(false, {});
+                    self->failPendingSigns(missing);
+                } else if (!signer || signer->pubkey() != pubkey) {
+                    self->failPendingSigns(
+                        tr("The key in the keyring is not the one for %1").arg(Nip19::shortNpub(npub, npub)));
+                } else {
+                    self->m_signer = std::move(signer);
+                    for (auto &[event, done] : std::exchange(self->m_pendingSigns, {}))
+                        self->handToSigner(event, std::move(done));
+                }
+            }
+            finished();
+        });
+    });
 }
 
 bool Backend::setSyncNpub(const QString &text) {
@@ -877,18 +1163,49 @@ bool Backend::setSyncNpub(const QString &text) {
     return true;
 }
 
-void Backend::stopSync() {
+void Backend::stopSync(bool removeKey) {
     if (!m_storeOpen || m_syncAccount.npub.isEmpty())
         return;
     const QString npub = m_syncAccount.npub;
     writeOnWorker([](Store &store) { return store.clearSyncAccount() ? 1 : -1; },
-                  tr("Cannot stop syncing: %1"), [this, npub](const WriteResult &result) {
+                  tr("Cannot stop syncing: %1"), [this, npub, removeKey](const WriteResult &result) {
                       if (!result.error.isEmpty()) {
+                          // The account stays, so its key stays with it.
                           setStatus(tr("Cannot stop syncing: %1").arg(result.error), true);
                           return;
                       }
                       reloadSyncAccount();
-                      setStatus(tr("Stopped syncing with %1").arg(Nip19::shortNpub(npub, npub)));
+                      const QString shortNpub = Nip19::shortNpub(npub, npub);
+                      if (!removeKey)
+                          return setStatus(tr("Stopped syncing with %1").arg(shortNpub));
+                      // Removed only once the account is gone, so a keyring
+                      // prompt left open never keeps the account syncing.
+                      const auto removed = [self = QPointer(this), shortNpub](const KeyStore::Result &outcome) {
+                          if (!self)
+                              return;
+                          if (outcome.error == KeyStore::Error::None)
+                              return self->setStatus(
+                                  tr("Stopped syncing with %1 and removed its signing key").arg(shortNpub));
+                          self->setStatus(tr("Stopped syncing with %1, but its signing key could not be removed: %2")
+                                              .arg(shortNpub, self->keyStoreError(outcome)),
+                                          true);
+                      };
+                      if (!m_keyStore)
+                          return removed(keyStoreUnavailable());
+                      setStatus(tr("Removing the signing key for %1…").arg(shortNpub));
+                      // Queued like every keyring call, so a key added again
+                      // meanwhile is stored after this removal, not deleted
+                      // by it.
+                      queueKeyJob([this, npub, removed](const std::function<void()> &finished) {
+                          if (!m_keyStore) {
+                              removed(keyStoreUnavailable());
+                              return finished();
+                          }
+                          m_keyStore->remove(npub, [removed, finished](const KeyStore::Result &outcome) {
+                              removed(outcome);
+                              finished();
+                          });
+                      });
                   });
 }
 

@@ -102,12 +102,29 @@ with "Sync with Nostr…" in the `⋮` menu or `readstr sync login npub1…`, an
 it pulls what the Readstr web app publishes for it: the subscription list
 (kind 30404), the read articles (kind 30405, which the web app publishes only
 when its read-sync setting is on, and then only its most recent reads), and
-the saved views (kind 30406). Only the public key is kept; nothing is ever signed or published,
-which is why no signer is needed: the web app publishes these events in
+the saved views (kind 30406). Pulling needs only the public key and nothing
+is signed or published yet: the web app publishes these events in
 cleartext, so anyone can read them. The window pulls right after you log in
 and after every refresh of all feeds, so read marks find the articles it
 brought; `readstr sync` pulls now. A pull that fails says so in the status
 bar (and on stderr), or on stderr with exit code 1 from the command line.
+
+The dialog also takes the account's signing key (its `nsec`, or the same 64
+hex characters), for publishing in a later phase. It is kept only if it is
+the key of the npub you sync with, and only in your desktop keyring through
+the Secret Service (GNOME Keyring, KeePassXC, or KWallet's bridge), as an item
+labeled "Readstr Nostr key (npub1…)" in the default collection, with the
+attributes `application=readstr` and `npub=npub1…`. It is never written to
+Readstr's files or settings. When no Secret Service runs, the dialog says so
+and the key is not kept anywhere else. Readstr only asks the keyring whether
+the key is there when it starts, without reading it (or asking you to unlock
+the keyring) until something is to be signed. Items with those attributes
+that do not hold this account's key are passed over. A keyring prompt left
+unanswered for five minutes, or a keyring that quits while one is open, fails
+what was waiting on it, with the reason. "Forget key" deletes it from
+the keyring. "Stop syncing" with a key stored asks whether to remove it too
+("Remove key", the default, or "Keep key"); syncing stops either way, and a
+removal that fails says why in the status bar.
 
 Merging is close to the web app's and never removes anything here:
 

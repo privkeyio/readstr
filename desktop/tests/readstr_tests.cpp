@@ -5,8 +5,13 @@
 #include <QGuiApplication>
 #include <QClipboard>
 #include <QDBusMessage>
+#include <QDBusMetaType>
+#include <QDBusObjectPath>
+#include <QDBusVariant>
 #include <QQmlComponent>
+#include <QQmlContext>
 #include <QQmlEngine>
+#include <QQuickWindow>
 #include <QTextDocument>
 #include <QDir>
 #include <QDirIterator>
@@ -14,6 +19,7 @@
 #include <QImageWriter>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSignalSpy>
@@ -46,6 +52,7 @@
 #include "fakerelay.h"
 #include "feedparser.h"
 #include "fetcher.h"
+#include "keystore.h"
 #include "filepicker.h"
 #include "library.h"
 #include "localnetwork.h"
@@ -58,6 +65,7 @@
 #include "portalfilepicker.h"
 #include "relaypool.h"
 #include "sanitizer.h"
+#include "signer.h"
 #include "sourcemodel.h"
 #include "store.h"
 #include "sync.h"
@@ -116,6 +124,123 @@ protected:
         generations << generation;
     }
     void closeRequest(const QString &path) override { closed << path; }
+};
+
+// A keyring in memory, so no test ever reaches the real one. Each answer
+// comes from the event loop, as the real one's does, and `error` makes every
+// call fail that way. With `hold`, calls wait, as for a prompt the user has
+// not answered, until the test releases them, and with `delays`, each
+// answer comes after 0 to 2 ms drawn from it, so calls overlap.
+class FakeKeyStore : public KeyStore {
+public:
+    QHash<QString, QByteArray> keys;
+    Error error = Error::None;
+    QStringList calls;
+    bool hold = false;
+    QRandomGenerator *delays = nullptr;
+
+    qsizetype held() const { return m_held.size(); }
+    // Answers every held call, oldest first, there and then.
+    void release() {
+        for (const auto &run : std::exchange(m_held, {}))
+            run();
+    }
+    // Answers only the newest held call, as a keyring does whose earlier
+    // call is still waiting on a prompt.
+    void releaseNewest() {
+        if (m_held.isEmpty())
+            qFatal("no held call to release");
+        m_held.takeLast()();
+    }
+
+    void contains(const QString &npub, Done done) override {
+        calls << "contains " + npub;
+        answer(done, [this, npub](Result &result) { result.found = keys.contains(npub); });
+    }
+    void lookup(const QString &npub, Done done) override {
+        calls << "lookup " + npub;
+        answer(done, [this, npub](Result &result) {
+            result.found = keys.contains(npub);
+            result.secret = keys.value(npub);
+        });
+    }
+    void store(const QString &npub, const QByteArray &secret, Done done) override {
+        calls << "store " + npub;
+        answer(done, [this, npub, secret](Result &) { keys.insert(npub, secret); });
+    }
+    void remove(const QString &npub, Done done) override {
+        calls << "remove " + npub;
+        answer(done, [this, npub](Result &result) { result.found = keys.remove(npub) > 0; });
+    }
+
+private:
+    void answer(const Done &done, const std::function<void(Result &)> &work) {
+        const auto run = [this, done, work] {
+            Result result;
+            result.error = error;
+            if (error == Error::None)
+                work(result);
+            done(result);
+        };
+        if (hold)
+            m_held << run;
+        else
+            QTimer::singleShot(delays ? delays->bounded(3) : 0, this, run);
+    }
+
+    QList<std::function<void()>> m_held;
+};
+
+// The Secret Service store with its D-Bus side replaced: every call waits
+// until the test answers it, in order, as the service would.
+class FakeSecretService : public SecretServiceKeyStore {
+public:
+    using SecretServiceKeyStore::completed;
+    using SecretServiceKeyStore::serviceLost;
+
+    bool bus = true;
+    QList<QDBusMessage> calls;
+    QStringList listening;
+
+    // Answers the oldest call not answered yet.
+    void reply(const QVariantList &arguments) { answer(next().createReply(arguments)); }
+    void fail(const QString &name, const QString &message = "failed") {
+        answer(next().createErrorReply(name, message));
+    }
+    bool waiting() const { return m_answered < calls.size(); }
+    // "Interface.Method path" for each call, to compare in one go.
+    QStringList methods() const {
+        QStringList methods;
+        for (const QDBusMessage &call : calls)
+            methods << call.interface().section('.', -1) + "." + call.member() + " " + call.path();
+        return methods;
+    }
+
+protected:
+    bool connected() const override { return bus; }
+    void call(const QDBusMessage &message, std::function<void(const QDBusMessage &)> done) override {
+        calls << message;
+        m_done << std::move(done);
+    }
+    bool listen(const QString &path) override {
+        listening << path;
+        return true;
+    }
+    void stopListening(const QString &path) override { listening.removeOne(path); }
+
+private:
+    const QDBusMessage &next() {
+        if (!waiting())
+            qFatal("no call to answer");
+        return calls.at(m_answered);
+    }
+    void answer(const QDBusMessage &reply) {
+        const auto done = m_done.at(m_answered++);
+        done(reply);
+    }
+
+    QList<std::function<void(const QDBusMessage &)>> m_done;
+    qsizetype m_answered = 0;
 };
 
 class ReadstrTests : public QObject {
@@ -1691,7 +1816,8 @@ private slots:
                 strings << match.captured(1);
         }
         const QString source = QFileInfo(QFINDTESTDATA("../src/backend.cpp")).absolutePath();
-        for (const char *name : {"backend.cpp", "sanitizer.cpp", "portalfilepicker.cpp", "sync.cpp"}) {
+        for (const char *name :
+             {"backend.cpp", "keystore.cpp", "sanitizer.cpp", "portalfilepicker.cpp", "signer.cpp", "sync.cpp"}) {
             QFile file(source + "/" + name);
             QVERIFY(file.open(QIODevice::ReadOnly));
             for (const auto &match : cppString.globalMatch(QString::fromUtf8(file.readAll())))
@@ -3496,6 +3622,492 @@ private slots:
         QVERIFY(!NostrEvent::fromJson(QJsonValue("event")));
     }
 
+    // NIP-19's own nsec example, and the same key as hex in either case.
+    void nip19DecodesSecretKeys()
+    {
+        const QString nsec = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
+        const QByteArray key = QByteArray::fromHex("67dea2ed018072d675f5415ecfaed7d2597555e202d85b3d65ea4e58d2d92ffa");
+        const auto decoded = [](const QString &text) { return Nip19::secretKey(text).value_or(QByteArray("none")); };
+        QCOMPARE(decoded(nsec), key);
+        QCOMPARE(decoded(" " + nsec.toUpper() + "\n"), key);
+        QCOMPARE(decoded(key.toHex()), key);
+        QCOMPARE(decoded(key.toHex().toUpper()), key);
+        // Hex in mixed case, read digit by digit, and digits outside ASCII,
+        // which a case fold or a toLatin1() copy might have let through.
+        QString mixed = key.toHex();
+        for (qsizetype i = 0; i < mixed.size(); i += 2)
+            mixed[i] = mixed[i].toUpper();
+        QCOMPARE(decoded("\t" + mixed + " "), key);
+        QVERIFY(!Nip19::secretKey(QString(key.toHex()).replace(0, 1, QChar(0xff10))));
+        QVERIFY(!Nip19::secretKey(nsec.left(nsec.size() - 1) + QChar(0x212a)));
+
+        QVERIFY(!Nip19::secretKey(nsec.left(nsec.size() - 1) + 'q'));
+        QVERIFY(!Nip19::secretKey(nsec.left(10) + nsec.mid(10).toUpper()));
+        QVERIFY(!Nip19::secretKey("nostr:" + nsec));
+        // The same bytes as an npub are a public key, not a secret one.
+        QVERIFY(!Nip19::secretKey(Nip19::npub(key.toHex())));
+        QVERIFY(!Nip19::secretKey(key.toHex().left(63)));
+        QVERIFY(!Nip19::secretKey(key.toHex() + "0"));
+        QVERIFY(!Nip19::secretKey(QString(64, 'g')));
+        QVERIFY(!Nip19::secretKey("nsec1"));
+        QVERIFY(!Nip19::secretKey(""));
+    }
+
+    // The signing vectors of BIP-340 (test-vectors.csv, indices 0 to 3),
+    // signed through LocalSigner and checked again by libsecp256k1.
+    void localSignerMatchesTheBip340Vectors_data()
+    {
+        QTest::addColumn<QByteArray>("secret");
+        QTest::addColumn<QByteArray>("pubkey");
+        QTest::addColumn<QByteArray>("aux");
+        QTest::addColumn<QByteArray>("message");
+        QTest::addColumn<QByteArray>("signature");
+        QTest::newRow("0") << QByteArray("0000000000000000000000000000000000000000000000000000000000000003")
+                           << QByteArray("F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9")
+                           << QByteArray("0000000000000000000000000000000000000000000000000000000000000000")
+                           << QByteArray("0000000000000000000000000000000000000000000000000000000000000000")
+                           << QByteArray("E907831F80848D1069A5371B402410364BDF1C5F8307B0084C55F1CE2DCA8215"
+                                         "25F66A4A85EA8B71E482A74F382D2CE5EBEEE8FDB2172F477DF4900D310536C0");
+        QTest::newRow("1") << QByteArray("B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF")
+                           << QByteArray("DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659")
+                           << QByteArray("0000000000000000000000000000000000000000000000000000000000000001")
+                           << QByteArray("243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89")
+                           << QByteArray("6896BD60EEAE296DB48A229FF71DFE071BDE413E6D43F917DC8DCF8C78DE3341"
+                                         "8906D11AC976ABCCB20B091292BFF4EA897EFCB639EA871CFA95F6DE339E4B0A");
+        QTest::newRow("2") << QByteArray("C90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B14E5C9")
+                           << QByteArray("DD308AFEC5777E13121FA72B9CC1B7CC0139715309B086C960E18FD969774EB8")
+                           << QByteArray("C87AA53824B4D7AE2EB035A2B5BBBCCC080E76CDC6D1692C4B0B62D798E6D906")
+                           << QByteArray("7E2D58D8B3BCDF1ABADEC7829054F90DDA9805AAB56C77333024B9D0A508B75C")
+                           << QByteArray("5831AAEED7B44BB74E5EAB94BA9D4294C49BCF2A60728D8B4C200F50DD313C1B"
+                                         "AB745879A5AD954A72C45A91C3A51D3C7ADEA98D82F8481E0E1E03674A6F3FB7");
+        QTest::newRow("3") << QByteArray("0B432B2677937381AEF05BB02A66ECD012773062CF3FA2549E44F58ED2401710")
+                           << QByteArray("25D1DFF95105F5253C4022F628A996AD3A0D95FBF21D468A1B33F8C160D8F517")
+                           << QByteArray("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+                           << QByteArray("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+                           << QByteArray("7EB0509757E246F19449885651611CB965ECC1A187DD51B64FDA1EDC9637D5EC"
+                                         "97582B9CB13DB3933705B32BA982AF5AF25FD78881EBB32771FC5922EFC66EA3");
+    }
+
+    void localSignerMatchesTheBip340Vectors()
+    {
+        QFETCH(QByteArray, secret);
+        QFETCH(QByteArray, pubkey);
+        QFETCH(QByteArray, aux);
+        QFETCH(QByteArray, message);
+        QFETCH(QByteArray, signature);
+        const auto signer = LocalSigner::create(QByteArray::fromHex(secret));
+        QVERIFY(signer);
+        QCOMPARE(signer->pubkey(), QString::fromLatin1(pubkey.toLower()));
+        QByteArray digest = QByteArray::fromHex(message);
+        const QByteArray made = signer->signDigest(digest, QByteArray::fromHex(aux));
+        QCOMPARE(made.toHex().toUpper(), signature);
+
+        const auto bytes = [](const QByteArray &data) { return reinterpret_cast<const unsigned char *>(data.constData()); };
+        secp256k1_xonly_pubkey xonly;
+        QVERIFY(secp256k1_xonly_pubkey_parse(secp256k1_context_static, &xonly, bytes(QByteArray::fromHex(pubkey))));
+        QVERIFY(secp256k1_schnorrsig_verify(secp256k1_context_static, bytes(made), bytes(digest), 32, &xonly));
+        digest[31] = char(digest.at(31) ^ 1);
+        QVERIFY(!secp256k1_schnorrsig_verify(secp256k1_context_static, bytes(made), bytes(digest), 32, &xonly));
+        QVERIFY(signer->signDigest(digest.left(31), QByteArray::fromHex(aux)).isEmpty());
+    }
+
+    // A secret key is a number from 1 to the group order less one.
+    void localSignerRefusesKeysOutOfRange()
+    {
+        const QByteArray order = QByteArray::fromHex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+        QVERIFY(!LocalSigner::create(QByteArray(32, '\0')));
+        QVERIFY(!LocalSigner::create(order));
+        QVERIFY(!LocalSigner::create(QByteArray(32, '\xff')));
+        QVERIFY(!LocalSigner::create(QByteArray(31, '\1')));
+        QVERIFY(!LocalSigner::create(QByteArray(33, '\1')));
+        QVERIFY(!LocalSigner::create({}));
+        QByteArray largest = order;
+        largest[31] = '\x40';
+        QVERIFY(LocalSigner::create(largest));
+        QVERIFY(LocalSigner::create(QByteArray(31, '\0') + '\1'));
+    }
+
+    // What LocalSigner signs is what the app, and so every relay and
+    // client, takes from a relay: the same canonical JSON for the id, and a
+    // signature that verifies.
+    void localSignerSignsEventsTheAppVerifies()
+    {
+        const auto signer = LocalSigner::create(QByteArray(32, '\1'));
+        QVERIFY(signer);
+        QCOMPARE(signer->pubkey(), syncPubkey());
+        NostrEvent draft;
+        draft.kind = Sync::subscriptionsKind;
+        draft.createdAt = 1700000000;
+        draft.tags = {{"d", Sync::subscriptionsTag}, {"client", "readstr"}};
+        draft.content = "Line one\n\"quoted\" \\ \u0001 é 😀";
+        // Whatever these held is replaced.
+        draft.pubkey = QString(64, 'f');
+        draft.id = draft.sig = "stale";
+
+        std::optional<std::pair<NostrEvent, QString>> result;
+        signer->sign(draft, [&](const NostrEvent &event, const QString &error) { result.emplace(event, error); });
+        QVERIFY(!result);
+        QTRY_VERIFY(result);
+        QVERIFY2(result->second.isEmpty(), qPrintable(result->second));
+        const NostrEvent event = result->first;
+        QCOMPARE(event.pubkey, syncPubkey());
+        QCOMPARE(event.id, QString::fromLatin1(
+                               QCryptographicHash::hash(event.serialized(), QCryptographicHash::Sha256).toHex()));
+        QCOMPARE(event.id, signedEvent(draft.kind, draft.content, draft.tags, draft.createdAt).value("id").toString());
+        QVERIFY(event.verify());
+        QJsonArray tags;
+        for (const QStringList &tag : event.tags)
+            tags << QJsonArray::fromStringList(tag);
+        const auto parsed = NostrEvent::fromJson(QJsonObject{{"id", event.id},
+                                                             {"pubkey", event.pubkey},
+                                                             {"created_at", event.createdAt},
+                                                             {"kind", event.kind},
+                                                             {"tags", tags},
+                                                             {"content", event.content},
+                                                             {"sig", event.sig}});
+        QVERIFY(parsed);
+        QVERIFY(parsed->verify());
+
+        // Fresh randomness for each signature: same id, another signature.
+        const auto again = signer->signNow(draft);
+        QVERIFY(again.second.isEmpty());
+        QCOMPARE(again.first.id, event.id);
+        QVERIFY(again.first.sig != event.sig);
+        QVERIFY(again.first.verify());
+
+        NostrEvent outOfRange = draft;
+        outOfRange.kind = 70000;
+        QVERIFY(signer->signNow(outOfRange).second.startsWith("Cannot sign this event"));
+        outOfRange = draft;
+        outOfRange.createdAt = -1;
+        QVERIFY(signer->signNow(outOfRange).second.startsWith("Cannot sign this event"));
+        QVERIFY(signer->signNow(outOfRange).first.sig.isEmpty());
+
+        // A signer gone before it answers never answers.
+        bool answered = false;
+        auto gone = LocalSigner::create(QByteArray(32, '\2'));
+        gone->sign(draft, [&](const NostrEvent &, const QString &) { answered = true; });
+        gone.reset();
+        QTest::qWait(50);
+        QVERIFY(!answered);
+    }
+
+    // What goes over the bus to keep a key: a "plain" session, then an item
+    // in the default collection with Readstr's attributes, replacing any.
+    void secretServiceStoresTheKeyInTheDefaultCollection()
+    {
+        FakeSecretService service;
+        QCOMPARE(QByteArray(QDBusMetaType::typeToSignature(QMetaType::fromType<SecretServiceKeyStore::Secret>())),
+                 QByteArray("(oayays)"));
+        QCOMPARE(QByteArray(QDBusMetaType::typeToSignature(QMetaType::fromType<QMap<QString, QString>>())),
+                 QByteArray("a{ss}"));
+        const QString npub = syncNpub(), session = "/org/freedesktop/secrets/session/1";
+        std::optional<KeyStore::Result> result;
+        service.store(npub, QByteArray(32, '\1'), [&](const KeyStore::Result &answer) { result = answer; });
+        QCOMPARE(service.methods(), QStringList{"Service.OpenSession /org/freedesktop/secrets"});
+        QCOMPARE(service.calls.first().service(), QString("org.freedesktop.secrets"));
+        QCOMPARE(service.calls.first().arguments().at(0).toString(), QString("plain"));
+        QCOMPARE(service.calls.first().arguments().at(1).value<QDBusVariant>().variant(), QVariant(QString()));
+        service.reply({QVariant::fromValue(QDBusVariant(QString())), QVariant::fromValue(QDBusObjectPath(session))});
+
+        QCOMPARE(service.methods().last(), QString("Collection.CreateItem /org/freedesktop/secrets/aliases/default"));
+        const QVariantList create = service.calls.last().arguments();
+        const QVariantMap properties = create.at(0).toMap();
+        QCOMPARE(properties.value("org.freedesktop.Secret.Item.Label").toString(), "Readstr Nostr key (" + npub + ")");
+        using Attributes = QMap<QString, QString>;
+        const Attributes attributes{{"application", "readstr"}, {"npub", npub}};
+        QCOMPARE(properties.value("org.freedesktop.Secret.Item.Attributes").value<Attributes>(), attributes);
+        const auto secret = create.at(1).value<SecretServiceKeyStore::Secret>();
+        QCOMPARE(secret.session.path(), session);
+        QVERIFY(secret.parameters.isEmpty());
+        QCOMPARE(secret.value, QByteArray(32, '\1').toHex());
+        QCOMPARE(secret.contentType, QString("text/plain"));
+        QCOMPARE(create.at(2).toBool(), true);
+        QVERIFY(!result);
+        service.reply({QVariant::fromValue(QDBusObjectPath("/org/freedesktop/secrets/collection/login/7")),
+                       QVariant::fromValue(QDBusObjectPath("/"))});
+        QCOMPARE(service.methods().last(), "Session.Close " + session);
+        QVERIFY(result);
+        QVERIFY(result->error == KeyStore::Error::None);
+        // The hex the sent message held is wiped where it is, not in a copy.
+        QCOMPARE(service.calls.at(1).arguments().at(1).value<SecretServiceKeyStore::Secret>().value,
+                 QByteArray(64, '\0'));
+    }
+
+    // A locked collection is unlocked through the service's prompt, once;
+    // a dismissed prompt and a collection still locked are told apart.
+    void secretServiceUnlocksThroughThePrompt()
+    {
+        const QString npub = syncNpub(), prompt = "/org/freedesktop/secrets/prompt/u1";
+        const QVariantList session{QVariant::fromValue(QDBusVariant(QString())),
+                                   QVariant::fromValue(QDBusObjectPath("/org/freedesktop/secrets/session/1"))};
+        const auto path = [](const QString &path) { return QVariant::fromValue(QDBusObjectPath(path)); };
+        const auto paths = [](const QStringList &list) {
+            QList<QDBusObjectPath> paths;
+            for (const QString &path : list)
+                paths << QDBusObjectPath(path);
+            return QVariant::fromValue(paths);
+        };
+        std::optional<KeyStore::Result> result;
+        const auto keep = [&](const KeyStore::Result &answer) { result = answer; };
+        {
+            FakeSecretService service;
+            service.store(npub, QByteArray(32, '\1'), keep);
+            service.reply(session);
+            service.fail("org.freedesktop.Secret.Error.IsLocked", "locked");
+            QCOMPARE(service.methods().last(), QString("Service.Unlock /org/freedesktop/secrets"));
+            const QList<QDBusObjectPath> collection{QDBusObjectPath("/org/freedesktop/secrets/aliases/default")};
+            QCOMPARE(qdbus_cast<QList<QDBusObjectPath>>(service.calls.last().arguments().at(0)), collection);
+            service.reply({paths({}), path(prompt)});
+            QCOMPARE(service.listening, QStringList{prompt});
+            QCOMPARE(service.methods().last(), "Prompt.Prompt " + prompt);
+            QCOMPARE(service.calls.last().arguments(), QVariantList{QString()});
+            service.reply({});
+            service.completed("/org/freedesktop/secrets/prompt/other", false, {});
+            QCOMPARE(service.listening, QStringList{prompt});
+            service.completed(prompt, false, {});
+            QVERIFY(service.listening.isEmpty());
+            QCOMPARE(service.methods().last(), QString("Collection.CreateItem /org/freedesktop/secrets/aliases/default"));
+            // Still locked after the prompt: no second round.
+            service.fail("org.freedesktop.Secret.Error.IsLocked");
+            QVERIFY(result);
+            QVERIFY(result->error == KeyStore::Error::Locked);
+            QCOMPARE(service.methods().last(), QString("Session.Close /org/freedesktop/secrets/session/1"));
+        }
+        {
+            // A service that prompts for the item itself, dismissed.
+            result.reset();
+            FakeSecretService service;
+            service.store(npub, QByteArray(32, '\1'), keep);
+            service.reply(session);
+            service.reply({path("/"), path(prompt)});
+            service.reply({});
+            QVERIFY(!result);
+            service.completed(prompt, true, {});
+            QVERIFY(result);
+            QVERIFY(result->error == KeyStore::Error::Dismissed);
+        }
+        {
+            // Reading a locked item unlocks it first.
+            result.reset();
+            FakeSecretService service;
+            service.lookup(npub, keep);
+            QCOMPARE(service.methods(), QStringList{"Service.SearchItems /org/freedesktop/secrets"});
+            using Attributes = QMap<QString, QString>;
+            QCOMPARE(qdbus_cast<Attributes>(service.calls.first().arguments().at(0)),
+                     SecretServiceKeyStore::attributes(npub));
+            const QString item = "/org/freedesktop/secrets/collection/login/7";
+            service.reply({paths({}), paths({item})});
+            QCOMPARE(service.methods().last(), QString("Service.Unlock /org/freedesktop/secrets"));
+            service.reply({paths({item}), path("/")});
+            QCOMPARE(service.methods().last(), QString("Service.OpenSession /org/freedesktop/secrets"));
+            service.reply(session);
+            QCOMPARE(service.methods().last(), "Item.GetSecret " + item);
+            QCOMPARE(service.calls.last().arguments().at(0).value<QDBusObjectPath>().path(),
+                     QString("/org/freedesktop/secrets/session/1"));
+            SecretServiceKeyStore::Secret secret{QDBusObjectPath("/org/freedesktop/secrets/session/1"), {},
+                                                 QByteArray(32, '\1').toHex(), "text/plain"};
+            service.reply({QVariant::fromValue(secret)});
+            QCOMPARE(service.methods().last(), QString("Session.Close /org/freedesktop/secrets/session/1"));
+            QVERIFY(result);
+            QVERIFY(result->error == KeyStore::Error::None);
+            QVERIFY(result->found);
+            QCOMPARE(result->secret, QByteArray(32, '\1'));
+        }
+    }
+
+    // Whether a key is there costs one search, which unlocks and reads
+    // nothing; no Secret Service is told apart from any other failure.
+    void secretServiceFindsAndDeletesWithoutReading()
+    {
+        const QString npub = syncNpub(), item = "/org/freedesktop/secrets/collection/login/7";
+        const auto paths = [](const QStringList &list) {
+            QList<QDBusObjectPath> paths;
+            for (const QString &path : list)
+                paths << QDBusObjectPath(path);
+            return QVariant::fromValue(paths);
+        };
+        std::optional<KeyStore::Result> result;
+        const auto keep = [&](const KeyStore::Result &answer) { result = answer; };
+        FakeSecretService service;
+        service.contains(npub, keep);
+        service.reply({paths({}), paths({item})});
+        QVERIFY(result && result->error == KeyStore::Error::None && result->found);
+        QVERIFY(result->secret.isEmpty());
+        service.contains(npub, keep);
+        service.reply({paths({}), paths({})});
+        QVERIFY(result && !result->found);
+        QCOMPARE(service.methods(), QStringList({"Service.SearchItems /org/freedesktop/secrets",
+                                                 "Service.SearchItems /org/freedesktop/secrets"}));
+
+        service.remove(npub, keep);
+        service.reply({paths({item}), paths({})});
+        QCOMPARE(service.methods().last(), "Item.Delete " + item);
+        result.reset();
+        service.reply({QVariant::fromValue(QDBusObjectPath("/"))});
+        QVERIFY(result && result->error == KeyStore::Error::None && result->found);
+
+        // A reply of the wrong shape is a failure, not a key.
+        service.lookup(npub, keep);
+        service.reply({QString("not paths"), paths({})});
+        QVERIFY(result && result->error == KeyStore::Error::Failed);
+        QVERIFY(!result->found);
+
+        result.reset();
+        service.contains(npub, keep);
+        service.fail("org.freedesktop.DBus.Error.ServiceUnknown", "The name is not activatable");
+        QVERIFY(result && result->error == KeyStore::Error::Unavailable);
+        result.reset();
+        service.contains(npub, keep);
+        service.fail("org.freedesktop.DBus.Error.NoReply", "Timed out");
+        QVERIFY(result && result->error == KeyStore::Error::Failed);
+        QCOMPARE(result->detail, QString("Timed out"));
+
+        const qsizetype calls = service.calls.size();
+        service.bus = false;
+        result.reset();
+        service.store(npub, QByteArray(32, '\1'), keep);
+        QVERIFY(!result);
+        QTRY_VERIFY(result);
+        QVERIFY(result->error == KeyStore::Error::Unavailable);
+        QCOMPARE(service.calls.size(), calls);
+    }
+
+    // A prompt that never completes fails once its time is up, and closes,
+    // and one whose service leaves the bus fails at once; neither answers
+    // twice when a late Completed comes.
+    void secretServiceGivesUpOnAPromptThatNeverCompletes()
+    {
+        const QString npub = syncNpub(), item = "/org/freedesktop/secrets/collection/login/7";
+        const QString prompt = "/org/freedesktop/secrets/prompt/u1";
+        const QVariant noItems = QVariant::fromValue(QList<QDBusObjectPath>());
+        const QVariant lockedItem = QVariant::fromValue(QList<QDBusObjectPath>{QDBusObjectPath(item)});
+        QList<KeyStore::Result> results;
+        const auto keep = [&](const KeyStore::Result &answer) { results << answer; };
+        FakeSecretService service;
+        service.setPromptTimeout(std::chrono::milliseconds(30));
+        service.lookup(npub, keep);
+        service.reply({noItems, lockedItem});
+        service.reply({noItems, QVariant::fromValue(QDBusObjectPath(prompt))});
+        service.reply({});
+        QCOMPARE(service.listening, QStringList{prompt});
+        QTRY_COMPARE(results.size(), 1);
+        QVERIFY(results.first().error == KeyStore::Error::Failed);
+        QCOMPARE(results.first().detail, QString("The keyring's prompt was not answered in time."));
+        QVERIFY(service.listening.isEmpty());
+        QCOMPARE(service.methods().last(), "Prompt.Dismiss " + prompt);
+        service.completed(prompt, false, {});
+        QTest::qWait(50);
+        QCOMPARE(results.size(), 1);
+
+        FakeSecretService lost;
+        lost.lookup(npub, keep);
+        lost.reply({noItems, lockedItem});
+        lost.reply({noItems, QVariant::fromValue(QDBusObjectPath(prompt))});
+        lost.serviceLost();
+        QCOMPARE(results.size(), 2);
+        QVERIFY(results.last().error == KeyStore::Error::Failed);
+        QCOMPARE(results.last().detail, QString("The keyring went away before its prompt was answered."));
+        QVERIFY(lost.listening.isEmpty());
+        // The Prompt call's own error, after that, answers no one again.
+        lost.fail("org.freedesktop.DBus.Error.NoReply");
+        lost.completed(prompt, true, {});
+        QCOMPARE(results.size(), 2);
+    }
+
+    // Two requests given the same prompt path cannot be told apart by its
+    // one Completed signal: the second fails at once, and the first is still
+    // answered when the prompt completes.
+    void secretServiceRefusesASecondWaitOnTheSamePrompt()
+    {
+        const QString npub = syncNpub(), item = "/org/freedesktop/secrets/collection/login/7";
+        const QString prompt = "/org/freedesktop/secrets/prompt/u1";
+        const QVariant noItems = QVariant::fromValue(QList<QDBusObjectPath>());
+        const QVariant lockedItem = QVariant::fromValue(QList<QDBusObjectPath>{QDBusObjectPath(item)});
+        QList<KeyStore::Result> first, second;
+        FakeSecretService service;
+        service.lookup(npub, [&](const KeyStore::Result &answer) { first << answer; });
+        service.lookup(npub, [&](const KeyStore::Result &answer) { second << answer; });
+        service.reply({noItems, lockedItem});
+        service.reply({noItems, lockedItem});
+        service.reply({noItems, QVariant::fromValue(QDBusObjectPath(prompt))});
+        service.reply({noItems, QVariant::fromValue(QDBusObjectPath(prompt))});
+        QVERIFY(first.isEmpty());
+        QCOMPARE(second.size(), 1);
+        QVERIFY(second.first().error == KeyStore::Error::Failed);
+        QCOMPARE(second.first().detail, QString("The keyring gave the same prompt to two requests."));
+        QCOMPARE(service.listening, QStringList{prompt});
+        service.completed(prompt, true, {});
+        QCOMPARE(first.size(), 1);
+        QVERIFY(first.first().error == KeyStore::Error::Dismissed);
+        QCOMPARE(second.size(), 1);
+        QVERIFY(service.listening.isEmpty());
+    }
+
+    // Any program of this user's can add items with Readstr's attributes, so
+    // the read passes over one that is not the account's key, whether junk
+    // or another key, and takes the one that is.
+    void secretServicePassesOverItemsThatAreNotTheKey()
+    {
+        const QString npub = syncNpub(), session = "/org/freedesktop/secrets/session/1";
+        const QString junk = "/org/freedesktop/secrets/collection/login/1",
+                      wrong = "/org/freedesktop/secrets/collection/login/2",
+                      real = "/org/freedesktop/secrets/collection/login/3";
+        const auto paths = [](const QStringList &list) {
+            QList<QDBusObjectPath> paths;
+            for (const QString &path : list)
+                paths << QDBusObjectPath(path);
+            return QVariant::fromValue(paths);
+        };
+        const QVariantList opened{QVariant::fromValue(QDBusVariant(QString())),
+                                  QVariant::fromValue(QDBusObjectPath(session))};
+        const auto secret = [&](const QByteArray &value) {
+            return QVariantList{QVariant::fromValue(
+                SecretServiceKeyStore::Secret{QDBusObjectPath(session), {}, value, "text/plain"})};
+        };
+        std::optional<KeyStore::Result> result;
+        const auto keep = [&](const KeyStore::Result &answer) { result = answer; };
+        {
+            FakeSecretService service;
+            service.lookup(npub, keep);
+            service.reply({paths({junk, wrong}), paths({real})});
+            service.reply(opened);
+            QCOMPARE(service.methods().last(), "Item.GetSecret " + junk);
+            service.reply(secret("not a key"));
+            QCOMPARE(service.methods().mid(3),
+                     QStringList({"Session.Close " + session, "Service.OpenSession /org/freedesktop/secrets"}));
+            service.reply({});
+            service.reply(opened);
+            QCOMPARE(service.methods().last(), "Item.GetSecret " + wrong);
+            service.reply(secret(QByteArray(32, '\2').toHex()));
+            service.reply({});
+            QVERIFY(!result);
+            // The locked one is unlocked only once the others are passed over.
+            QCOMPARE(service.methods().last(), QString("Service.Unlock /org/freedesktop/secrets"));
+            service.reply({paths({real}), QVariant::fromValue(QDBusObjectPath("/"))});
+            service.reply(opened);
+            QCOMPARE(service.methods().last(), "Item.GetSecret " + real);
+            service.reply(secret(QByteArray(32, '\1').toHex()));
+            QVERIFY(result);
+            QVERIFY(result->error == KeyStore::Error::None);
+            QVERIFY(result->found);
+            QCOMPARE(result->secret, QByteArray(32, '\1'));
+            QCOMPARE(service.methods().count("Session.Close " + session), 3);
+        }
+        {
+            result.reset();
+            FakeSecretService service;
+            service.lookup(npub, keep);
+            service.reply({paths({junk}), paths({})});
+            service.reply(opened);
+            service.reply(secret(QByteArray(32, '\2').toHex()));
+            QVERIFY(result);
+            QVERIFY(result->error == KeyStore::Error::Failed);
+            QCOMPARE(result->detail, QString("No item in the keyring holds this account's key."));
+            QVERIFY(result->secret.isEmpty());
+        }
+    }
+
     void nostrSourceKeepsTheLatestVersionOfEachArticle()
     {
         QList<NostrEvent> events;
@@ -5000,6 +5612,793 @@ private slots:
         Store store;
         QVERIFY(store.open());
         QVERIFY(store.feeds().first().lastFetchedAt.isValid());
+    }
+
+    // The account's key goes to the keyring only when it is the account's,
+    // is read back from it only to sign, once, and goes with "Forget key".
+    void backendKeepsTheSigningKeyInTheKeyring()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub(), shortNpub = Nip19::shortNpub(npub, npub);
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setKeyStore(&keys);
+        QVERIFY(backend.signingBusy());
+        QTRY_VERIFY(!backend.signingBusy());
+        QVERIFY(!backend.signingKeyStored());
+        QVERIFY(backend.signingError().isEmpty());
+
+        // Another account's key, or no key at all, is refused, and nothing
+        // reaches the keyring.
+        QVERIFY(!backend.addSigningKey(QByteArray(32, '\2').toHex()));
+        QCOMPARE(backend.signingError(), "That key is not the one for " + shortNpub);
+        QVERIFY(!backend.addSigningKey("nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5"));
+        QCOMPARE(backend.signingError(), "That key is not the one for " + shortNpub);
+        QVERIFY(!backend.addSigningKey("nsec1notakey"));
+        QCOMPARE(backend.signingError(), QString("That is not an nsec or a 64-character hex secret key"));
+        QVERIFY(!backend.addSigningKey(QString(64, '0')));
+        QCOMPARE(backend.signingError(), QString("That is not an nsec or a 64-character hex secret key"));
+        QVERIFY(!backend.addSigningKey(npub));
+        QTest::qWait(20);
+        QCOMPARE(keys.calls, QStringList{"contains " + npub});
+        QVERIFY(keys.keys.isEmpty());
+        QVERIFY(!backend.signingKeyStored());
+
+        QVERIFY(backend.addSigningKey(" " + QByteArray(32, '\1').toHex().toUpper() + " "));
+        QVERIFY(backend.signingError().isEmpty());
+        QTRY_VERIFY(backend.signingKeyStored());
+        QVERIFY(!backend.signingBusy());
+        QCOMPARE(keys.keys.value(npub), QByteArray(32, '\1'));
+        QCOMPARE(keys.calls, QStringList({"contains " + npub, "store " + npub}));
+
+        // Read once, for the first event signed, and kept for the next.
+        NostrEvent draft;
+        draft.kind = Sync::subscriptionsKind;
+        draft.createdAt = 1700000000;
+        draft.tags = {{"d", Sync::subscriptionsTag}};
+        draft.content = "{}";
+        QList<NostrEvent> signedEvents;
+        QStringList errors;
+        const auto keep = [&](const NostrEvent &event, const QString &error) {
+            signedEvents << event;
+            errors << error;
+        };
+        backend.sign(draft, keep);
+        backend.sign(draft, keep);
+        QTRY_COMPARE(signedEvents.size(), 2);
+        backend.sign(draft, keep);
+        QTRY_COMPARE(signedEvents.size(), 3);
+        QCOMPARE(errors, QStringList({"", "", ""}));
+        for (const NostrEvent &event : std::as_const(signedEvents)) {
+            QCOMPARE(event.pubkey, syncPubkey());
+            QVERIFY(event.verify());
+        }
+        QCOMPARE(keys.calls.count("lookup " + npub), 1);
+
+        backend.forgetSigningKey();
+        QTRY_VERIFY(!backend.signingKeyStored());
+        QVERIFY(keys.keys.isEmpty());
+        QCOMPARE(keys.calls.last(), "remove " + npub);
+        backend.sign(draft, keep);
+        QTRY_COMPARE(errors.size(), 4);
+        QCOMPARE(errors.last(), "No signing key is stored for " + shortNpub);
+        QCOMPARE(keys.calls.count("lookup " + npub), 1);
+    }
+
+    // On launch the keyring is only asked whether it holds a key, which
+    // reads nothing, and a key put there by another program is checked
+    // against the account before anything is signed with it.
+    void backendOnlyAsksWhetherAKeyIsStored()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeKeyStore keys;
+        keys.keys.insert(npub, QByteArray(32, '\2'));
+        Backend backend;
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+        QTest::qWait(20);
+        QCOMPARE(keys.calls, QStringList{"contains " + npub});
+
+        QString error;
+        backend.sign({}, [&](const NostrEvent &, const QString &answer) { error = answer; });
+        QTRY_VERIFY(!error.isEmpty());
+        QCOMPARE(error, "The key in the keyring is not the one for " + Nip19::shortNpub(npub, npub));
+
+        // Without an account there is no key to keep.
+        backend.stopSync();
+        QTRY_VERIFY(backend.syncNpub().isEmpty());
+        QVERIFY(!backend.signingKeyStored());
+        QVERIFY(!backend.addSigningKey(QByteArray(32, '\1').toHex()));
+        QCOMPARE(backend.signingError(), QString("Sync with an npub before adding its signing key"));
+        QCOMPARE(keys.calls, QStringList({"contains " + npub, "lookup " + npub}));
+    }
+
+    // Without a Secret Service the dialog says so, and nothing weaker keeps
+    // the key: no trace of it is left in Readstr's files.
+    void backendSaysWhenNoSecretServiceRuns()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QByteArray secret = QByteArray(32, '\1').toHex();
+        FakeKeyStore keys;
+        keys.error = KeyStore::Error::Unavailable;
+        {
+            Backend backend;
+            backend.setKeyStore(&keys);
+            QTRY_VERIFY(!backend.signingBusy());
+            QVERIFY(backend.signingError().startsWith("No Secret Service is running"));
+            QVERIFY(backend.addSigningKey(secret));
+            QTRY_VERIFY(!backend.signingBusy());
+            QVERIFY(backend.signingError().startsWith("No Secret Service is running"));
+            QVERIFY(!backend.signingKeyStored());
+
+            keys.error = KeyStore::Error::Dismissed;
+            QVERIFY(backend.addSigningKey(secret));
+            QTRY_COMPARE(backend.signingError(), QString("The keyring prompt was dismissed."));
+            keys.error = KeyStore::Error::Locked;
+            QVERIFY(backend.addSigningKey(secret));
+            QTRY_COMPARE(backend.signingError(), QString("The keyring is locked. Unlock it and try again."));
+            QVERIFY(!backend.signingKeyStored());
+            QVERIFY(keys.keys.isEmpty());
+
+            // No store at all, as before one is set, is no Secret Service.
+            Backend bare;
+            QVERIFY(!bare.addSigningKey(secret));
+            QVERIFY(bare.signingError().startsWith("No Secret Service is running"));
+        }
+        QDirIterator files(dir.path(), QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
+        int checked = 0;
+        while (files.hasNext()) {
+            QFile file(files.next());
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            const QByteArray contents = file.readAll();
+            QVERIFY2(!contents.contains(secret) && !contents.contains(secret.toUpper())
+                         && !contents.contains(QByteArray(32, '\1')),
+                     qPrintable(file.fileName()));
+            ++checked;
+        }
+        QVERIFY(checked > 0);
+    }
+
+    // The dialog's key field: masked, cleared as soon as it is submitted or
+    // the dialog closes, and the key kept only when it is the account's.
+    void syncDialogAddsAndForgetsTheSigningKey()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setKeyStore(&keys);
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty(
+            "theme", QVariantMap{{"radius", 0}, {"background", "#000000"}, {"foreground", "#ffffff"}});
+        engine.rootContext()->setContextProperty("translator", QVariantMap{{"language", "en"}});
+        QQmlComponent component(&engine);
+        component.setData("import QtQuick\nimport QtQuick.Controls\n"
+                          "ApplicationWindow { width: 800; height: 600; property alias dialog: dialog\n"
+                          " SyncDialog { id: dialog } }\n",
+                          QUrl("qrc:/probe.qml"));
+        std::unique_ptr<QObject> window(component.create());
+        QVERIFY2(window, qPrintable(component.errorString()));
+        QObject *dialog = window->property("dialog").value<QObject *>();
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        QObject *field = window->findChild<QObject *>("signingKeyField");
+        QObject *add = window->findChild<QObject *>("addSigningKeyButton");
+        QObject *forget = window->findChild<QObject *>("forgetSigningKeyButton");
+        QObject *error = window->findChild<QObject *>("signingErrorLabel");
+        QVERIFY(field && add && forget && error);
+        QTRY_VERIFY(!backend.signingBusy());
+        QCOMPARE(field->property("echoMode").toInt(), 2);
+        QVERIFY(field->property("visible").toBool());
+        QVERIFY(!forget->property("visible").toBool());
+
+        // Typed, so that it is in the field's undo history, as a key the
+        // user pastes would be; once submitted, undo cannot bring it back.
+        const auto type = [field](const QString &text) {
+            QVERIFY(QMetaObject::invokeMethod(field, "insert", Q_ARG(int, 0), Q_ARG(QString, text)));
+            QCOMPARE(field->property("text").toString(), text);
+            QVERIFY(field->property("canUndo").toBool());
+        };
+        const auto undoneToNothing = [field] {
+            QVERIFY(!field->property("canUndo").toBool());
+            QVERIFY(QMetaObject::invokeMethod(field, "undo"));
+            QCOMPARE(field->property("text").toString(), QString());
+        };
+        type(QString(QByteArray(32, '\2').toHex()));
+        QVERIFY(add->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(add, "clicked"));
+        QCOMPARE(field->property("text").toString(), QString());
+        undoneToNothing();
+        QVERIFY(error->property("visible").toBool());
+        QVERIFY(error->property("text").toString().startsWith("That key is not the one for npub1"));
+        QVERIFY(keys.keys.isEmpty());
+
+        type(QString(QByteArray(32, '\1').toHex()));
+        QVERIFY(QMetaObject::invokeMethod(field, "accepted"));
+        QCOMPARE(field->property("text").toString(), QString());
+        undoneToNothing();
+        QTRY_VERIFY(forget->property("visible").toBool());
+        QVERIFY(!error->property("visible").toBool());
+        QCOMPARE(keys.keys.value(syncNpub()), QByteArray(32, '\1'));
+
+        QVERIFY(QMetaObject::invokeMethod(forget, "clicked"));
+        QTRY_VERIFY(!backend.signingKeyStored());
+        QVERIFY(keys.keys.isEmpty());
+        QTRY_VERIFY(field->property("visible").toBool());
+
+        // Typed and never submitted, it goes with the dialog.
+        type("nsec1typed");
+        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        QTRY_COMPARE(field->property("text").toString(), QString());
+        undoneToNothing();
+        QVERIFY(keys.keys.isEmpty());
+    }
+
+    // "Stop syncing" clears the account either way, and removes its key
+    // from the keyring only when asked to, saying so in the status bar.
+    void backendStopsSyncingWithOrWithoutTheKey()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString npub = syncNpub(), shortNpub = Nip19::shortNpub(npub, npub);
+        FakeKeyStore keys;
+        // A fresh window over a library syncing with the test key, whose
+        // key the keyring holds.
+        const auto loggedIn = [&] {
+            seedSyncAccount();
+            keys.error = KeyStore::Error::None;
+            keys.keys.insert(npub, QByteArray(32, '\1'));
+            auto backend = std::make_unique<Backend>();
+            backend->setKeyStore(&keys);
+            return backend;
+        };
+
+        {
+            auto backend = loggedIn();
+            QTRY_VERIFY(backend->signingKeyStored());
+            backend->stopSync(false);
+            QTRY_VERIFY(backend->syncNpub().isEmpty());
+            QCOMPARE(backend->status(), "Stopped syncing with " + shortNpub);
+            QVERIFY(!backend->statusError());
+            QVERIFY(!backend->signingKeyStored());
+            QTest::qWait(20);
+            QCOMPARE(keys.keys.value(npub), QByteArray(32, '\1'));
+            QVERIFY(!keys.calls.contains("remove " + npub));
+        }
+        {
+            auto backend = loggedIn();
+            QTRY_VERIFY(backend->signingKeyStored());
+            backend->stopSync(true);
+            QTRY_VERIFY(keys.keys.isEmpty());
+            QVERIFY(backend->syncNpub().isEmpty());
+            QTRY_COMPARE(backend->status(), "Stopped syncing with " + shortNpub + " and removed its signing key");
+            QVERIFY(!backend->statusError());
+            QCOMPARE(keys.calls.last(), "remove " + npub);
+        }
+        // A removal that fails still clears the account, and says why the
+        // key is still there.
+        for (const auto &[error, reason] :
+             {std::pair(KeyStore::Error::Dismissed, QString("The keyring prompt was dismissed.")),
+              std::pair(KeyStore::Error::Unavailable, QString("No Secret Service is running"))}) {
+            auto backend = loggedIn();
+            QTRY_VERIFY(backend->signingKeyStored());
+            keys.error = error;
+            backend->stopSync(true);
+            QTRY_VERIFY(backend->syncNpub().isEmpty());
+            const QString expected =
+                "Stopped syncing with " + shortNpub + ", but its signing key could not be removed: " + reason;
+            QTRY_VERIFY2(backend->status().startsWith(expected), qPrintable(backend->status()));
+            QVERIFY(backend->statusError());
+            QCOMPARE(keys.keys.value(npub), QByteArray(32, '\1'));
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.syncAccount().npub.isEmpty());
+        }
+    }
+
+    // With a key stored, "Stop syncing" asks in the dialog whether to remove
+    // it too, "Remove key" being the default that Enter takes; without one
+    // it just stops.
+    void syncDialogAsksWhetherStopRemovesTheKey()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString npub = syncNpub();
+        FakeKeyStore keys;
+        // How the user answers, given the window and the dialog's parts.
+        using Answer = std::function<void(QQuickWindow *, QObject *keep, QObject *remove)>;
+        const auto stopWith = [&](bool keyStored, const Answer &answer) {
+            seedSyncAccount();
+            keys.keys.clear();
+            if (keyStored)
+                keys.keys.insert(npub, QByteArray(32, '\1'));
+            Backend backend;
+            backend.setKeyStore(&keys);
+            QQmlEngine engine;
+            engine.rootContext()->setContextProperty("backend", &backend);
+            engine.rootContext()->setContextProperty(
+                "theme", QVariantMap{{"radius", 0}, {"background", "#000000"}, {"foreground", "#ffffff"}});
+            engine.rootContext()->setContextProperty("translator", QVariantMap{{"language", "en"}});
+            QQmlComponent component(&engine);
+            component.setData("import QtQuick\nimport QtQuick.Controls\n"
+                              "ApplicationWindow { width: 800; height: 600; visible: true\n"
+                              " property alias dialog: dialog\n SyncDialog { id: dialog } }\n",
+                              QUrl("qrc:/probe.qml"));
+            std::unique_ptr<QObject> root(component.create());
+            QVERIFY2(root, qPrintable(component.errorString()));
+            auto *window = qobject_cast<QQuickWindow *>(root.get());
+            window->requestActivate();
+            QVERIFY(QTest::qWaitForWindowActive(window));
+            QObject *dialog = root->property("dialog").value<QObject *>();
+            QObject *stop = root->findChild<QObject *>("stopSyncButton");
+            QObject *keep = root->findChild<QObject *>("keepKeyButton");
+            QObject *remove = root->findChild<QObject *>("removeKeyButton");
+            QObject *confirmation = root->findChild<QObject *>("stopSyncConfirmation");
+            QVERIFY(stop && keep && remove && confirmation);
+            QTRY_COMPARE(backend.signingKeyStored(), keyStored);
+            QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+            QTRY_VERIFY(dialog->property("opened").toBool());
+            QVERIFY(stop->property("visible").toBool());
+            QVERIFY(!keep->property("visible").toBool());
+            QVERIFY(QMetaObject::invokeMethod(stop, "clicked"));
+            if (keyStored) {
+                QVERIFY(confirmation->property("visible").toBool());
+                QVERIFY(!stop->property("visible").toBool());
+                QVERIFY(keep->property("visible").toBool());
+                QVERIFY(remove->property("visible").toBool());
+                QVERIFY(remove->property("highlighted").toBool());
+                // Nothing changes until the user answers.
+                const qsizetype removals = keys.calls.count("remove " + npub);
+                QTest::qWait(20);
+                QCOMPARE(backend.syncNpub(), npub);
+                QCOMPARE(keys.calls.count("remove " + npub), removals);
+                answer(window, keep, remove);
+            } else {
+                QVERIFY(!confirmation->property("visible").toBool());
+            }
+            QTRY_VERIFY(!dialog->property("visible").toBool());
+            QTRY_VERIFY(backend.syncNpub().isEmpty());
+            QTest::qWait(20);
+        };
+
+        stopWith(true, [](QQuickWindow *, QObject *keep, QObject *) {
+            QVERIFY(QMetaObject::invokeMethod(keep, "clicked"));
+        });
+        QCOMPARE(keys.keys.value(npub), QByteArray(32, '\1'));
+        QVERIFY(!keys.calls.contains("remove " + npub));
+
+        stopWith(true, [](QQuickWindow *window, QObject *, QObject *) { QTest::keyClick(window, Qt::Key_Return); });
+        QVERIFY(keys.keys.isEmpty());
+        QCOMPARE(keys.calls.count("remove " + npub), 1);
+
+        stopWith(true, [](QQuickWindow *, QObject *, QObject *remove) {
+            QVERIFY(QMetaObject::invokeMethod(remove, "clicked"));
+        });
+        QVERIFY(keys.keys.isEmpty());
+        QCOMPARE(keys.calls.count("remove " + npub), 2);
+
+        stopWith(false, {});
+        QCOMPARE(keys.calls.count("remove " + npub), 2);
+    }
+
+    // A key forgotten while a read of it waits on an unlock prompt stays
+    // forgotten: the read's answer, when it comes, brings no signer back.
+    void backendForgetDuringALookupKeepsTheKeyForgotten()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub(), shortNpub = Nip19::shortNpub(npub, npub);
+        FakeKeyStore keys;
+        keys.keys.insert(npub, QByteArray(32, '\1'));
+        Backend backend;
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+        QTRY_VERIFY(!backend.signingBusy());
+        QStringList errors;
+        const auto keep = [&](const NostrEvent &, const QString &error) { errors << error; };
+
+        keys.hold = true;
+        backend.sign(signingDraft(), keep);
+        QCOMPARE(keys.calls.last(), "lookup " + npub);
+        backend.forgetSigningKey();
+        // The removal waits its turn behind the read.
+        QCOMPARE(keys.held(), 1);
+        keys.hold = false;
+        keys.release();
+        QTRY_VERIFY(!backend.signingBusy());
+        QVERIFY(keys.keys.isEmpty());
+        QVERIFY(!backend.signingKeyStored());
+        QTRY_COMPARE(errors.size(), 1);
+        QCOMPARE(errors.first(), QString("The signing key was forgotten before the event was signed"));
+
+        backend.sign(signingDraft(), keep);
+        QTRY_COMPARE(errors.size(), 2);
+        QCOMPARE(errors.last(), "No signing key is stored for " + shortNpub);
+        QCOMPARE(keys.calls.count("lookup " + npub), 1);
+    }
+
+    // A sign handed to the signer is answered even when the signer goes
+    // before it answers, whatever drops it, and answered only once.
+    void backendAnswersASignTheSignerDropped()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeKeyStore keys;
+        keys.keys.insert(npub, QByteArray(32, '\1'));
+        Backend backend;
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+        QList<QStringList> answers(4);
+        const auto keepAs = [&](int sign) {
+            return [&answers, sign](const NostrEvent &event, const QString &error) {
+                answers[sign] << (error.isEmpty() && event.verify() ? QString("signed") : error);
+            };
+        };
+        backend.sign(signingDraft(), keepAs(0));
+        QTRY_COMPARE(answers[0], QStringList{"signed"});
+
+        backend.sign(signingDraft(), keepAs(1));
+        backend.forgetSigningKey();
+        QTRY_VERIFY(!backend.signingKeyStored());
+        QVERIFY(backend.addSigningKey(QByteArray(32, '\1').toHex()));
+        QTRY_VERIFY(backend.signingKeyStored());
+        backend.sign(signingDraft(), keepAs(2));
+        QTRY_COMPARE(answers[2], QStringList{"signed"});
+        backend.sign(signingDraft(), keepAs(3));
+        backend.setKeyStore(&keys);
+        QTest::qWait(50);
+        QCOMPARE(answers[0], QStringList{"signed"});
+        QCOMPARE(answers[1], QStringList{"The signing key was forgotten before the event was signed"});
+        QCOMPARE(answers[2], QStringList{"signed"});
+        QCOMPARE(answers[3], QStringList{"The sync account changed before the event was signed"});
+    }
+
+    // Every sign gets exactly one answer however keyring calls, account
+    // switches, and signs interleave, and none is signed by another key.
+    // The seed fixes the order of the calls; the keyring answers in 0 to 2
+    // ms drawn from it, so they overlap.
+    void backendAnswersEverySignOnceWhateverTheInterleaving()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME", "READSTR_RELAYS"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        qputenv("READSTR_RELAYS", relay.url().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        const auto other = LocalSigner::create(QByteArray(32, '\3'));
+        const QString otherNpub = Nip19::npub(other->pubkey());
+        const quint32 seed = 20261122;
+        QRandomGenerator random(seed);
+        FakeKeyStore keys;
+        keys.delays = &random;
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setKeyStore(&keys);
+        QHash<int, int> answers;
+        int issued = 0, answered = 0, foreign = 0, signedCount = 0;
+        for (int step = 0; step < 3000; ++step) {
+            // The key of whichever account is synced, so that it is stored
+            // and read often enough for signers to come and go.
+            const QByteArray own(32, backend.syncNpub() == otherNpub ? '\3' : '\1');
+            switch (random.bounded(14)) {
+            case 0:
+            case 1:
+                backend.addSigningKey(own.toHex());
+                break;
+            case 2:
+                backend.addSigningKey(QByteArray(32, '\4').toHex());
+                break;
+            case 3:
+                backend.forgetSigningKey();
+                break;
+            case 4:
+                backend.checkSigningKey();
+                break;
+            case 5:
+                if (random.bounded(8) == 0)
+                    backend.stopSync(random.bounded(2));
+                else if (random.bounded(4) == 0)
+                    backend.setSyncNpub(random.bounded(2) ? npub : otherNpub);
+                break;
+            default: {
+                NostrEvent draft = signingDraft();
+                // Some out of range, which the signer refuses.
+                if (random.bounded(5) == 0)
+                    draft.kind = -5;
+                const int sign = issued++;
+                backend.sign(draft, [&, sign](const NostrEvent &event, const QString &error) {
+                    ++answered;
+                    ++answers[sign];
+                    if (error.isEmpty())
+                        ++signedCount;
+                    if (error.isEmpty()
+                        && (!event.verify() || (event.pubkey != syncPubkey() && event.pubkey != other->pubkey())))
+                        ++foreign;
+                });
+            }
+            }
+            // Now and then long enough for the keyring's delayed answers to
+            // come, so calls finish between steps as well as pile up.
+            if (random.bounded(3) == 0)
+                QTest::qWait(random.bounded(3));
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(answered, issued, 20000);
+        QTest::qWait(50);
+        QCOMPARE(answered, issued);
+        QCOMPARE(answers.size(), issued);
+        for (auto count = answers.cbegin(); count != answers.cend(); ++count)
+            QVERIFY2(count.value() == 1, qPrintable(QString("sign %1 answered %2 times, seed %3")
+                                                        .arg(count.key())
+                                                        .arg(count.value())
+                                                        .arg(seed)));
+        QCOMPARE(foreign, 0);
+        // Some were signed, so signers did come and go along the way.
+        QVERIFY(signedCount > 0);
+        // And what the dialog shows agrees with the keyring.
+        backend.checkSigningKey();
+        QTRY_VERIFY(!backend.signingBusy());
+        QCOMPARE(backend.signingKeyStored(), keys.keys.contains(backend.syncNpub()));
+    }
+
+    // Reopening the dialog asks the keyring again; asked while a store or a
+    // removal is out, the answer is about the keyring after it, so what the
+    // dialog shows is the write's outcome, not the state before it.
+    void backendChecksTheKeyAfterAWriteStillOut()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(!backend.signingBusy());
+        QVERIFY(!backend.signingKeyStored());
+
+        keys.hold = true;
+        QVERIFY(backend.addSigningKey(QByteArray(32, '\1').toHex()));
+        backend.checkSigningKey();
+        QVERIFY(backend.signingBusy());
+        // Not even asked until the store has answered.
+        QCOMPARE(keys.held(), 1);
+        // The newest call answers first, as with a store waiting on a prompt.
+        while (keys.held() > 0)
+            keys.releaseNewest();
+        QVERIFY(!backend.signingBusy());
+        QVERIFY(backend.signingKeyStored());
+        QVERIFY(keys.keys.contains(npub));
+        QCOMPARE(keys.calls.mid(1), QStringList({"store " + npub, "contains " + npub}));
+
+        backend.forgetSigningKey();
+        backend.checkSigningKey();
+        while (keys.held() > 0)
+            keys.releaseNewest();
+        QVERIFY(!backend.signingBusy());
+        QVERIFY(!backend.signingKeyStored());
+        QVERIFY(keys.keys.isEmpty());
+    }
+
+    // A key added again while "Stop syncing" is still removing the old one
+    // is stored after that removal, never deleted by it, however the
+    // keyring orders its answers.
+    void backendStoresAKeyAddedWhileTheStopRemovalIsOut()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME", "READSTR_RELAYS"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        qputenv("READSTR_RELAYS", relay.url().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeKeyStore keys;
+        keys.keys.insert(npub, QByteArray(32, '\1'));
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+        QTRY_VERIFY(!backend.signingBusy());
+
+        keys.hold = true;
+        backend.stopSync(true);
+        QTRY_VERIFY(backend.syncNpub().isEmpty());
+        QVERIFY(backend.setSyncNpub(npub));
+        QTRY_COMPARE(backend.syncNpub(), npub);
+        QVERIFY(backend.addSigningKey(QByteArray(32, '\1').toHex()));
+        QCOMPARE(keys.held(), 1);
+        while (keys.held() > 0)
+            keys.releaseNewest();
+        QVERIFY(!backend.signingBusy());
+        QCOMPARE(keys.keys.value(npub), QByteArray(32, '\1'));
+        QVERIFY(backend.signingKeyStored());
+        QCOMPARE(keys.calls.mid(1), QStringList({"remove " + npub, "contains " + npub, "store " + npub}));
+    }
+
+    // Signing right after launch, before the keyring has said whether it
+    // holds the key, waits for that answer rather than failing.
+    void backendSignsWhileTheLaunchCheckIsOut()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeKeyStore keys;
+        keys.keys.insert(npub, QByteArray(32, '\1'));
+        keys.hold = true;
+        Backend backend;
+        backend.setKeyStore(&keys);
+        QVERIFY(!backend.signingKeyStored());
+        std::optional<std::pair<NostrEvent, QString>> result;
+        backend.sign(signingDraft(), [&](const NostrEvent &event, const QString &error) { result.emplace(event, error); });
+        QTest::qWait(20);
+        QVERIFY(!result);
+        QCOMPARE(keys.calls, QStringList{"contains " + npub});
+        keys.hold = false;
+        keys.release();
+        QTRY_VERIFY(result);
+        QVERIFY2(result->second.isEmpty(), qPrintable(result->second));
+        QCOMPARE(result->first.pubkey, syncPubkey());
+        QVERIFY(result->first.verify());
+        QCOMPARE(keys.calls, QStringList({"contains " + npub, "lookup " + npub}));
+        QVERIFY(!backend.signingBusy());
+
+        // Without a key, the same wait ends in saying so.
+        keys.keys.clear();
+        keys.hold = true;
+        backend.checkSigningKey();
+        QString error;
+        backend.sign(signingDraft(), [&](const NostrEvent &, const QString &answer) { error = answer; });
+        keys.hold = false;
+        keys.release();
+        QTRY_VERIFY(!error.isEmpty());
+        QCOMPARE(error, "No signing key is stored for " + Nip19::shortNpub(npub, npub));
+    }
+
+    // The launch check answering "no key" must not fail a sign whose load
+    // waits behind a key added after the check started.
+    void backendSignsWithAKeyAddedWhileTheLaunchCheckIsOut()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeKeyStore keys;
+        keys.hold = true;
+        Backend backend;
+        backend.setKeyStore(&keys);
+        QVERIFY(backend.addSigningKey(QStringLiteral("01").repeated(32)));
+        std::optional<std::pair<NostrEvent, QString>> result;
+        backend.sign(signingDraft(), [&](const NostrEvent &event, const QString &error) { result.emplace(event, error); });
+        keys.hold = false;
+        keys.release();
+        QTRY_VERIFY(result);
+        QVERIFY2(result->second.isEmpty(), qPrintable(result->second));
+        QCOMPARE(result->first.pubkey, syncPubkey());
+        QVERIFY(backend.signingKeyStored());
+    }
+
+    // A keyring that cannot answer says nothing about the key, so a signer
+    // already loaded keeps signing; a read that fails shows in the dialog.
+    void backendKeepsItsSignerWhenACheckFails()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeKeyStore keys;
+        keys.keys.insert(npub, QByteArray(32, '\1'));
+        Backend backend;
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+        QString error = "unanswered";
+        backend.sign(signingDraft(), [&](const NostrEvent &, const QString &answer) { error = answer; });
+        QTRY_VERIFY(error != "unanswered");
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        keys.error = KeyStore::Error::Locked;
+        backend.checkSigningKey();
+        QTRY_VERIFY(!backend.signingBusy());
+        error = "unanswered";
+        backend.sign(signingDraft(), [&](const NostrEvent &, const QString &answer) { error = answer; });
+        QTRY_VERIFY(error != "unanswered");
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        // A fresh account load whose read fails says why in the dialog.
+        Backend other;
+        keys.error = KeyStore::Error::None;
+        other.setKeyStore(&keys);
+        QTRY_VERIFY(other.signingKeyStored());
+        keys.error = KeyStore::Error::Failed;
+        error = "unanswered";
+        other.sign(signingDraft(), [&](const NostrEvent &, const QString &answer) { error = answer; });
+        QTRY_VERIFY(error != "unanswered");
+        QVERIFY(!error.isEmpty());
+        QVERIFY(!other.signingError().isEmpty());
+    }
+
+    // A read that finds no key says so without clearing the busy flag of a
+    // call still queued behind it.
+    void backendStaysBusyWhileACallIsQueued()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub();
+        FakeKeyStore keys;
+        keys.keys.insert(npub, QByteArray(32, '\1'));
+        Backend backend;
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+        QTRY_VERIFY(!backend.signingBusy());
+        // Gone from the keyring behind Readstr's back.
+        keys.keys.clear();
+        keys.hold = true;
+        QString error;
+        backend.sign(signingDraft(), [&](const NostrEvent &, const QString &answer) { error = answer; });
+        backend.checkSigningKey();
+        keys.release();
+        QVERIFY(!backend.signingKeyStored());
+        QVERIFY(backend.signingBusy());
+        QCOMPARE(keys.held(), 1);
+        keys.release();
+        QVERIFY(!backend.signingBusy());
+        QTRY_COMPARE(error, "No signing key is stored for " + Nip19::shortNpub(npub, npub));
+    }
+
+    // A keyring that loses its prompt fails the read, and the signs waiting
+    // on it are answered with why, rather than waiting forever.
+    void backendFailsSignsWhenTheKeyringGoesAway()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const QString npub = syncNpub(), item = "/org/freedesktop/secrets/collection/login/7";
+        const QVariant noItems = QVariant::fromValue(QList<QDBusObjectPath>());
+        const QVariant lockedItem = QVariant::fromValue(QList<QDBusObjectPath>{QDBusObjectPath(item)});
+        FakeSecretService service;
+        Backend backend;
+        backend.setKeyStore(&service);
+        service.reply({noItems, lockedItem});
+        QVERIFY(backend.signingKeyStored());
+        QStringList errors;
+        const auto keep = [&](const NostrEvent &, const QString &error) { errors << error; };
+        backend.sign(signingDraft(), keep);
+        backend.sign(signingDraft(), keep);
+        service.reply({noItems, lockedItem});
+        service.reply({noItems, QVariant::fromValue(QDBusObjectPath("/org/freedesktop/secrets/prompt/u1"))});
+        service.reply({});
+        QVERIFY(backend.signingBusy());
+        service.serviceLost();
+        QVERIFY(!backend.signingBusy());
+        QTRY_COMPARE(errors.size(), 2);
+        const QString lost = "The keyring failed: The keyring went away before its prompt was answered.";
+        QCOMPARE(errors, QStringList({lost, lost}));
+        QVERIFY(service.listening.isEmpty());
     }
 
     // Markdown
@@ -6553,6 +7952,25 @@ private:
                 {"tags", tagArray},
                 {"content", content},
                 {"sig", QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(signature), 64).toHex())}};
+    }
+
+    // An event for the signing tests to sign.
+    static NostrEvent signingDraft()
+    {
+        NostrEvent draft;
+        draft.kind = Sync::subscriptionsKind;
+        draft.createdAt = 1700000000;
+        draft.tags = {{"d", Sync::subscriptionsTag}};
+        draft.content = "{}";
+        return draft;
+    }
+
+    // Syncs the library under READSTR_HOME with the test key's npub.
+    static void seedSyncAccount()
+    {
+        Store store;
+        if (!store.open() || !store.setSyncAccount(syncNpub(), syncPubkey(), {}))
+            qFatal("cannot seed the sync account: %s", qPrintable(store.lastError()));
     }
 
     // The test key's public key and npub, which the sync tests pull for.

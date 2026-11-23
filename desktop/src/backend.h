@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QMap>
 #include <QObject>
 #include <QSet>
 #include <QThread>
@@ -16,9 +17,11 @@
 #include "articlemodel.h"
 #include "feedparser.h"
 #include "fetcher.h"
+#include "keystore.h"
 #include "library.h"
 #include "nip19.h"
 #include "relaypool.h"
+#include "signer.h"
 #include "sourcemodel.h"
 #include "store.h"
 #include "sync.h"
@@ -81,6 +84,12 @@ class Backend : public QObject {
     Q_PROPERTY(QString syncNpub READ syncNpub NOTIFY syncChanged)
     Q_PROPERTY(QVariant syncedAt READ syncedAt NOTIFY syncChanged)
     Q_PROPERTY(bool syncing READ syncing NOTIFY syncChanged)
+    // Whether the keyring holds the sync account's signing key, which is
+    // only looked up, not read, until something is to be signed; whether a
+    // keyring call about it is out; and what the last one could not do.
+    Q_PROPERTY(bool signingKeyStored READ signingKeyStored NOTIFY signingChanged)
+    Q_PROPERTY(bool signingBusy READ signingBusy NOTIFY signingChanged)
+    Q_PROPERTY(QString signingError READ signingError NOTIFY signingChanged)
 
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool statusError READ statusError NOTIFY statusChanged)
@@ -128,6 +137,9 @@ public:
     QString syncNpub() const { return m_syncAccount.npub; }
     QVariant syncedAt() const;
     bool syncing() const { return m_syncing; }
+    bool signingKeyStored() const { return m_signingKeyStored; }
+    bool signingBusy() const { return m_signingBusy; }
+    QString signingError() const { return m_signingError; }
 
     QString status() const { return m_status; }
     bool statusError() const { return m_statusError; }
@@ -154,7 +166,21 @@ public:
     // Syncs with the npub or nprofile `text` from now on and pulls at once;
     // false, changing nothing, when it is neither.
     Q_INVOKABLE bool setSyncNpub(const QString &text);
-    Q_INVOKABLE void stopSync();
+    // Forgets the sync account and, with `removeKey`, then deletes its
+    // signing key from the keyring, saying in the status bar if that fails.
+    Q_INVOKABLE void stopSync(bool removeKey = false);
+    // Asks the keyring again whether it holds the sync account's key.
+    Q_INVOKABLE void checkSigningKey();
+    // Keeps `text`, an nsec or 64 hex characters, in the keyring as the
+    // sync account's signing key. False, keeping nothing and saying why in
+    // signingError, when it is not a key or not the account's.
+    Q_INVOKABLE bool addSigningKey(const QString &text);
+    Q_INVOKABLE void forgetSigningKey();
+    // Signs `event` as the sync account, reading its key from the keyring
+    // the first time and keeping it in memory until the account or its key
+    // changes. Nothing is published here. `done` runs exactly once, never
+    // inside this call, unless the backend is destroyed first.
+    void sign(const NostrEvent &event, Signer::Done done);
     Q_INVOKABLE void importOpml();
     Q_INVOKABLE void exportOpml();
     // Puts text selected in the reader on the clipboard (and the primary
@@ -190,6 +216,9 @@ public:
     // Starts `program` from PATH on its own, with no shell, or says that it
     // is not there.
     static Launch launchDetached(const QString &program, const QStringList &arguments);
+    // Where the sync account's signing key is kept. Without a store, as in
+    // tests that do not set one, no key can be kept.
+    void setKeyStore(KeyStore *keyStore);
     void setThumbnailLimits(const Thumbnails::Limits &limits) { m_thumbnails->setLimits(limits); }
     void setFetchLimits(const Fetcher::Limits &limits) { m_fetcher->setLimits(limits); }
     void setRelayLimits(const RelayPool::Limits &limits) { m_relays->setLimits(limits); }
@@ -210,6 +239,7 @@ signals:
     void imported();
     void syncChanged();
     void syncFinished();
+    void signingChanged();
     void statusChanged();
 
 private:
@@ -274,6 +304,25 @@ private:
     void sync();
     // `pubkey` is the account the pull was for.
     void syncApplied(const Sync::Outcome &outcome, const QString &pubkey);
+    // Sets what the properties say; whether the keyring is busy follows
+    // from the jobs still queued.
+    void setSigning(bool stored, const QString &error);
+    QString keyStoreError(const KeyStore::Result &result) const;
+    // Drops the signer and the signing state of an account no longer synced.
+    void resetSigning();
+    // Drops the signer and any read of the key still out, so neither signs
+    // again, failing with `error` every sign not answered yet.
+    void dropSigner(const QString &error);
+    // Answers, from the event loop, every sign not answered yet.
+    void failPendingSigns(const QString &error, bool queuedToo = true);
+    void handToSigner(const NostrEvent &event, Signer::Done done);
+    // Reads the key, when a sign waits for it, and hands it what waits.
+    void loadSigner();
+    // Runs `job` once every keyring job queued before it is done. The job
+    // calls the function it is given once its own keyring call answers.
+    using KeyJob = std::function<void(std::function<void()> finished)>;
+    void queueKeyJob(KeyJob job);
+    void runKeyJobs();
 
     Store m_store;
     bool m_storeOpen = false;
@@ -337,6 +386,36 @@ private:
     // the counts above, which a switch of account resets, so the feeds an
     // earlier account's pull added are still fetched.
     bool m_syncFeedsAdded = false;
+    KeyStore *m_keyStore = nullptr;
+    // The sync account's, once something has been signed.
+    std::unique_ptr<Signer> m_signer;
+    bool m_signingKeyStored = false;
+    bool m_signingBusy = false;
+    QString m_signingError;
+    // Keyring calls go one at a time, in the order they were asked for, so
+    // each answer is about the keyring as the ones before left it: a check
+    // after a store sees the stored key, and a read after a removal finds
+    // nothing.
+    QList<KeyJob> m_keyJobs;
+    bool m_keyJobRunning = false;
+    bool m_startingKeyJobs = false;
+    // Bumped when the store changes, as a job out to the old one may never
+    // finish and must not hold up the new one's.
+    quint64 m_keyQueue = 0;
+    // Bumped when the account changes, which leaves the answers still out
+    // for the old one unheard.
+    quint64 m_signingEpoch = 0;
+    // Bumped whenever the signer is dropped, which leaves a read of the key
+    // still out unheard, so it cannot bring the dropped key back.
+    quint64 m_signerLoad = 0;
+    bool m_loadingSigner = false;
+    // Signs waiting for the key to be read.
+    QList<std::pair<NostrEvent, Signer::Done>> m_pendingSigns;
+    // Signs handed to the signer and not answered yet, kept here so that
+    // dropping the signer, which drops what it would have answered, still
+    // answers them.
+    QMap<quint64, Signer::Done> m_signing;
+    quint64 m_signId = 0;
     bool m_autoRefreshOn = false;
     QTimer m_autoRefresh;
 
