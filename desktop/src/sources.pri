@@ -1,7 +1,7 @@
 # Shared by readstr.pro and tests/readstr_tests.pro.
 QT += network sql dbus qml websockets
 
-# BIP-340 signatures on Nostr events.
+# BIP-340 signatures on Nostr events, checked and made.
 LIBS += -lsecp256k1
 
 VERSION = 0.1.0
@@ -17,6 +17,7 @@ HEADERS += \
     $$PWD/feedparser.h \
     $$PWD/fetcher.h \
     $$PWD/filepicker.h \
+    $$PWD/keystore.h \
     $$PWD/library.h \
     $$PWD/nip19.h \
     $$PWD/nostrevent.h \
@@ -28,13 +29,15 @@ HEADERS += \
     $$PWD/portalfilepicker.h \
     $$PWD/relaypool.h \
     $$PWD/sanitizer.h \
+    $$PWD/signer.h \
     $$PWD/smallfile.h \
     $$PWD/sourcemodel.h \
     $$PWD/store.h \
     $$PWD/sync.h \
     $$PWD/theme.h \
     $$PWD/thumbnails.h \
-    $$PWD/translator.h
+    $$PWD/translator.h \
+    $$PWD/wipe.h
 
 SOURCES += \
     $$PWD/articlemodel.cpp \
@@ -43,6 +46,7 @@ SOURCES += \
     $$PWD/discovery.cpp \
     $$PWD/feedparser.cpp \
     $$PWD/fetcher.cpp \
+    $$PWD/keystore.cpp \
     $$PWD/library.cpp \
     $$PWD/nip19.cpp \
     $$PWD/nostrevent.cpp \
@@ -54,6 +58,7 @@ SOURCES += \
     $$PWD/portalfilepicker.cpp \
     $$PWD/relaypool.cpp \
     $$PWD/sanitizer.cpp \
+    $$PWD/signer.cpp \
     $$PWD/sourcemodel.cpp \
     $$PWD/store.cpp \
     $$PWD/sync.cpp \

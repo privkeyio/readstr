@@ -2,9 +2,12 @@
 
 #include <QList>
 #include <QPair>
+#include <QScopeGuard>
 #include <QUrl>
 #include <algorithm>
 #include <cstring>
+
+#include "wipe.h"
 
 namespace {
 const char charset[] = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
@@ -36,13 +39,16 @@ QList<quint8> expandPrefix(const QByteArray &prefix) {
 // where leftover bits must be zero padding.
 std::optional<QByteArray> convertBits(const QByteArray &data, int from, int to, bool pad) {
     QByteArray out;
+    out.reserve(data.size() * from / to + 1);
     quint32 accumulator = 0;
     int bits = 0;
     const quint32 mask = (1u << to) - 1;
     for (char c : data) {
         const quint32 value = quint8(c);
-        if (value >> from)
+        if (value >> from) {
+            wipe(out);
             return std::nullopt;
+        }
         accumulator = (accumulator << from) | value;
         bits += from;
         while (bits >= to) {
@@ -54,6 +60,7 @@ std::optional<QByteArray> convertBits(const QByteArray &data, int from, int to, 
         if (bits)
             out.append(char((accumulator << (to - bits)) & mask));
     } else if (bits >= from || ((accumulator << (to - bits)) & mask)) {
+        wipe(out);
         return std::nullopt;
     }
     return out;
@@ -64,19 +71,37 @@ struct Decoded {
     QByteArray data;
 };
 
-std::optional<Decoded> decode(const QString &input) {
+std::optional<Decoded> decode(QStringView input) {
     if (input.size() < 8 || input.size() > Nip19::maxLength)
         return std::nullopt;
-    // Bech32 is printable ASCII. Anything else is refused before the case
-    // is folded, since some characters outside it fold into it: the Kelvin
-    // sign U+212A lowercases to "k".
-    for (const QChar c : input)
-        if (c.unicode() < 0x21 || c.unicode() > 0x7e)
+    QByteArray text;
+    QList<quint8> values;
+    QByteArray words;
+    // An nsec passes through here, so what held its bits is wiped on the
+    // way out, whatever the entity.
+    const auto cleanup = qScopeGuard([&] {
+        wipe(text);
+        wipe(values);
+        wipe(words);
+    });
+    // Bech32 is printable ASCII in one case. Anything else is refused before
+    // the case is folded, since some characters outside it fold into it: the
+    // Kelvin sign U+212A lowercases to "k". The case is folded while copying
+    // into `text`, the one copy that is wiped, as toLower() and toUpper()
+    // would each leave a copy that is not.
+    text.reserve(input.size());
+    bool upper = false, lower = false;
+    for (const QChar c : input) {
+        const char16_t unit = c.unicode();
+        if (unit < 0x21 || unit > 0x7e)
             return std::nullopt;
-    const bool lower = input == input.toLower();
-    if (!lower && input != input.toUpper())
+        const bool isUpper = unit >= 'A' && unit <= 'Z';
+        upper = upper || isUpper;
+        lower = lower || (unit >= 'a' && unit <= 'z');
+        text.append(isUpper ? char(unit - 'A' + 'a') : char(unit));
+    }
+    if (upper && lower)
         return std::nullopt;
-    const QByteArray text = input.toLower().toLatin1();
     const qsizetype separator = text.lastIndexOf('1');
     if (separator < 1 || separator + 7 > text.size())
         return std::nullopt;
@@ -85,8 +110,10 @@ std::optional<Decoded> decode(const QString &input) {
     for (char c : decoded.prefix)
         if (c < 33 || c > 126)
             return std::nullopt;
-    QList<quint8> values = expandPrefix(decoded.prefix);
-    QByteArray words;
+    // Reserved up front, so growing them leaves no stray copy unwiped.
+    values.reserve(2 * separator + 1 + text.size());
+    words.reserve(text.size());
+    values << expandPrefix(decoded.prefix);
     for (qsizetype i = separator + 1; i < text.size(); ++i) {
         const char *found = strchr(charset, text.at(i));
         if (!found || !*found)
@@ -97,10 +124,10 @@ std::optional<Decoded> decode(const QString &input) {
     if (polymod(values) != 1)
         return std::nullopt;
     words.chop(6);
-    const auto data = convertBits(words, 5, 8, false);
+    auto data = convertBits(words, 5, 8, false);
     if (!data)
         return std::nullopt;
-    decoded.data = *data;
+    decoded.data = std::move(*data);
     return decoded;
 }
 
@@ -198,6 +225,37 @@ bool isHex(const QString &text, int length) {
 
 bool isHexKey(const QString &text) {
     return isHex(text, 64);
+}
+
+std::optional<QByteArray> secretKey(const QString &input) {
+    // A view, with the digits read straight from it, as trimmed(),
+    // toLower(), and toLatin1() would each copy the key into a string that
+    // goes unwiped.
+    const QStringView text = QStringView(input).trimmed();
+    const auto digit = [](QChar c) {
+        const char16_t unit = c.unicode();
+        if (unit >= '0' && unit <= '9')
+            return int(unit - '0');
+        if (unit >= 'a' && unit <= 'f')
+            return int(unit - 'a' + 10);
+        if (unit >= 'A' && unit <= 'F')
+            return int(unit - 'A' + 10);
+        return -1;
+    };
+    if (text.size() == 64 && std::all_of(text.begin(), text.end(), [&](QChar c) { return digit(c) >= 0; })) {
+        QByteArray key(32, '\0');
+        for (int i = 0; i < 32; ++i)
+            key[i] = char(digit(text[2 * i]) << 4 | digit(text[2 * i + 1]));
+        return key;
+    }
+    auto decoded = decode(text);
+    if (!decoded)
+        return std::nullopt;
+    if (decoded->prefix != "nsec" || decoded->data.size() != 32) {
+        wipe(decoded->data);
+        return std::nullopt;
+    }
+    return std::move(decoded->data);
 }
 
 std::optional<Profile> decodeProfile(const QString &input) {

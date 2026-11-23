@@ -6,7 +6,8 @@
 #include <optional>
 
 // NIP-19 bech32 entities: npub and nprofile in (what people paste to follow
-// an author), npub, naddr, and nevent out, and any entity checked for links.
+// an author), nsec in (a signing key), npub, naddr, and nevent out, and any
+// entity checked for links.
 // Everything here is pure and bounded, since what comes in is untrusted text.
 namespace Nip19 {
 // Longer input is refused before decoding. An nprofile with a handful of
@@ -44,6 +45,12 @@ QString nevent(const QString &eventIdHex, const QString &authorHex, int kind);
 // maxLength, a key or id of 32 bytes for npub and note, and the TLV fields
 // nostr-tools requires for the others); empty for anything else.
 QString entity(const QString &text);
+
+// The 32 bytes of a secret key given as an nsec or as 64 hex characters
+// (either case), with surrounding whitespace, or null for anything else.
+// Whether secp256k1 accepts the bytes as a key is the signer's to check.
+// NIP-21 forbids "nostr:nsec", so a "nostr:" prefix is refused here.
+std::optional<QByteArray> secretKey(const QString &text);
 
 // Lowercase hex of exactly `length` characters.
 bool isHex(const QString &text, int length);

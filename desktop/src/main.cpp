@@ -12,6 +12,7 @@
 
 #include "backend.h"
 #include "cli.h"
+#include "keystore.h"
 #include "localnetwork.h"
 #include "portalfilepicker.h"
 #include "theme.h"
@@ -54,7 +55,10 @@ int main(int argc, char *argv[]) {
 
     Theme theme;
     PortalFilePicker picker;
+    // Before the backend, so it outlives the backend that uses it.
+    SecretServiceKeyStore keyStore;
     Backend backend(&picker);
+    backend.setKeyStore(&keyStore);
 
     // Feeds are fetched in C++; QML reaches no network at all, so nothing in
     // an article can load a remote resource.

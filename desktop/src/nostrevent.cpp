@@ -107,6 +107,19 @@ std::optional<NostrEvent> NostrEvent::fromJson(const QJsonValue &value) {
     return event;
 }
 
+bool NostrEvent::tagsWithinLimits() const {
+    if (tags.size() > maxTags)
+        return false;
+    qint64 tagCharacters = 0;
+    for (const QStringList &tag : tags) {
+        if (tag.size() > maxTagValues)
+            return false;
+        for (const QString &value : tag)
+            tagCharacters += value.size();
+    }
+    return tagCharacters <= maxTagCharacters;
+}
+
 QByteArray NostrEvent::serialized() const {
     QByteArray out = "[0,";
     appendString(out, pubkey);
