@@ -246,7 +246,12 @@ QString searchBody(const QString &summary, const QString &content, const QString
         } else {
             Sanitizer::Options options;
             options.imageLabels = false;
-            text = FeedParser::plainText(Sanitizer::toRichText(content, QUrl(url), options));
+            // The sanitizer keeps only Qt's tags, and of those an inline
+            // one (a, b, em, code, ...) is no break in the reader's text,
+            // so it is none in the index; its blocks and <br> still part
+            // words, as do the spaces it puts around an image's description.
+            text = FeedParser::plainText(Sanitizer::toRichText(content, QUrl(url), options),
+                                         FeedParser::InlineTags::Join);
         }
         // The sanitizer's breaks in long words, which would split them.
         text.remove(QChar(0x200B));
@@ -821,7 +826,7 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         return -1;
     QSqlQuery exists(m_db), upsert(m_db), version(m_db), replace(m_db), index(m_db);
     exists.prepare(QStringLiteral(
-        "SELECT id, title, author, summary, content, address FROM items WHERE feed_id = ? AND guid = ?"));
+        "SELECT id, title, author, summary, content, address, url FROM items WHERE feed_id = ? AND guid = ?"));
     upsert.prepare(QStringLiteral(
         "INSERT INTO items (feed_id, guid, title, url, author, summary, content, published_at, created_at, address,"
         " revision, media_url, thumbnail_url, duration, is_read) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
@@ -896,14 +901,16 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         const bool isNew = !exists.next();
         qint64 rowId = 0;
         // A refresh sends most items again as they were; only new or changed
-        // text is indexed again, sparing the sanitizer.
+        // text is indexed again, sparing the sanitizer. The URL counts too:
+        // the sanitizer resolves relative images against it, so a new one
+        // can bring an image's description into the index or take it out.
         bool textChanged = true;
         QString address = item.address;
         if (!isNew) {
             rowId = exists.value(0).toLongLong();
             textChanged = exists.value(1).toString() != item.title || exists.value(2).toString() != item.author
                           || exists.value(3).toString() != item.summary
-                          || exists.value(4).toString() != item.content;
+                          || exists.value(4).toString() != item.content || exists.value(6).toString() != item.url;
             // The upsert keeps the address the row has, which says how its
             // content reads.
             address = exists.value(5).toString();

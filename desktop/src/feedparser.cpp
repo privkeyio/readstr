@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QSet>
 #include <QTimeZone>
 #include <QXmlStreamReader>
 #include <QXmlStreamWriter>
@@ -476,6 +477,28 @@ bool isAsciiLetter(QChar character) {
     return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z');
 }
 
+// Whether a tag's text, what is between its '<' and '>', opens or closes an
+// element that flows inside a line. Anything else, including a tag this does
+// not know, parts the words around it, which at worst splits a word rather
+// than gluing two together.
+bool isInlineTag(QStringView tag) {
+    static const QSet<QString> inlines{"a",    "abbr", "b",    "bdi",  "bdo",   "big",  "cite",   "code",
+                                       "data", "del",  "dfn",  "em",   "font",  "i",    "ins",    "kbd",
+                                       "mark", "q",    "s",    "samp", "small", "span", "strike", "strong",
+                                       "sub",  "sup",  "time", "tt",   "u",     "var",  "wbr"};
+    if (tag.startsWith('/'))
+        tag = tag.mid(1);
+    qsizetype length = 0;
+    while (length < tag.size() && isAsciiLetter(tag.at(length)))
+        ++length;
+    // The name ends at whitespace, a '/', or the '>'; "b1" is not "b". No
+    // inline name is longer than six letters, so a long one is not looked up.
+    if (length == 0 || length > 6
+        || (length < tag.size() && !tag.at(length).isSpace() && tag.at(length) != '/'))
+        return false;
+    return inlines.contains(tag.left(length).toString().toLower());
+}
+
 QString decodeEntity(const QString &name) {
     if (name.startsWith('#')) {
         bool ok = false;
@@ -520,7 +543,7 @@ QDateTime parseDate(const QString &text) {
     return iso.isValid() ? iso : parseRfc822(trimmed);
 }
 
-QString plainText(const QString &html) {
+QString plainText(const QString &html, InlineTags inlineTags) {
     // One pass, each closer searched for once, so hostile markup (thousands
     // of unclosed <script or <!-- openers) stays linear in the input.
     QString text;
@@ -547,7 +570,8 @@ QString plainText(const QString &html) {
             noMoreTagEnds = true;
             continue;
         }
-        text += ' ';
+        if (inlineTags == InlineTags::Separate || !isInlineTag(QStringView(html).mid(i + 1, end - i - 1)))
+            text += ' ';
         const qsizetype tagStart = i;
         i = end + 1;
         // A script or style runs to its closing tag, or to the end when it

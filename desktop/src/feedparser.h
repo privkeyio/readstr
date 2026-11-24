@@ -53,9 +53,14 @@ inline constexpr int maxSummaryLength = 500;
 std::optional<ParsedFeed> parse(const QByteArray &data, const QUrl &base, QString *error = nullptr);
 // RFC 822/2822 (RSS) and RFC 3339 (Atom, JSON Feed) dates, returned in UTC.
 QDateTime parseDate(const QString &text);
+// Whether an inline tag (b, em, a, span, and the like) parts the words on
+// either side of it. Display text keeps the space every tag leaves; the
+// search index joins them, as the reader shows "pro<em>gram</em>ming" as one
+// word. Block, line-break, and unknown tags part words either way.
+enum class InlineTags { Separate, Join };
 // Drops tags, comments, scripts, and styles, decodes entities, and collapses
 // whitespace.
-QString plainText(const QString &html);
+QString plainText(const QString &html, InlineTags inlineTags = InlineTags::Separate);
 // Decodes character references (&amp;, &#38;, &#x26;) and the common named
 // entities; anything else is left as written.
 QString decodeEntities(const QString &text);

@@ -857,8 +857,17 @@ private slots:
                        "<img src=\"https://img.example.com/i.png\" alt=\"Sunset photo\"><img src=\"/x.png\">"
                        "<form>formword</form>&amp; caf&#233;"
                        "<p>before<img src=\"/a.png\" alt=\"axolotl\">after"
-                       " <a href=\"/p\">ahead<img src=\"/b.png\" alt=\"newt\">behind</a></p>";
+                       " <a href=\"/p\">ahead<img src=\"/b.png\" alt=\"newt\">behind</a></p>"
+                       "<p>pro<em>gram</em>ming Java<b>Script</b> hyper<a href=\"/l\">text</a>ual"
+                       " sp<span>lit</span>word</p><p>leftside</p><p>rightside</p><div>upper</div>lower";
         QCOMPARE(store.saveItems(feed, {item}), 1);
+        // An inline tag is no break in a word, as the reader shows it; a
+        // block still is.
+        for (const char *word : {"programming", "javascript", "hypertextual", "splitword", "leftside", "rightside",
+                                 "upper", "lower"})
+            QVERIFY2(searchTitles(store, word) == QStringList{"Alpha report"}, word);
+        for (const char *piece : {"gram", "ming", "textual", "ual", "lit", "leftsiderightside", "upperlower"})
+            QVERIFY2(searchTitles(store, piece).isEmpty(), piece);
         QCOMPARE(searchTitles(store, "quantum"), QStringList{"Alpha report"});
         // An image's description is a word of its own, inside a link too.
         for (const char *word : {"axolotl", "after", "newt", "behind"})
@@ -911,6 +920,31 @@ private slots:
         QCOMPARE(store.saveItems(third, {item}), 1);
         QCOMPARE(searchTitles(store, "gamma lorem"), QStringList{"Gamma"});
         QCOMPARE(indexed(path, "fresh OR notes OR beta"), 0);
+        QCOMPARE(rawExec(path, "INSERT INTO items_fts(items_fts, rank) VALUES('integrity-check', 0)"), QString());
+    }
+
+    // A relative image needs the article's URL to be kept, so a save that
+    // brings only a URL indexes its description.
+    void searchIndexFollowsUrlChange()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+        ParsedItem item;
+        item.guid = "one";
+        item.title = "Pictures";
+        item.content = "<p>Look <img src=\"/x.png\" alt=\"axolotl\"></p>";
+        QCOMPARE(store.saveItems(feed, {item}), 1);
+        QVERIFY(searchTitles(store, "axolotl").isEmpty());
+        item.url = "https://example.com/post";
+        QCOMPARE(store.saveItems(feed, {item}), 0);
+        QCOMPARE(searchTitles(store, "axolotl"), QStringList{"Pictures"});
+        item.url.clear();
+        QCOMPARE(store.saveItems(feed, {item}), 0);
+        QVERIFY(searchTitles(store, "axolotl").isEmpty());
+        QCOMPARE(searchTitles(store, "look"), QStringList{"Pictures"});
         QCOMPARE(rawExec(path, "INSERT INTO items_fts(items_fts, rank) VALUES('integrity-check', 0)"), QString());
     }
 
@@ -1882,6 +1916,15 @@ private slots:
         QCOMPARE(FeedParser::plainText("kept <script>never closed"), QString("kept"));
         QCOMPARE(FeedParser::plainText("1 < 2 <b and <!-- open"), QString("1 < 2 <b and <!-- open"));
         QCOMPARE(FeedParser::plainText("<scripts>x</scripts>"), QString("x"));
+        // For the index an inline tag joins the words around it; a block,
+        // a break, a comment, and a tag it does not know still part them.
+        const auto join = FeedParser::InlineTags::Join;
+        QCOMPARE(FeedParser::plainText("<p>pro<em>gram</em>ming</p>"), QString("pro gram ming"));
+        QCOMPARE(FeedParser::plainText("<p>pro<em>gram</em>ming</p>", join), QString("programming"));
+        QCOMPARE(FeedParser::plainText("Java<B class=x>Script</B > a<a href=\"/\">b</a>c d<br/>e<b1>f</b1>g", join),
+                 QString("JavaScript abc d e f g"));
+        QCOMPARE(FeedParser::plainText("<p>a</p><p>b</p>x<!--c-->y<span/>z<x-b>w", join), QString("a b x yz w"));
+        QCOMPARE(FeedParser::plainText("a<b>c<script>no</script>d", join), QString("ac d"));
     }
 
     // Each of these took quadratic time with a regular expression.
