@@ -18,7 +18,9 @@ such as Amber, it publishes its own.
 ## Build, test, install
 
 Everything needed comes with Omarchy (`qmake6`, `make`, a C++ compiler,
-Qt's base, declarative, SVG, and Wayland modules, and `mpv` for videos)
+Qt's base, declarative, SVG, and Wayland modules, SQLite 3.43 or later with
+FTS5, which Qt's SQLite driver uses for the library and its search, and `mpv`
+for videos)
 except the packages for Nostr: `sudo pacman -S qt6-websockets libsecp256k1 qrencode`
 (`openssl`, whose libcrypto does the NIP-44 encryption of a remote signer,
 is already part of Arch). The open and save dialogs are the desktop's own,
@@ -41,6 +43,15 @@ article itself on the right. Selecting an article marks it read. Right-click
 a feed to refresh it or unsubscribe (and, for a Nostr author, to open their
 profile on njump.me or copy their npub); the `⋮` menu has refresh, mark the
 view read, OPML import and export, and Sync with Nostr.
+
+`Ctrl+F` searches the articles of the selected source: their titles, authors,
+summaries, and text (as the reader shows it, so markup and link addresses
+it hides never match). Every word must be there, the last one may be the
+start of a word unless it ends in a single letter or digit, and case and accents
+do not matter (`creme` finds `crème`). The best
+matches come first, and the newest first among equal ones. `Enter` hands the
+keyboard back to the list, so `J`, `K`, and the other keys work on the
+results; `Esc` clears the search.
 
 Feeds refresh when the window opens and then about every 30 minutes (give or
 take 10%, so many readers don't all ask at once) for as long as it stays open;
@@ -287,6 +298,7 @@ those that take `--json` print one line of JSON whose shape is stable (below).
 |---|---|
 | `readstr feeds [--json]` | List subscriptions with unread and total counts |
 | `readstr articles [--feed ID] [--unread] [--starred] [--limit N] [--json]` | List articles, newest first (50 unless `--limit`; `--limit 0` for all) |
+| `readstr search QUERY [--feed ID] [--unread] [--starred] [--limit N] [--json]` | Search titles, authors, summaries, and text, best match first, as `Ctrl+F` does; exits 1 for a query with no letters or digits or over 256 characters |
 | `readstr subscribe URL\|NPUB [--json]` | Subscribe to a feed URL, find the feed behind a page URL, or follow a Nostr author (npub or nprofile) |
 | `readstr unsubscribe ID` | Remove a feed and its articles |
 | `readstr refresh [--feed ID] [--json]` | Fetch every feed (or one) now; exits 1 if any failed |
@@ -307,12 +319,17 @@ readstr refresh
 readstr articles --limit 1
 # 1  2026-11-19  N   Rebuilding my local voice assistant pipeline  (Hacker News: Front Page)
 #     https://blog.platypush.tech/article/Rewriting-my-voice-assistant-pipeline
+readstr search "voice assistant" --unread
+# 1  2026-11-19  N   Rebuilding my local voice assistant pipeline  (Hacker News: Front Page)
+#     https://blog.platypush.tech/article/Rewriting-my-voice-assistant-pipeline
 readstr star 1 && readstr read 1
 readstr export subscriptions.opml
 ```
 
-In the plain listing of `articles`, `N` marks an unread article and `*` a
-starred one.
+In the plain listing of `articles` and `search`, `N` marks an unread article
+and `*` a starred one. A search query is words, never search syntax: quotes,
+`AND`, `OR`, `NOT`, `NEAR`, `column:`, `*`, `^`, and parentheses are searched
+for as the words they hold, if any, so any text is safe to pass.
 
 ### JSON output
 
@@ -325,7 +342,7 @@ ISO 8601 (`2026-11-19T20:57:14Z`), and anything unknown is `null`.
   "siteUrl": "https://news.ycombinator.com/", "description": "…", "category": null,
   "unread": 20, "total": 20, "lastFetchedAt": "2026-11-19T21:30:00Z", "lastError": null}]
 
-// readstr articles --json
+// readstr articles --json, and readstr search QUERY --json (best match first)
 [{"id": 1, "feedId": 1, "feedTitle": "Hacker News: Front Page", "guid": "…",
   "title": "…", "url": "https://…", "author": "…", "summary": "plain text",
   "published": "2026-11-19T20:57:14Z", "read": false, "starred": false}]
@@ -415,7 +432,8 @@ tests avoid touching your real files.
 ## Shortcuts
 
 The keys follow [omafeed](https://github.com/pch/omafeed)'s, so muscle memory
-carries over. Single keys do nothing while you type in a dialog.
+carries over. Single keys do nothing while you type in a dialog or the search
+field.
 
 | Key | Action |
 |---|---|
@@ -433,9 +451,10 @@ carries over. Single keys do nothing while you type in a dialog.
 | `Ctrl+Shift+A` | Mark everything in the view read |
 | `Ctrl+O` | Import OPML |
 | `Ctrl+Shift+E` | Export OPML |
+| `Ctrl+F` | Search the articles |
 | `Delete` | Unsubscribe from the selected feed (asks first) |
 | `?` | Show or hide the shortcuts |
-| `Esc` | Close the shortcuts |
+| `Esc` | Close the shortcuts, or clear the search |
 | `Q`, `Ctrl+Q` | Quit |
 
 ## License

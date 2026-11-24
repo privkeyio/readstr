@@ -7,14 +7,16 @@ arch=('x86_64' 'aarch64')
 url='https://github.com/privkeyio/readstr'
 license=('MIT')
 # qt6-base also provides QtNetwork, QtSql with its SQLite driver, and QtDBus,
-# which reaches xdg-desktop-portal for the OPML open and save dialogs.
+# which reaches xdg-desktop-portal for the OPML open and save dialogs. The
+# driver uses the system sqlite, whose FTS5 needs contentless deletes (3.43)
+# for search; Readstr refuses to open the library without them.
 # qt6-websockets talks to Nostr relays and libsecp256k1 checks the signatures
 # on their events. openssl's libcrypto encrypts NIP-44 for a remote signer
 # (NIP-46), and qrencode draws the QR code that pairs one. qt6-imageformats
 # has the WebP reader that video thumbnails may need. mpv plays Nostr videos;
 # Omarchy ships it.
 depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-wayland' 'qt6-websockets' 'qt6-imageformats'
-         'libsecp256k1' 'openssl' 'qrencode' 'xdg-desktop-portal' 'mpv')
+         'sqlite>=3.43' 'libsecp256k1' 'openssl' 'qrencode' 'xdg-desktop-portal' 'mpv')
 makedepends=('gcc' 'make')
 options=('!debug')
 source=()

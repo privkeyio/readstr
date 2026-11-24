@@ -56,6 +56,12 @@ class Backend : public QObject {
     Q_PROPERTY(QString sourceTitle READ sourceTitle NOTIFY sourceChanged)
     Q_PROPERTY(qint64 selectedFeedId READ selectedFeedId NOTIFY sourceChanged)
 
+    // The words the article list is searched for, as typed; empty for none.
+    // `searching` is whether they hold a word to search for, so the list
+    // shows only the matches, best first.
+    Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY searchChanged)
+    Q_PROPERTY(bool searching READ searching NOTIFY searchChanged)
+
     Q_PROPERTY(int articleIndex READ articleIndex NOTIFY articleChanged)
     Q_PROPERTY(bool hasArticle READ hasArticle NOTIFY articleChanged)
     Q_PROPERTY(qint64 articleId READ articleId NOTIFY articleChanged)
@@ -145,6 +151,10 @@ public:
     QString sourceKind() const;
     QString sourceTitle() const;
     qint64 selectedFeedId() const;
+
+    QString searchQuery() const { return m_searchQuery; }
+    void setSearchQuery(const QString &query);
+    bool searching() const { return !Store::matchExpression(m_searchQuery).isEmpty(); }
 
     int articleIndex() const { return m_articleIndex; }
     bool hasArticle() const { return m_article.id != 0; }
@@ -307,6 +317,7 @@ signals:
     void libraryChanged();
     void sourceChanged();
     void articleChanged();
+    void searchChanged();
     void thumbnailChanged();
     void refreshChanged();
     void refreshFinished();
@@ -486,6 +497,7 @@ private:
     ArticleModel m_articles;
     int m_feedCount = 0;
     int m_sourceIndex = 0;
+    QString m_searchQuery;
     int m_articleIndex = -1;
     Article m_article;
     QString m_articleHtml;

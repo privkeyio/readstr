@@ -50,7 +50,8 @@ ApplicationWindow {
         { keys: "Ctrl+C", action: qsTr("Copy the selected text") },
         { keys: "Delete", action: qsTr("Unsubscribe from the selected feed") },
         { keys: "?", action: qsTr("Show or hide the shortcuts") },
-        { keys: "Esc", action: qsTr("Close the shortcuts") },
+        { keys: "Ctrl+F", action: qsTr("Search the articles") },
+        { keys: "Esc", action: qsTr("Close the shortcuts, or clear the search") },
         { keys: "Q, Ctrl+Q", action: qsTr("Quit") }
     ]
 
@@ -67,7 +68,11 @@ ApplicationWindow {
     }
 
     Shortcut { sequence: "?"; context: Qt.ApplicationShortcut; enabled: win.dialogsClosed; onActivated: win.helpVisible = !win.helpVisible }
+    // Esc closes the overlay first, which hides the search, and clears the
+    // search only once nothing covers it; a dialog's Esc is its own.
     Shortcut { sequence: "Esc"; context: Qt.ApplicationShortcut; enabled: win.helpVisible && win.dialogsClosed; onActivated: win.helpVisible = false }
+    Shortcut { sequence: "Esc"; context: Qt.ApplicationShortcut; enabled: win.keysFree && articleList.searchOpen; onActivated: articleList.clearSearch() }
+    Shortcut { sequence: "Ctrl+F"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: { win.activePane = "articles"; articleList.focusSearch() } }
     Shortcut { sequence: "Q"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: Qt.quit() }
     Shortcut { sequence: "Ctrl+Q"; context: Qt.ApplicationShortcut; onActivated: Qt.quit() }
     Shortcut { sequence: "J"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: { win.activePane = "articles"; backend.moveArticle(1) } }
@@ -123,6 +128,7 @@ ApplicationWindow {
                 Rectangle { Layout.fillHeight: true; Layout.preferredWidth: 1; color: Qt.alpha(theme.foreground, 0.1) }
 
                 ArticleList {
+                    id: articleList
                     Layout.preferredWidth: Math.max(260, Math.min(420, win.width * 0.3))
                     Layout.fillHeight: true
                     active: win.activePane === "articles"
