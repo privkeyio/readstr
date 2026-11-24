@@ -72,16 +72,19 @@ public:
         // name in its Host header, and https verifies the certificate (and
         // sends SNI) for the name, so a second answer to the same name
         // (DNS rebinding) cannot move it elsewhere. On a direct connection
-        // Qt does no lookup of its own. Through a proxy the user configured
-        // (the system's, which Qt follows), the proxy is asked for the
-        // checked address, not the name, but connects on our behalf from its
-        // own network, which decides what that address reaches; the proxy is
-        // the user's choice and is not bypassed. A pinned request goes over
-        // HTTP/1.1, since Qt's HTTP/2 takes its :authority from the URL
-        // rather than the Host header, and its redirects are followed here,
-        // each hop looked up, checked and pinned the same way. It goes to
-        // that one address (IPv4 when there is one): when it cannot be
-        // reached the others are not tried.
+        // Qt does no lookup of its own. The proxy, if any, is the one the
+        // application's or the system's configuration (which Qt follows)
+        // picks for the URL as asked, by its name, so a rule for that name
+        // still holds; that proxy is asked for the checked address, not the
+        // name, but connects on our behalf from its own network, which
+        // decides what that address reaches. The proxy is the user's choice
+        // and is not bypassed. A pinned request goes over HTTP/1.1, since
+        // Qt's HTTP/2 takes its :authority from the URL rather than the Host
+        // header, and its redirects are followed here, each hop looked up,
+        // checked and pinned the same way. It tries the checked addresses in
+        // turn (IPv4 first, at most four), within the one deadline, moving
+        // on only when an address cannot be connected to at all, as Qt would
+        // for a name it looked up itself.
         bool publicHostsOnly = false;
         // Refuses a port other than the scheme's own (80 for http, 443 for
         // https), on the first request and on every redirect, so a URL from
@@ -183,12 +186,17 @@ private:
     // `budgetMs` what is left of limits.timeoutMs (all of it when negative).
     void fetchWithin(const FetchRequest &request, std::function<void(const FetchResult &)> done,
                      const Limits &limits, int hops = 0, qint64 budgetMs = -1);
-    // Sends the request; under publicHostsOnly, to `pinned`, an address
-    // that `request`'s host was checked to resolve to.
+    // Sends the request; under publicHostsOnly, to the first of
+    // `candidates`, addresses that `request`'s host was checked to resolve
+    // to, and to the next when that one cannot be connected to.
     void send(const FetchRequest &request, std::function<void(const FetchResult &)> done, const Limits &limits,
-              int hops, qint64 budgetMs, const QHostAddress &pinned);
+              int hops, qint64 budgetMs, const QList<QHostAddress> &candidates);
 
+    // Picks a pinned request's proxy by the URL it was asked for, not the
+    // address it goes to; m_network owns it once a pinned request is sent.
+    struct Routes;
     QNetworkAccessManager m_network;
+    Routes *m_routes = nullptr;
     Limits m_limits;
     QList<std::shared_ptr<Batch>> m_waiting;
     int m_inFlight = 0;

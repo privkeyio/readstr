@@ -21,6 +21,7 @@
 #include <QImageWriter>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QNetworkProxy>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QScopeGuard>
@@ -568,7 +569,15 @@ class ReadstrTests : public QObject {
     Q_OBJECT
 
 private slots:
-    void initTestCase() { Fetcher::setResolverForTests(noLookups); }
+    void initTestCase()
+    {
+        Fetcher::setResolverForTests(noLookups);
+        // No test goes through the developer's own proxy settings, which the
+        // system's configuration would hand Qt; a test that wants a proxy
+        // installs its own factory.
+        QNetworkProxyFactory::setUseSystemConfiguration(false);
+        QNetworkProxy::setApplicationProxy(QNetworkProxy::NoProxy);
+    }
 
     void themeFallsBack()
     {
@@ -10547,6 +10556,224 @@ private slots:
         QCOMPARE(server.connections, connections);
         QCOMPARE(fetcher.get({at("images.example.invalid", "/down"), {}, {}}).error,
                  QString("refused a redirect from https to http"));
+    }
+
+    // A pinned request moves on to the name's next checked address only when
+    // one cannot be connected to: IPv4 first, at most four, and never once a
+    // server has answered, even with an error.
+    void publicHostsOnlyTriesTheOtherCheckedAddresses()
+    {
+        FakeHttpServer server;
+        server.serve("/a.png", "png");
+        // The same port on 127.0.0.2, as another address of the same name.
+        FakeHttpServer second;
+        second.close();
+        QVERIFY(second.listen(QHostAddress("127.0.0.2"), server.serverPort()));
+        second.serve("/a.png", "second");
+        // Nothing listens at these, which stand for public addresses that
+        // cannot be reached.
+        const QList<QHostAddress> dead{QHostAddress("127.0.0.9"), QHostAddress("127.0.0.10"),
+                                       QHostAddress("127.0.0.11"), QHostAddress("127.0.0.12")};
+        QList<QHostAddress> answer;
+        FakeResolver resolver([&answer](const QString &) { return answer; },
+                              dead + QList<QHostAddress>{QHostAddress(QHostAddress::LocalHost), QHostAddress("127.0.0.2"),
+                                                         QHostAddress(QHostAddress::LocalHostIPv6)});
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 5000;
+        fetcher.setLimits(limits);
+        const auto at = [&server](const char *path) {
+            return QUrl(QString("http://images.example.invalid:%1%2").arg(server.serverPort()).arg(path));
+        };
+
+        answer = {dead.at(0), QHostAddress(QHostAddress::LocalHost)};
+        FetchResult result = fetcher.get({at("/a.png"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.body, QByteArray("png"));
+        QCOMPARE(server.requests.size(), 1);
+        QCOMPARE(server.requests.first().headers.value("host"),
+                 "images.example.invalid:" + QByteArray::number(server.serverPort()));
+        QCOMPARE(resolver.asked.size(), 1);
+
+        // Every address unreachable: one error, once.
+        server.requests.clear();
+        answer = {dead.at(0), dead.at(1)};
+        int calls = 0;
+        fetcher.fetch({at("/a.png"), {}, {}}, [&calls, &result](const FetchResult &r) {
+            ++calls;
+            result = r;
+        });
+        QTRY_COMPARE(calls, 1);
+        QTest::qWait(50);
+        QCOMPARE(calls, 1);
+        QVERIFY(!result.ok());
+        QVERIFY2(result.error.contains("refused", Qt::CaseInsensitive), qPrintable(result.error));
+        QVERIFY(server.requests.isEmpty());
+
+        // At most four are tried: the fifth, which would answer, is not.
+        answer = dead + QList<QHostAddress>{QHostAddress(QHostAddress::LocalHost)};
+        QVERIFY(!fetcher.get({at("/a.png"), {}, {}}).ok());
+        QVERIFY(server.requests.isEmpty());
+
+        // An answer, even an error, ends it: the next address is not asked.
+        answer = {QHostAddress(QHostAddress::LocalHost), QHostAddress("127.0.0.2")};
+        QCOMPARE(fetcher.get({at("/missing"), {}, {}}).error, QString("HTTP 404"));
+        QCOMPARE(server.requests.size(), 1);
+        QVERIFY(second.requests.isEmpty());
+
+        // IPv4 comes first, and IPv6 is still tried when it fails, where
+        // this machine has IPv6.
+        FakeHttpServer v6;
+        v6.close();
+        if (v6.listen(QHostAddress::LocalHostIPv6, server.serverPort())) {
+            v6.serve("/a.png", "v6");
+            server.requests.clear();
+            answer = {QHostAddress(QHostAddress::LocalHostIPv6), QHostAddress(QHostAddress::LocalHost)};
+            QCOMPARE(fetcher.get({at("/a.png"), {}, {}}).body, QByteArray("png"));
+            QVERIFY(v6.requests.isEmpty());
+            answer = {QHostAddress(QHostAddress::LocalHostIPv6), dead.at(0)};
+            QCOMPARE(fetcher.get({at("/a.png"), {}, {}}).body, QByteArray("v6"));
+            QCOMPARE(v6.requests.size(), 1);
+        }
+    }
+
+    // An answer taken once the deadline has passed, though before its timer
+    // has run, starts no request.
+    void publicHostsOnlySendsNothingPastTheDeadline()
+    {
+        QTcpServer listener;
+        QVERIFY(listener.listen(QHostAddress::LocalHost));
+        QSignalSpy connections(&listener, &QTcpServer::newConnection);
+        Fetcher::setResolverForTests(
+            [](const QString &, const Fetcher::Answer &answer) {
+                // Past the 50 ms deadline before the event loop runs again.
+                QThread::msleep(80);
+                answer({QHostAddress(QHostAddress::LocalHost)}, {});
+            },
+            {QHostAddress(QHostAddress::LocalHost)});
+        const auto restore = qScopeGuard([] { Fetcher::setResolverForTests(noLookups); });
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 50;
+        fetcher.setLimits(limits);
+        const QUrl url(QString("http://images.example.invalid:%1/a.png").arg(listener.serverPort()));
+        QCOMPARE(fetcher.get({url, {}, {}}).error, QString("timed out after 0.05 s"));
+        QTest::qWait(100);
+        QCOMPARE(connections.size(), 0);
+        QVERIFY(!listener.hasPendingConnections());
+    }
+
+    // A pinned request goes through the proxy picked for its name, not the
+    // one picked for the address it is pinned to, and asks that proxy for
+    // the address.
+    void publicHostsOnlyPicksTheProxyByName()
+    {
+        FakeHttpServer server;
+        server.serve("/a.png", "direct");
+        FakeHttpServer proxy;
+        const QByteArray pinned = "http://127.0.0.1:" + QByteArray::number(server.serverPort()) + "/a.png";
+        proxy.route(pinned, [](const FakeHttpServer::Request &) {
+            return FakeHttpServer::Response{200, {{"Content-Type", "image/png"}}, "proxied", false, 0, false, 200};
+        });
+        // A rule for the name alone, as no_proxy or a PAC file would have:
+        // its address goes direct.
+        class ByName : public QNetworkProxyFactory {
+        public:
+            explicit ByName(quint16 port) : m_port(port) {}
+            QList<QNetworkProxy> queryProxy(const QNetworkProxyQuery &query) override
+            {
+                if (query.peerHostName() == QLatin1String("images.example.invalid"))
+                    return {QNetworkProxy(QNetworkProxy::HttpProxy, QStringLiteral("127.0.0.1"), m_port)};
+                return {QNetworkProxy(QNetworkProxy::NoProxy)};
+            }
+
+        private:
+            quint16 m_port;
+        };
+        QNetworkProxyFactory::setApplicationProxyFactory(new ByName(proxy.serverPort()));
+        const auto restore = qScopeGuard([] { QNetworkProxyFactory::setApplicationProxyFactory(nullptr); });
+        FakeResolver resolver([](const QString &) { return QList<QHostAddress>{QHostAddress(QHostAddress::LocalHost)}; },
+                              {QHostAddress(QHostAddress::LocalHost)});
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 5000;
+        fetcher.setLimits(limits);
+        const auto at = [&server](const char *scheme, const char *host) {
+            return QUrl(QString("%1://%2:%3/a.png").arg(scheme, host).arg(server.serverPort()));
+        };
+
+        FetchResult result = fetcher.get({at("http", "images.example.invalid"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.body, QByteArray("proxied"));
+        QCOMPARE(proxy.requests.size(), 1);
+        QCOMPARE(proxy.requests.first().path, pinned);
+        QCOMPARE(proxy.requests.first().headers.value("host"),
+                 "images.example.invalid:" + QByteArray::number(server.serverPort()));
+        QVERIFY(server.requests.isEmpty());
+
+        // A name the factory sends direct goes direct.
+        result = fetcher.get({at("http", "direct.example.invalid"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.body, QByteArray("direct"));
+        QCOMPARE(server.requests.size(), 1);
+        QCOMPARE(proxy.requests.size(), 1);
+
+        // Over https the proxy is asked to tunnel to the address.
+        if (QSslSocket::supportsSsl()) {
+            QVERIFY(!fetcher.get({at("https", "images.example.invalid"), {}, {}}).ok());
+            // Qt asks again once when the proxy refuses, so there may be two.
+            QVERIFY(proxy.requests.size() > 1);
+            for (qsizetype i = 1; i < proxy.requests.size(); ++i) {
+                QCOMPARE(proxy.requests.at(i).method, QByteArray("CONNECT"));
+                QCOMPARE(proxy.requests.at(i).path, "127.0.0.1:" + QByteArray::number(server.serverPort()));
+            }
+            proxy.requests.remove(1, proxy.requests.size() - 1);
+            QCOMPARE(server.requests.size(), 1);
+        }
+
+        // Two names at once at the same pinned URL, routed differently:
+        // Qt could not tell their requests apart, so the later one fails
+        // rather than go the first one's way.
+        const QList<FetchResult> both =
+            fetcher.fetchAll({{at("http", "images.example.invalid"), {}, {}}, {at("http", "direct.example.invalid"), {}, {}}});
+        QVERIFY2(both.at(0).ok(), qPrintable(both.at(0).error));
+        QCOMPARE(both.at(0).body, QByteArray("proxied"));
+        QVERIFY2(both.at(1).error.startsWith("could not pick the proxy for direct.example.invalid"),
+                 qPrintable(both.at(1).error));
+        QCOMPARE(server.requests.size(), 1);
+    }
+
+    // What a pinned redirect's own body cost is counted with the rest.
+    void publicHostsOnlyCountsRedirectBodies()
+    {
+        FakeHttpServer server;
+        server.serve("/a.png", "png");
+        server.route("/moved", [](const FakeHttpServer::Request &) {
+            return FakeHttpServer::Response{302, {{"Location", "/a.png"}}, QByteArray(100, 'm')};
+        });
+        server.route("/away", [](const FakeHttpServer::Request &) {
+            return FakeHttpServer::Response{302, {{"Location", "ftp://images.example.invalid/a.png"}},
+                                            QByteArray(50, 'm')};
+        });
+        FakeResolver resolver([](const QString &) { return QList<QHostAddress>{QHostAddress(QHostAddress::LocalHost)}; },
+                              {QHostAddress(QHostAddress::LocalHost)});
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 5000;
+        fetcher.setLimits(limits);
+        const auto at = [&server](const char *path) {
+            return QUrl(QString("http://images.example.invalid:%1%2").arg(server.serverPort()).arg(path));
+        };
+        FetchResult result = fetcher.get({at("/moved"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.received, qint64(100 + 3));
+        result = fetcher.get({at("/away"), {}, {}});
+        QCOMPARE(result.error, QString("refused a redirect to a non-http(s) URL"));
+        QCOMPARE(result.received, qint64(50));
     }
 
     void thumbnailsSniffTheFormatBeforeAnyReader()

@@ -3,7 +3,9 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QHostAddress>
+#include <QHash>
 #include <QHostInfo>
+#include <QNetworkProxy>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPointer>
@@ -97,7 +99,64 @@ bool allPublic(const QList<QHostAddress> &addresses) {
             return false;
     return true;
 }
+
+// The most of a name's checked addresses one request tries, so a long
+// answer cannot stretch the work of one fetch.
+constexpr int maxCandidates = 4;
+
+// The checked addresses in the order they are tried: IPv4 first, as the
+// addresses most networks can reach, then the rest, each once.
+QList<QHostAddress> orderedCandidates(const QList<QHostAddress> &addresses) {
+    QList<QHostAddress> ordered;
+    for (const bool ipv4 : {true, false})
+        for (const QHostAddress &address : addresses)
+            if ((address.protocol() == QAbstractSocket::IPv4Protocol) == ipv4 && !ordered.contains(address)
+                && ordered.size() < maxCandidates)
+                ordered << address;
+    return ordered;
 }
+
+// Whether a reply failed for want of a connection to its address, so
+// another of the name's addresses may still be reached. TLS failures and
+// HTTP errors are not among these: the certificate checked is the name's,
+// and an answer came, so the next address would most likely fare the same.
+bool notConnected(QNetworkReply::NetworkError error) {
+    switch (error) {
+    case QNetworkReply::ConnectionRefusedError:
+    case QNetworkReply::HostNotFoundError:
+    case QNetworkReply::TimeoutError:
+    case QNetworkReply::TemporaryNetworkFailureError:
+    case QNetworkReply::NetworkSessionFailedError:
+    case QNetworkReply::UnknownNetworkError:
+        return true;
+    default:
+        return false;
+    }
+}
+
+QString timedOut(const Fetcher::Limits &limits) {
+    return QStringLiteral("timed out after %1 s").arg(limits.timeoutMs / 1000.0);
+}
+}
+
+// Qt picks a request's proxy by the URL it sends to, which for a pinned
+// request names the checked address. A rule the user wrote for the name
+// (no_proxy, a PAC file) would then not apply, and the request could go
+// direct where the name would have gone through a proxy. So the proxies are
+// picked for the URL as asked when it is sent, and handed to Qt here when
+// it asks for the pinned URL. Anything else gets what Qt would have picked.
+struct Fetcher::Routes : QNetworkProxyFactory {
+    struct Route {
+        QList<QNetworkProxy> proxies;
+        int requests = 0;
+    };
+    QHash<QUrl, Route> routes;
+
+    QList<QNetworkProxy> queryProxy(const QNetworkProxyQuery &query) override {
+        const auto route = routes.constFind(query.url());
+        return route != routes.cend() ? route->proxies : QNetworkProxyFactory::proxyForQuery(query);
+    }
+};
 
 #ifdef READSTR_TESTS
 void Fetcher::setResolverForTests(Resolver resolver, const QList<QHostAddress> &treatedAsPublic) {
@@ -224,7 +283,7 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
     // A literal address was judged above, and is its own pin.
     const QHostAddress literal(request.url.host());
     if (!literal.isNull()) {
-        send(request, std::move(done), limits, hops, budget, literal);
+        send(request, std::move(done), limits, hops, budget, {literal});
         return;
     }
 
@@ -248,7 +307,7 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
             QHostInfo::abortHostLookup(*lookup);
             m_lookups.remove(*lookup);
         }
-        result.error = QStringLiteral("timed out after %1 s").arg(limits.timeoutMs / 1000.0);
+        result.error = timedOut(limits);
         done(result);
     });
     deadline->start(int(budget));
@@ -276,16 +335,14 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
                                .arg(hops > 0 ? QStringLiteral("a redirect to a") : QStringLiteral("a"));
             return done(result);
         }
-        // IPv4 first when there is one, as the address most networks can
-        // reach; the rest are not tried if it fails (Qt would try them in
-        // turn for a name it looked up itself).
-        QHostAddress pinned = addresses.constFirst();
-        for (const QHostAddress &address : addresses)
-            if (address.protocol() == QAbstractSocket::IPv4Protocol) {
-                pinned = address;
-                break;
-            }
-        send(request, std::move(done), limits, hops, qMax<qint64>(1, budget - clock->elapsed()), pinned);
+        // The answer can be taken after the deadline has passed but before
+        // its timer has run, and then nothing more is sent.
+        const qint64 left = budget - clock->elapsed();
+        if (left <= 0) {
+            result.error = timedOut(limits);
+            return done(result);
+        }
+        send(request, std::move(done), limits, hops, left, orderedCandidates(addresses));
     };
     // The answer comes on this thread, so the pointer is read where the
     // Fetcher lives. It is queued even so, which keeps `done` from running
@@ -315,13 +372,33 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
 }
 
 void Fetcher::send(const FetchRequest &request, std::function<void(const FetchResult &)> done, const Limits &limits,
-                   int hops, qint64 budgetMs, const QHostAddress &pinned) {
+                   int hops, qint64 budgetMs, const QList<QHostAddress> &candidates) {
     FetchResult result;
     result.url = request.url;
-    const bool pinning = !pinned.isNull();
+    const bool pinning = !candidates.isEmpty();
     QUrl target = request.url;
-    if (pinning)
-        target.setHost(pinned.toString());
+    if (pinning) {
+        target.setHost(candidates.constFirst().toString());
+        // Qt asks for the proxy by `target` alone, so two requests to the
+        // same pinned URL whose names are routed differently cannot both
+        // be told theirs; the later one fails rather than take the other's
+        // route, which might be no proxy at all.
+        const QList<QNetworkProxy> proxies = QNetworkProxyFactory::proxyForQuery(QNetworkProxyQuery(request.url));
+        if (!m_routes) {
+            m_routes = new Routes;
+            m_network.setProxyFactory(m_routes);
+        }
+        Routes::Route &route = m_routes->routes[target];
+        if (route.requests > 0 && route.proxies != proxies) {
+            result.error = QStringLiteral("could not pick the proxy for %1: a request for another name at the same "
+                                          "address is going another way")
+                               .arg(request.url.host());
+            QTimer::singleShot(0, this, [done, result] { done(result); });
+            return;
+        }
+        route.proxies = proxies;
+        ++route.requests;
+    }
     QNetworkRequest networkRequest(target);
     if (limits.images) {
         networkRequest.setRawHeader("User-Agent", imageUserAgent());
@@ -427,50 +504,83 @@ void Fetcher::send(const FetchRequest &request, std::function<void(const FetchRe
 
     auto *deadline = new QTimer(reply);
     deadline->setSingleShot(true);
-    connect(deadline, &QTimer::timeout, reply, [stop, limits] {
-        stop(QStringLiteral("timed out after %1 s").arg(limits.timeoutMs / 1000.0));
-    });
+    connect(deadline, &QTimer::timeout, reply, [stop, limits] { stop(timedOut(limits)); });
     deadline->start(int(budgetMs));
 
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, state, deadline, limits, hops, pinning, result, done]() mutable {
+            [this, reply, state, deadline, request, limits, hops, pinning, target, candidates, result,
+             done]() mutable {
+        // Qt asked for the proxy before connecting, so the route is done with.
+        if (pinning) {
+            const auto route = m_routes->routes.find(target);
+            if (route != m_routes->routes.end() && --route->requests == 0)
+                m_routes->routes.erase(route);
+        }
+        // Past the deadline when it is not positive, even if the deadline's
+        // timer has not run yet; then no further request is started.
         const qint64 remainingMs = deadline->remainingTime();
         deadline->stop();
         reply->deleteLater();
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QByteArray location = reply->rawHeader("Location");
+        // Nothing came back from this address, so the request is sent to the
+        // next one, as it is. A timeout can come after the request was
+        // written, so a server may have seen it once already; for a GET of
+        // an image that costs nothing.
+        if (candidates.size() > 1 && state->error.isEmpty() && status == 0 && state->body.isEmpty()
+            && notConnected(reply->error())) {
+            if (remainingMs <= 0) {
+                result.error = timedOut(limits);
+                return done(result);
+            }
+            send(request, std::move(done), limits, hops, remainingMs, candidates.mid(1));
+            return;
+        }
         if (pinning && state->error.isEmpty() && reply->error() == QNetworkReply::NoError
             && isRedirectStatus(status) && !location.isEmpty()) {
+            // A redirect's body costs what any other does.
+            state->body += reply->readAll();
+            result.received = state->body.size();
             // Resolved against the name, not the address the request went to.
-            const QUrl target = state->current.resolved(QUrl::fromEncoded(location));
+            const QUrl next = state->current.resolved(QUrl::fromEncoded(location));
             result.finalUrl = state->current;
             result.status = status;
-            result.error = refusedRedirect(state->current, target, limits);
+            result.error = refusedRedirect(state->current, next, limits);
             if (result.error.isEmpty() && hops >= limits.maxRedirects)
                 result.error = QStringLiteral("more than %1 redirects").arg(limits.maxRedirects);
+            if (result.error.isEmpty() && remainingMs <= 0)
+                result.error = timedOut(limits);
             if (!result.error.isEmpty())
                 return done(result);
             // The next hop is a new request, without the validators, which
             // belong to the first URL, and with what is left of the deadline.
-            fetchWithin({target, {}, {}}, [url = result.url, done](FetchResult next) {
-                next.url = url;
-                next.etag.clear();
-                next.lastModified.clear();
-                done(next);
-            }, limits, hops + 1, qMax<qint64>(1, remainingMs));
+            fetchWithin({next, {}, {}}, [url = result.url, received = result.received, done](FetchResult hop) {
+                hop.url = url;
+                hop.etag.clear();
+                hop.lastModified.clear();
+                hop.received += received;
+                done(hop);
+            }, limits, hops + 1, remainingMs);
             return;
         }
         if (state->restartAt.isValid() && state->error.isEmpty()) {
+            result.received = state->body.size();
+            if (remainingMs <= 0) {
+                result.error = timedOut(limits);
+                return done(result);
+            }
             // Starts over once at most: the new request has no validators.
             // It gets only what is left of the deadline and the redirects,
             // so the restart doesn't stretch the limits of the fetch.
             Limits remaining = limits;
-            remaining.timeoutMs = int(qMax<qint64>(1, remainingMs));
+            remaining.timeoutMs = int(remainingMs);
             remaining.maxRedirects = qMax(0, limits.maxRedirects - state->hops);
-            fetchWithin({state->restartAt, {}, {}}, [url = result.url, done](FetchResult restarted) {
+            fetchWithin({state->restartAt, {}, {}},
+                        [url = result.url, received = result.received, done](FetchResult restarted) {
                 restarted.url = url;
                 restarted.etag.clear();
                 restarted.lastModified.clear();
+                restarted.received += received;
                 done(restarted);
             }, remaining);
             return;
