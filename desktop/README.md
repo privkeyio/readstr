@@ -69,9 +69,9 @@ one with any other address, or none, is dropped along with its description.
 An image inside a link becomes that text inside the link, which opens the
 link's address rather than the image's. `O` opens the whole article there.
 
-**Load images for this article**, above an article that has images, fetches
-that article's images and shows them inline, this once: the next article,
-or this one opened again, shows links again. **Load remote images** (in
+**Load images for this article** (or `I`), above an article that has
+images, fetches that article's images and shows them inline, this once: the
+next article, or this one opened again, shows links again. **Load remote images** (in
 **Settings…** on the ⋮ menu) does the same for every article you open.
 Either way only the open article's images are fetched, never those of the
 list, and leaving the article drops the fetches still on their way. They
@@ -488,6 +488,7 @@ field.
 | `S` | Star or unstar |
 | `O` | Open the original in the browser |
 | `P` | Play the video in mpv |
+| `I` | Load images for this article |
 | `Ctrl+R` | Refresh all feeds |
 | `Ctrl+N` | Add a feed (its address, a site's, or a Nostr npub) |
 | `Ctrl+Shift+A` | Mark everything in the view read |

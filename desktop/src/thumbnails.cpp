@@ -447,6 +447,15 @@ QImage Thumbnails::decode(const QByteArray &data, const Limits &limits, QString 
     if (limits.maxStoredPixels > 0 && pixels > limits.maxStoredPixels) {
         const double scale = std::sqrt(double(limits.maxStoredPixels) / double(pixels));
         target = QSize(qMax(1, int(target.width() * scale)), qMax(1, int(target.height() * scale)));
+        // A side scaled below one pixel is held at one, which leaves the
+        // other too long for the cap (1 by 8192 would come to 1 by 5792), so
+        // the other side is cut to what the cap allows beside it.
+        if (qint64(target.width()) * target.height() > limits.maxStoredPixels) {
+            if (target.width() == 1)
+                target.setHeight(int(limits.maxStoredPixels));
+            else
+                target.setWidth(int(limits.maxStoredPixels));
+        }
     }
     if (target != size)
         reader.setScaledSize(target);
@@ -469,14 +478,17 @@ int Thumbnails::prune(const QString &directory, qint64 maxBytes, int maxAgeDays,
     // not fit, it and every one used before it go.
     const QFileInfoList files =
         QDir(directory).entryInfoList(QDir::Files | QDir::Hidden | QDir::NoSymLinks, QDir::Time);
+    // The files kept whatever happens take their share of maxBytes first,
+    // wherever they fall in the order, so the rest fit in what they leave.
     qint64 kept = 0;
+    for (const QFileInfo &file : files)
+        if (keep.contains(file.absoluteFilePath()))
+            kept += file.size();
     bool full = false;
     int removed = 0;
     for (const QFileInfo &file : files) {
-        if (keep.contains(file.absoluteFilePath())) {
-            kept += file.size();
+        if (keep.contains(file.absoluteFilePath()))
             continue;
-        }
         full = full || kept + file.size() > maxBytes;
         if (!full && file.lastModified() >= oldest) {
             kept += file.size();

@@ -11,10 +11,14 @@
 #include <unistd.h>
 #endif
 
+// The most readSmallFile() reads by default, which a settings file written
+// to be read back must stay within.
+constexpr qint64 maxSmallFileSize = 64 * 1024;
+
 // Reads a small settings file on the GUI thread. Only regular files of at most
 // `cap` bytes are read, so a symlink to /dev/zero or a FIFO can neither hang
 // the window nor run it out of memory. Anything else reads as null.
-inline QByteArray readSmallFile(const QString &path, qint64 cap = 64 * 1024) {
+inline QByteArray readSmallFile(const QString &path, qint64 cap = maxSmallFileSize) {
 #ifdef Q_OS_UNIX
     // Open once without blocking and check that descriptor, not the path:
     // checking the path and opening it again would leave a window in which a

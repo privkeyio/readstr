@@ -5,6 +5,7 @@
 #include <QSet>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 #include "feedparser.h"
 
@@ -141,8 +142,11 @@ QtStyle readQtStyle(const QString &style) {
 // The candidate of a srcset nearest Sanitizer::imageWidth: by width
 // descriptors, the widest at most that wide, else the narrowest; by pixel
 // densities (a bare URL is 1x), the densest at most 2x, else the least
-// dense. Empty when it names none. Only the first few candidates count.
-QString pickCandidate(const QString &srcset) {
+// dense. Each candidate is first put through `check`, which gives the
+// address to use or empty for one that cannot be used, so an unusable one
+// never wins over a usable one. Empty when it names none that can be used.
+// Only the first few candidates count.
+QString pickCandidate(const QString &srcset, const std::function<QString(const QString &)> &check) {
     constexpr int maxCandidates = 32;
     struct Candidate {
         QString url;
@@ -204,6 +208,9 @@ QString pickCandidate(const QString &srcset) {
         if (!candidate.url.isEmpty())
             candidates << candidate;
     }
+    for (Candidate &candidate : candidates)
+        candidate.url = check(candidate.url);
+    candidates.removeIf([](const Candidate &candidate) { return candidate.url.isEmpty(); });
     const bool byWidth = std::any_of(candidates.cbegin(), candidates.cend(),
                                      [](const Candidate &candidate) { return candidate.width > 0; });
     const double target = byWidth ? Sanitizer::imageWidth : 2;
@@ -478,7 +485,7 @@ private:
     // The image's source: its srcset's candidate, its data-src, or its src.
     QString imageSource(const Tag &tag) const {
         for (const QString *candidates : {&tag.dataSrcset, &tag.srcset}) {
-            const QString url = linkTarget(pickCandidate(*candidates));
+            const QString url = pickCandidate(*candidates, [this](const QString &href) { return linkTarget(href); });
             if (!url.isEmpty())
                 return url;
         }

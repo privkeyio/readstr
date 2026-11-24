@@ -16,6 +16,7 @@ Dialog {
     modal: true
     title: qsTr("Settings")
     Material.roundedScale: theme.radius
+    onOpened: remoteImages.forceActiveFocus()
 
     // Drawn plainly rather than through Material's elevation layer, which
     // the software scene graph leaves out.
@@ -49,13 +50,17 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: 8
 
+        // Takes the keyboard when the dialog opens, so Space or Enter turns
+        // it on or off; the window's single keys are off while it is open.
         Switch {
+            id: remoteImages
             objectName: "loadRemoteImages"
             Layout.fillWidth: true
             text: qsTr("Load remote images")
             checked: backend.settings.loadRemoteImages
-            focusPolicy: Qt.NoFocus
             onToggled: backend.settings.loadRemoteImages = checked
+            Keys.onReturnPressed: { toggle(); toggled() }
+            Keys.onEnterPressed: { toggle(); toggled() }
         }
 
         Label {

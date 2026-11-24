@@ -42,6 +42,7 @@ ApplicationWindow {
         { keys: "S", action: qsTr("Star or unstar") },
         { keys: "O", action: qsTr("Open the original in the browser") },
         { keys: "P", action: qsTr("Play the video in mpv") },
+        { keys: "I", action: qsTr("Load images for this article") },
         { keys: "Ctrl+R", action: qsTr("Refresh all feeds") },
         { keys: "Ctrl+N", action: qsTr("Add a feed") },
         { keys: "Ctrl+Shift+A", action: qsTr("Mark everything in the view read") },
@@ -87,6 +88,8 @@ ApplicationWindow {
     Shortcut { sequence: "S"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.toggleStar() }
     Shortcut { sequence: "O"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.openOriginal() }
     Shortcut { sequence: "P"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.playVideo() }
+    // The button above the article takes no focus, so this is how the keyboard loads its images.
+    Shortcut { sequence: "I"; context: Qt.ApplicationShortcut; enabled: win.keysFree && backend.articleHasImages && !backend.articleImagesShown; onActivated: backend.loadArticleImages() }
     Shortcut { sequence: "Ctrl+R"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.refreshAll() }
     Shortcut { sequence: "Ctrl+N"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: addDialog.open() }
     Shortcut { sequence: "Ctrl+Shift+A"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.markViewRead() }

@@ -45,6 +45,7 @@
 #include <stdexcept>
 #include <sys/stat.h>
 #include <thread>
+#include <tuple>
 
 #include "articlemodel.h"
 #include "backend.h"
@@ -10488,6 +10489,15 @@ private slots:
                  QString("https://t.example/lazy.png"));
         QCOMPARE(source("<img srcset=\"javascript:alert(1) 1x\" src=https://t.example/a.png>"),
                  QString("https://t.example/a.png"));
+        // A candidate that cannot be used never wins over one that can, and
+        // with none usable the other attributes are tried.
+        QCOMPARE(source("<img srcset=\"javascript:alert(1) 1500w, /good.png 800w\">"),
+                 QString("https://blog.example.com/good.png"));
+        QCOMPARE(source("<img srcset=\"https://t.example/good.png 1x, ftp://t.example/bad.png 2x\">"),
+                 QString("https://t.example/good.png"));
+        QCOMPARE(source("<img srcset=\"javascript:alert(1) 1500w, data:image/png;base64,AAAA 800w\" "
+                        "data-src=https://t.example/lazy.png src=https://t.example/a.png>"),
+                 QString("https://t.example/lazy.png"));
         QCOMPARE(source("<img src=https://t.example/a.png><p>x</p><img src=https://t.example/b.png>"
                         "<img src=https://t.example/a.png><img src=data:image/png;base64,AAAA>"),
                  QString("https://t.example/a.png https://t.example/b.png"));
@@ -10559,6 +10569,43 @@ private slots:
         QCOMPARE(QJsonDocument::fromJson(saved.readAll()).object(),
                  QJsonObject({{"loadRemoteImages", false}, {"future", QJsonArray{1, 2}}}));
         saved.close();
+
+        // A newer version's large key that reads now still reads after a
+        // change: indenting 10,000 zeros would take the file past the 64 KiB
+        // that is read.
+        QJsonArray zeros;
+        for (int i = 0; i < 10000; ++i)
+            zeros.append(0);
+        write(path, QJsonDocument(QJsonObject{{"future", zeros}}).toJson(QJsonDocument::Compact));
+        {
+            Settings settings;
+            QVERIFY(settings.error().isEmpty());
+            settings.setLoadRemoteImages(true);
+            QVERIFY2(settings.error().isEmpty(), qPrintable(settings.error()));
+        }
+        {
+            Settings reread;
+            QVERIFY2(reread.error().isEmpty(), qPrintable(reread.error()));
+            QVERIFY(reread.loadRemoteImages());
+        }
+        // One that the change would take past it is left as it is, and the
+        // change holds for the session and says why.
+        const QByteArray full = "{\"future\":\"" + QByteArray(64 * 1024 - 23, 'x') + "\"}";
+        QCOMPARE(full.size(), 64 * 1024 - 10);
+        write(path, full);
+        {
+            Settings settings;
+            QVERIFY(settings.error().isEmpty());
+            settings.setLoadRemoteImages(true);
+            QVERIFY(settings.loadRemoteImages());
+            QVERIFY2(settings.error().startsWith("cannot write " + path), qPrintable(settings.error()));
+        }
+        QFile unchanged(path);
+        QVERIFY(unchanged.open(QIODevice::ReadOnly));
+        QCOMPARE(unchanged.readAll(), full);
+        unchanged.close();
+        QVERIFY(Settings().error().isEmpty());
+        QVERIFY(!Settings().loadRemoteImages());
 
         // A value of the wrong type is its default, and no error.
         write(path, "{\"loadRemoteImages\": \"yes\"}");
@@ -10894,6 +10941,16 @@ private slots:
         QVERIFY(size.height() > 5600);
         QVERIFY(qAbs(double(size.height()) / size.width() - 8.0) < 0.02);
         QVERIFY(QFileInfo(tall.toLocalFile()).size() <= limits.maxStoredBytes);
+        // A side held at one pixel leaves the other no longer than the cap
+        // allows, and an image within the cap keeps its size.
+        Thumbnails::Limits cap;
+        cap.maxWidth = 8192;
+        cap.maxStoredPixels = 4096;
+        QString error;
+        QCOMPARE(Thumbnails::decode(png(1, 8192), cap, &error).size(), QSize(1, 4096));
+        QCOMPARE(Thumbnails::decode(png(8192, 1), cap, &error).size(), QSize(4096, 1));
+        QCOMPARE(Thumbnails::decode(png(64, 64), cap, &error).size(), QSize(64, 64));
+        QCOMPARE(Thumbnails::decode(png(200, 100), cap, &error).size(), QSize(90, 45));
         // The video thumbnails keep their own limits: no cap on the pixels.
         QCOMPARE(Thumbnails::Limits().maxStoredPixels, qint64(0));
         QCOMPARE(Thumbnails::Limits().maxStoredBytes, qint64(0));
@@ -10984,6 +11041,20 @@ private slots:
                                     QFileInfo(cache + "/3.jpg").absoluteFilePath()}),
                  2);
         QCOMPARE(QDir(cache).entryList(QDir::Files, QDir::Name), QStringList({"0.jpg", "3.jpg"}));
+
+        // What is kept takes its share first, wherever it falls in the
+        // order: a newer file that fits only beside nothing goes.
+        const QString shared = dir.filePath("shared");
+        QVERIFY(QDir().mkpath(shared));
+        for (const auto &[name, size, age] : {std::tuple{"new.jpg", 80, 0}, std::tuple{"old.jpg", 60, 3600}}) {
+            QFile file(shared + "/" + name);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write(QByteArray(size, 'x'));
+            QVERIFY(file.flush());
+            QVERIFY(file.setFileTime(now.addSecs(-age), QFileDevice::FileModificationTime));
+        }
+        QCOMPARE(Thumbnails::prune(shared, 100, 30, {QFileInfo(shared + "/old.jpg").absoluteFilePath()}), 1);
+        QCOMPARE(QDir(shared).entryList(QDir::Files), QStringList({"old.jpg"}));
     }
 
     // The prune at the start keeps to the limits the cache is made with:
@@ -11190,29 +11261,35 @@ private slots:
 
         // A change that cannot be saved says so; when the file then turns
         // unreadable and is mended elsewhere, the save's error is back, not
-        // the stale one that the file cannot be read.
-        const QFile::Permissions readOnly = QFile::ReadOwner;
-        const QFile::Permissions readWrite = QFile::ReadOwner | QFile::WriteOwner;
-        QVERIFY(QFile::setPermissions(path, readOnly));
-        window.setLoadRemoteImages(false);
+        // the stale one that the file cannot be read. A file where the
+        // config directory goes makes the save fail; a read-only
+        // settings.json would not for root, who may write it all the same.
+        const QString config = dir.path() + "/config";
+        QVERIFY(QDir(config).removeRecursively());
+        write(config, "x");
+        QTRY_VERIFY(!window.loadRemoteImages());
+        QVERIFY(window.error().isEmpty());
+        window.setLoadRemoteImages(true);
+        QVERIFY(window.loadRemoteImages());
         QVERIFY(!window.unreadable());
-        QVERIFY2(window.error().startsWith("cannot write"), qPrintable(window.error()));
+        QVERIFY2(window.error().startsWith("cannot create " + config), qPrintable(window.error()));
         const QString saveError = window.error();
-        QVERIFY(QFile::setPermissions(path, readWrite));
+        QVERIFY(QFile::remove(config));
+        QVERIFY(QDir().mkpath(config));
         write(path, "{\"loadRemoteImages\": tru");
-        QVERIFY(QFile::setPermissions(path, readOnly));
         QTRY_VERIFY(window.unreadable());
         QVERIFY2(window.error().startsWith("cannot read " + path), qPrintable(window.error()));
-        QVERIFY(QFile::setPermissions(path, readWrite));
-        write(path, "{\"loadRemoteImages\": true}");
-        QVERIFY(QFile::setPermissions(path, readOnly));
+        QVERIFY(window.loadRemoteImages());
+        write(path, "{\"loadRemoteImages\": false}");
         QTRY_VERIFY(!window.unreadable());
         QCOMPARE(window.error(), saveError);
-        QVERIFY(!window.loadRemoteImages());
-        QVERIFY(QFile::setPermissions(path, readWrite));
+        QVERIFY(window.loadRemoteImages());
+        // Asked for again, the change that could not be saved is saved now
+        // and its error cleared, though the window already shows it.
         window.setLoadRemoteImages(true);
-        QVERIFY(window.error().isEmpty());
+        QVERIFY2(window.error().isEmpty(), qPrintable(window.error()));
         QVERIFY(Settings().loadRemoteImages());
+        QCOMPARE(mode(config), 0700);
 
         // The window turns the article's images off with it.
         FakeHttpServer server;
@@ -11297,7 +11374,9 @@ private slots:
         qputenv("READSTR_HOME", dir.path().toUtf8());
         FakeHttpServer server;
         server.serve("/a.png", png(1200, 600), "image/png");
-        seedImageArticles({"<p>One</p><img src=\"" + server.url("/a.png").toString() + "\" alt=a>"});
+        server.serve("/b.png", png(60, 30), "image/png");
+        seedImageArticles({"<p>One</p><img src=\"" + server.url("/a.png").toString() + "\" alt=a>",
+                           "<p>Two</p><img src=\"" + server.url("/b.png").toString() + "\" alt=b>"});
         write(dir.path() + "/language", "en");
         QTest::failOnWarning(QRegularExpression("Binding loop|qrc:/|QQuickPixmap"));
         LoadedWindow loaded(dir.path() + "/language");
@@ -11341,7 +11420,25 @@ private slots:
         QVERIFY(!box->property("checked").toBool());
         QObject *dialog = loaded.window->findChild<QObject *>("settingsDialog");
         QVERIFY(dialog);
-        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        // The keyboard has the switch: Space and Enter turn it on and off,
+        // the window's single keys do nothing meanwhile, and Esc closes.
+        QTRY_VERIFY(qobject_cast<QQuickItem *>(box)->hasActiveFocus());
+        QTest::keyClick(loaded.window, Qt::Key_Space);
+        QVERIFY(loaded.backend->settings()->loadRemoteImages());
+        QVERIFY(box->property("checked").toBool());
+        QTest::keyClick(loaded.window, Qt::Key_Return);
+        QVERIFY(!loaded.backend->settings()->loadRemoteImages());
+        QVERIFY(!box->property("checked").toBool());
+        QTest::keyClick(loaded.window, Qt::Key_Enter, Qt::KeypadModifier);
+        QVERIFY(loaded.backend->settings()->loadRemoteImages());
+        QTest::keyClick(loaded.window, Qt::Key_Space);
+        QVERIFY(!Settings().loadRemoteImages());
+        QTest::keyClick(loaded.window, Qt::Key_Tab);
+        QCOMPARE(loaded.window->property("activePane").toString(), QString("articles"));
+        QTest::keyClick(loaded.window, Qt::Key_Question, Qt::ShiftModifier);
+        QVERIFY(!loaded.window->property("helpVisible").toBool());
+        QVERIFY(box->property("visible").toBool());
+        QTest::keyClick(loaded.window, Qt::Key_Escape);
         QTRY_VERIFY(!box->property("visible").toBool());
 
         // Off, the article lays out with its link alone and asks nothing.
@@ -11366,6 +11463,15 @@ private slots:
         QVERIFY(body->property("contentWidth").toReal() <= body->width() + 1);
         QTest::qWait(300);
         QCOMPARE(server.requests.size(), 1);
+
+        // I does what the button does, for the keyboard.
+        loaded.backend->selectArticle(1);
+        QTRY_VERIFY(button->property("visible").toBool());
+        QVERIFY(!loaded.backend->articleImagesShown());
+        QTest::keyClick(loaded.window, Qt::Key_I);
+        QTRY_VERIFY(loaded.backend->articleHtml().contains("<img src=\"file:"));
+        QTRY_VERIFY(!button->property("visible").toBool());
+        QCOMPARE(server.requests.size(), 2);
     }
 
     // Publishing

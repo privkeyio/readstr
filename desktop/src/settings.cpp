@@ -125,25 +125,39 @@ bool Settings::change(const QString &key, const QJsonValue &value) {
     QString error;
     read(&values, &error);
     error.clear();
+    // A value whose write failed is written again even when it is asked
+    // for again unchanged, so a retry once the problem is mended saves it
+    // and clears the error; only one the file already holds is skipped.
+    const bool unchanged = values.value(key) == value && !m_unsaved.contains(key);
     for (auto it = m_unsaved.constBegin(); it != m_unsaved.constEnd(); ++it)
         values.insert(it.key(), it.value());
-    if (values.value(key) == value) {
+    if (unchanged) {
         apply(values);
         return false;
     }
     values.insert(key, value);
+    // Compact, so that a file of large unknown keys which reads now is not
+    // pushed past the read limit by indentation; one that would still not
+    // read again is left as it is.
+    const QByteArray data = QJsonDocument(values).toJson(QJsonDocument::Compact);
     const QString directory = QFileInfo(m_path).absolutePath();
     // The directory holds the library's settings and, beside them, the
     // user's other private files, so only they may list it.
     if (m_path.isEmpty())
         error = QStringLiteral("no config directory: READSTR_HOME must be an absolute path, or unset it and set "
                                "XDG_CONFIG_HOME");
+    else if (data.size() > maxSmallFileSize)
+        error = QStringLiteral("cannot write %1: the settings would come to %2 bytes, more than the %3 that can be "
+                               "read back")
+                    .arg(m_path)
+                    .arg(data.size())
+                    .arg(maxSmallFileSize);
     else if (!QDir().mkpath(directory)
              || !QFile::setPermissions(directory,
                                        QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner))
         error = QStringLiteral("cannot create %1").arg(directory);
     else
-        Library::writePrivately(m_path, QJsonDocument(values).toJson(QJsonDocument::Indented), &error);
+        Library::writePrivately(m_path, data, &error);
     if (error.isEmpty())
         m_unsaved = {};
     else
