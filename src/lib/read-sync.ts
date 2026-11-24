@@ -2,11 +2,14 @@ import type { Event, UnsignedEvent } from 'nostr-tools'
 import {
   advanceSyncWatermarkIfFresh,
   fetchReadStatus,
+  getLastAppliedSyncCreatedAt,
   getReadSyncEnabled,
+  isAcceptableListCreatedAt,
   isSyncEventFresh,
   MAX_GUID_LEN,
   MAX_READ_ITEMS,
   publishReadStatus,
+  readStatusWatermarkTag,
 } from './nostr-sync'
 
 export const READ_STATUS_D_TAG = 'readstr-read-status'
@@ -159,6 +162,10 @@ export interface ReadSyncSession {
   // How long to wait before retrying the next failed cover run. Doubled on
   // each failure and reset by a run that finishes, so a 429 is not hammered.
   coverRetryDelay: number
+  // The greatest created_at this session has sent to the server as applied, or
+  // null, so a pull that finds an event this browser already applied tells the
+  // server at most once per session and event.
+  serverRecordedAt: number | null
 }
 
 export function newReadSyncSession(npub: string | null = null): ReadSyncSession {
@@ -172,6 +179,7 @@ export function newReadSyncSession(npub: string | null = null): ReadSyncSession 
     covering: false,
     coverAgain: false,
     coverRetryDelay: READ_SYNC_RETRY_MIN_MS,
+    serverRecordedAt: null,
   }
 }
 
@@ -201,6 +209,44 @@ export interface ReadListServer {
   getUncovered: () => Promise<ReadSyncUncoveredFeeds>
   markApplied: (feedIds: string[]) => Promise<unknown>
   onApplied: () => void
+}
+
+/**
+ * The created_at of the newest kind 30405 event applied or published by any of
+ * the account's browsers, kept on the server (null when none is recorded).
+ * Read state lives on the server, shared by those browsers, while the
+ * localStorage watermark is per browser, so a new browser would otherwise
+ * apply an event the others applied long ago and re-read items the user has
+ * marked unread since.
+ */
+export interface ReadListAppliedServer {
+  getAppliedCreatedAt: () => Promise<number | null>
+  advanceAppliedCreatedAt: (createdAt: number) => Promise<unknown>
+}
+
+function raiseServerRecordedAt(session: ReadSyncSession, createdAt: number): void {
+  if (session.serverRecordedAt == null || createdAt > session.serverRecordedAt) session.serverRecordedAt = createdAt
+}
+
+// Record on the server that an event with this created_at is applied, best
+// effort: if it fails, this browser's own watermark still keeps it from
+// applying the event again, and another browser applies it once more, which
+// only marks read again. Not for another account, since the call is made as
+// whoever is signed in now, and not for a created_at the server refuses.
+async function recordAppliedOnServer(
+  opts: ReadListAppliedServer & { npub: () => string | null | undefined },
+  session: ReadSyncSession,
+  createdAt: number | undefined
+): Promise<void> {
+  try {
+    if (!isAcceptableListCreatedAt(createdAt) || opts.npub() !== session.npub) return
+    await opts.advanceAppliedCreatedAt(createdAt)
+    // Noted only once the server has it, so a failed record is tried again on
+    // the next pull rather than skipped for the rest of the session.
+    raiseServerRecordedAt(session, createdAt)
+  } catch (error) {
+    console.warn('Read status sync could not record the applied list on the server:', error)
+  }
 }
 
 /**
@@ -242,10 +288,21 @@ function sessionAllowed(opts: {
  * never been applied to when the pull started are then marked applied, so the
  * cover run does not send it to them again. A pull that not every connected
  * relay answered still applies what it found, but leaves publishing locked.
- * Returns whether publishing is now safe (see ReadSyncSession.pulled), so
- * false means "retry the pull". Never throws.
+ * An event is fresh only when it is newer than both this browser's watermark
+ * for the account and the one the server keeps for it (see
+ * ReadListAppliedServer); the local one also covers an apply whose server
+ * record failed, and is sent to the server when it holds less. The unkeyed
+ * watermark older builds kept is not consulted: a browser that recorded no
+ * owner before the owner key existed may hold another account's there, and
+ * trusting it would leave this account's list unapplied while its
+ * publishes, recorded on the server, told the account's other browsers it was
+ * applied. So a browser upgraded before the server kept a record asks the
+ * server instead, and the first such browser of an account applies the newest
+ * list once more. Returns whether publishing is now
+ * safe (see ReadSyncSession.pulled), so false means "retry the pull". Never
+ * throws.
  */
-export async function pullReadStatus(opts: ReadListServer & {
+export async function pullReadStatus(opts: ReadListServer & ReadListAppliedServer & {
   canSign: () => boolean
   npub: () => string | null | undefined
   isCancelled?: () => boolean
@@ -283,9 +340,48 @@ export async function pullReadStatus(opts: ReadListServer & {
       return true
     }
     const guids = cleanPulledGuids(result.data.itemGuids)
-    if (!result.fresh || !isSyncEventFresh(READ_STATUS_D_TAG, result.createdAt)) {
+    const watermark = readStatusWatermarkTag(session.npub!)
+    if (
+      !result.fresh ||
+      !isSyncEventFresh(watermark, result.createdAt) ||
+      !isAcceptableListCreatedAt(result.createdAt)
+    ) {
       // Applied before, or published by this device: nothing to apply, but it
-      // is what the relays hold, so publishes build on it.
+      // is what the relays hold, so publishes build on it. One dated too far
+      // in the future is not applied either, as for subscription lists: it
+      // could not be recorded as applied, so every pull would apply it again.
+      // When this account's own watermark here covers it, the server is told,
+      // so a browser that applied it before the server kept a record (or whose
+      // record failed) stops the account's other browsers applying it again.
+      const own = getLastAppliedSyncCreatedAt(watermark)
+      if (
+        own != null &&
+        result.createdAt <= own &&
+        (session.serverRecordedAt == null || result.createdAt > session.serverRecordedAt)
+      ) {
+        await recordAppliedOnServer(opts, session, result.createdAt)
+      }
+      return settle(guids, result.complete)
+    }
+    // Without the server's answer the event may already be applied, and
+    // applying it again could re-read items marked unread since, so it is not
+    // applied. Publishing stays locked and the pull is retried, as for a relay
+    // that did not answer.
+    let appliedCreatedAt: number | null
+    try {
+      appliedCreatedAt = await opts.getAppliedCreatedAt()
+    } catch (error) {
+      console.warn('Read status sync could not read the applied list from the server:', error)
+      return settle(guids, false)
+    }
+    if (!live()) return false
+    if (appliedCreatedAt != null && result.createdAt <= appliedCreatedAt) {
+      // Another browser of this account applied or published it. It is still
+      // what the relays hold, so the cover run gives it to feeds it never
+      // reached. The local watermark catches up so later pulls skip the call,
+      // and the session knows the server needs no record of it.
+      advanceSyncWatermarkIfFresh(watermark, result.createdAt)
+      raiseServerRecordedAt(session, appliedCreatedAt)
       return settle(guids, result.complete)
     }
     // The feeds the list was never applied to, taken before the first chunk:
@@ -312,7 +408,8 @@ export async function pullReadStatus(opts: ReadListServer & {
       if (!live()) return false
     }
     opts.onApplied()
-    advanceSyncWatermarkIfFresh(READ_STATUS_D_TAG, result.createdAt)
+    advanceSyncWatermarkIfFresh(watermark, result.createdAt)
+    await recordAppliedOnServer(opts, session, result.createdAt)
     return settle(guids, result.complete)
   } catch (error) {
     console.error('Read status sync pull failed:', error)
@@ -406,16 +503,18 @@ function recordPublished(
   session.remote = guids
   session.remoteVersion++
   if (createdAt != null) raiseLatestSeenAt(session, createdAt)
-  if (npub === session.npub) advanceSyncWatermarkIfFresh(READ_STATUS_D_TAG, createdAt)
+  if (npub && npub === session.npub) advanceSyncWatermarkIfFresh(readStatusWatermarkTag(npub), createdAt)
 }
 
 /**
  * Publish the union of the server's read guids and the last list seen on the
  * relays, unless the relays already hold every guid in it. Waits for a
  * successful pull. Publishes are queued so two never race, and a failed one
- * does not block the next. Never throws.
+ * does not block the next. A published list counts as applied on the server:
+ * it was built from the server's read state, so another browser of the
+ * account must not apply it again. Never throws.
  */
-export function publishReadStatusIfChanged(opts: {
+export function publishReadStatusIfChanged(opts: ReadListAppliedServer & {
   canSign: () => boolean
   npub: () => string | null | undefined
   session: ReadSyncSession
@@ -446,8 +545,10 @@ export function publishReadStatusIfChanged(opts: {
         },
         nextCreatedAt(session)
       )
-      if (result.success) recordPublished(session, guids, result.createdAt, opts.npub())
-      else {
+      if (result.success) {
+        recordPublished(session, guids, result.createdAt, opts.npub())
+        await recordAppliedOnServer(opts, session, result.createdAt)
+      } else {
         console.warn('Read status auto-export failed:', result.error)
       }
     } catch (error) {
@@ -462,9 +563,10 @@ export function publishReadStatusIfChanged(opts: {
  * After the setting is turned off, replace the published list with an empty
  * one, best effort. Relays and other clients may keep older copies. Queued
  * behind any publish in flight, and skipped if the setting was turned back on
- * or the account changed by the time it runs. Never throws.
+ * or the account changed by the time it runs. The empty list is recorded on
+ * the server like any publish: there is nothing in it to apply. Never throws.
  */
-export function withdrawReadStatus(opts: {
+export function withdrawReadStatus(opts: ReadListAppliedServer & {
   canSign: () => boolean
   npub: () => string | null | undefined
   session: ReadSyncSession
@@ -478,8 +580,10 @@ export function withdrawReadStatus(opts: {
       if (getReadSyncEnabled() || !opts.canSign() || !npub || npub !== session.npub) return
       const result = await (opts.publish ?? publishReadStatus)([], opts.signEvent, nextCreatedAt(session))
       // npub is read again: the account may have changed while signing.
-      if (result.success) recordPublished(session, [], result.createdAt, opts.npub())
-      else {
+      if (result.success) {
+        recordPublished(session, [], result.createdAt, opts.npub())
+        await recordAppliedOnServer(opts, session, result.createdAt)
+      } else {
         console.warn('Read status withdraw failed:', result.error)
       }
     } catch (error) {

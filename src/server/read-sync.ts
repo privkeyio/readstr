@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { MAX_READ_ITEMS, readGuidSchema } from '@/lib/nostr-sync'
+import { isAcceptableListCreatedAt, MAX_READ_ITEMS, readGuidSchema } from '@/lib/nostr-sync'
 import { READ_SYNC_FEED_IDS_MAX } from '@/lib/read-sync'
 
 export { ReadSyncGuidCollector } from '@/lib/read-sync'
@@ -23,6 +23,21 @@ export const markReadByGuidsInputSchema = readGuidsInputSchema.extend({
 
 export const markReadListAppliedInputSchema = z.object({
   feedIds: readSyncFeedIdsSchema,
+})
+
+// The account only keys the client's query cache, so a request still in flight
+// for the account signed in before is never joined by the next one. The
+// server answers for the caller (ctx.nostrPubkey) and ignores it.
+export const getReadListAppliedInputSchema = z
+  .object({ account: z.string().max(200) })
+  .optional()
+
+// A created_at far in the future would stop every later event from counting as
+// newer, so it is refused, as the subscription sync refuses such lists.
+export const advanceReadListAppliedInputSchema = z.object({
+  createdAt: z.number().refine((createdAt) => isAcceptableListCreatedAt(createdAt), {
+    message: 'created_at is not a valid time or is too far in the future',
+  }),
 })
 
 /**

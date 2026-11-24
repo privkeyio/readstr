@@ -38,7 +38,7 @@ vi.mock('nostr-tools', async (importOriginal) => {
   return { ...actual, SimplePool: FakePool }
 })
 
-const { fetchReadStatus, publishReadStatus, APPLIED_CREATEDAT_PREFIX, MAX_CONTENT_BYTES } = await import('./nostr-sync')
+const { fetchReadStatus, publishReadStatus, APPLIED_CREATEDAT_PREFIX, MAX_CONTENT_BYTES, readStatusWatermarkTag } = await import('./nostr-sync')
 
 const PUBKEY = '3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d'
 const RELAYS = ['wss://a.invalid', 'wss://b.invalid']
@@ -109,7 +109,10 @@ describe('fetchReadStatus', () => {
       fresh: true,
       complete: false,
     })
+    // The unkeyed watermark older builds wrote may be another account's.
     localStorage.setItem(APPLIED_CREATEDAT_PREFIX + 'readstr-read-status', '100')
+    await expect(fetchWithTimers()).resolves.toMatchObject({ found: true, fresh: true })
+    localStorage.setItem(APPLIED_CREATEDAT_PREFIX + readStatusWatermarkTag(PUBKEY), '100')
     await expect(fetchWithTimers()).resolves.toMatchObject({ found: true, fresh: false })
   })
 

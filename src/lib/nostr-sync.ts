@@ -837,6 +837,19 @@ export function setLastAppliedSyncCreatedAt(dTag: string, createdAt: number): vo
 }
 
 /**
+ * The watermark d-tag for one account's read status list. Unlike the other
+ * lists, it is kept per account: applying it marks items read in that
+ * account's server state, which every browser of the account then trusts (see
+ * the applied created_at in read-sync.ts), so one account's watermark must
+ * never make another skip its own list on a shared browser. The unkeyed
+ * 'readstr-read-status' watermark older builds wrote is no longer read: on a
+ * browser that predates the owner key, nothing says which account wrote it.
+ */
+export function readStatusWatermarkTag(npub: string): string {
+  return `readstr-read-status:${npub}`
+}
+
+/**
  * Determine whether a fetched sync event is newer than the last applied one.
  * Equal-or-older events are stale and must be ignored to prevent rollback.
  */
@@ -962,7 +975,7 @@ export async function fetchReadStatus(userPubkey: string): Promise<ReadStatusFet
       found: true,
       data: parsed.data,
       createdAt: event.created_at,
-      fresh: isSyncEventFresh('readstr-read-status', event.created_at),
+      fresh: isSyncEventFresh(readStatusWatermarkTag(userPubkey), event.created_at),
       complete,
     }
   } catch (error) {

@@ -115,6 +115,14 @@ model UserPreference {
     @@index([userPubkey])
 }
 
+// Read-status sync state the user's browsers share. Not on UserPreference:
+// getFeeds reads its updatedAt as the last subscription sync, and this changes
+// on every read-status publish, which would keep that sync from running.
+model ReadSyncState {
+    userPubkey               String @id // Nostr pubkey
+    readListAppliedCreatedAt BigInt // created_at (unix seconds) of the newest kind 30405 event applied or published from the web
+}
+
 model ReadItem {
     id         String   @id @default(cuid())
     userPubkey String   // Nostr pubkey  

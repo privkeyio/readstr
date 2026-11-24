@@ -409,3 +409,84 @@ describe('feed.markReadListApplied', () => {
     await expect(caller.markReadListApplied({ feedIds: ['feed-1'] })).rejects.toMatchObject({ code: 'TOO_MANY_REQUESTS' })
   })
 })
+
+describe('the applied read list created_at', () => {
+  type Row = { userPubkey: string; readListAppliedCreatedAt: bigint }
+
+  // ReadSyncState as Postgres keeps it: createMany with skipDuplicates
+  // skips an existing key, updateMany applies its `lt` condition.
+  function fakeReadSyncState(rows: Row[] = []) {
+    return {
+      rows,
+      findUnique: vi.fn(async (args: { where: { userPubkey: string } }) =>
+        rows.find((row) => row.userPubkey === args.where.userPubkey) ?? null
+      ),
+      createMany: vi.fn(async (args: { data: Row[]; skipDuplicates: boolean }) => {
+        let count = 0
+        for (const row of args.data) {
+          if (rows.some((r) => r.userPubkey === row.userPubkey)) {
+            if (!args.skipDuplicates) throw new Error('Unique constraint failed')
+            continue
+          }
+          rows.push({ ...row })
+          count++
+        }
+        return { count }
+      }),
+      updateMany: vi.fn(
+        async (args: {
+          where: { userPubkey: string; readListAppliedCreatedAt: { lt: bigint } }
+          data: { readListAppliedCreatedAt: bigint }
+        }) => {
+          let count = 0
+          for (const row of rows) {
+            if (row.userPubkey !== args.where.userPubkey) continue
+            if (!(row.readListAppliedCreatedAt < args.where.readListAppliedCreatedAt.lt)) continue
+            row.readListAppliedCreatedAt = args.data.readListAppliedCreatedAt
+            count++
+          }
+          return { count }
+        }
+      ),
+    }
+  }
+
+  it('is null until recorded, then only ever raised', async () => {
+    const readSyncState = fakeReadSyncState([{ userPubkey: OTHER, readListAppliedCreatedAt: BigInt(9_000) }])
+    const caller = feedRouter.createCaller(ctx({ readSyncState }))
+    await expect(caller.getReadListAppliedCreatedAt()).resolves.toEqual({ createdAt: null })
+
+    await expect(caller.advanceReadListAppliedCreatedAt({ createdAt: 1_000 })).resolves.toEqual({ advanced: true })
+    await expect(caller.getReadListAppliedCreatedAt()).resolves.toEqual({ createdAt: 1_000 })
+    await expect(caller.advanceReadListAppliedCreatedAt({ createdAt: 2_000 })).resolves.toEqual({ advanced: true })
+    for (const older of [2_000, 1_500]) {
+      await expect(caller.advanceReadListAppliedCreatedAt({ createdAt: older })).resolves.toEqual({ advanced: false })
+    }
+    await expect(caller.getReadListAppliedCreatedAt()).resolves.toEqual({ createdAt: 2_000 })
+    // The account in the input only keys the client's cache: the caller's row answers.
+    await expect(caller.getReadListAppliedCreatedAt({ account: OTHER })).resolves.toEqual({ createdAt: 2_000 })
+    expect(readSyncState.rows.find((row) => row.userPubkey === OTHER)?.readListAppliedCreatedAt).toBe(BigInt(9_000))
+  })
+
+  it('refuses a created_at that is not a time or is too far in the future', async () => {
+    const readSyncState = fakeReadSyncState()
+    const caller = feedRouter.createCaller(ctx({ readSyncState }))
+    const bad = { code: 'BAD_REQUEST' }
+    const future = Math.floor(Date.now() / 1000) + 3600
+    for (const createdAt of [future, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2]) {
+      await expect(caller.advanceReadListAppliedCreatedAt({ createdAt })).rejects.toMatchObject(bad)
+    }
+    await expect(caller.advanceReadListAppliedCreatedAt({} as never)).rejects.toMatchObject(bad)
+    expect(readSyncState.createMany).not.toHaveBeenCalled()
+    expect(readSyncState.updateMany).not.toHaveBeenCalled()
+    await expect(caller.advanceReadListAppliedCreatedAt({ createdAt: Math.floor(Date.now() / 1000) + 60 })).resolves.toEqual({ advanced: true })
+  })
+
+  it('is rate limited per user', async () => {
+    const caller = feedRouter.createCaller(ctx({ readSyncState: fakeReadSyncState() }))
+    for (let i = 0; i < 120; i++) await caller.getReadListAppliedCreatedAt()
+    await expect(caller.getReadListAppliedCreatedAt()).rejects.toMatchObject({ code: 'TOO_MANY_REQUESTS' })
+    for (let i = 0; i < 120; i++) await caller.advanceReadListAppliedCreatedAt({ createdAt: i })
+    await expect(caller.advanceReadListAppliedCreatedAt({ createdAt: 500 })).rejects.toMatchObject({ code: 'TOO_MANY_REQUESTS' })
+  })
+})

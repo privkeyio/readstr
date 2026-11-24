@@ -9,7 +9,9 @@ import { MAX_RELAY_URL_LENGTH, MAX_CLIENT_RELAYS } from '@/lib/relays'
 import { discoverFeed } from '@/lib/feed-discovery'
 import { READ_SYNC_FEED_IDS_MAX } from '@/lib/read-sync'
 import {
+  advanceReadListAppliedInputSchema,
   chunk,
+  getReadListAppliedInputSchema,
   GUID_QUERY_CHUNK,
   markReadByGuidsInputSchema,
   markReadListAppliedInputSchema,
@@ -66,6 +68,10 @@ const MARK_READ_BY_GUIDS_PER_10_MIN = 250
 const MARK_READ_BY_GUIDS_COVER_PER_10_MIN = 250
 const READ_SYNC_UNCOVERED_PER_10_MIN = 120
 const MARK_READ_LIST_APPLIED_PER_10_MIN = 60
+// The applied list's created_at is read once per pull and recorded once per
+// applied pull or publish, and publishes are debounced, so this only stops a
+// runaway client.
+const READ_LIST_APPLIED_CREATED_AT_PER_10_MIN = 120
 
 // Type for subscription with feed include
 type SubscriptionWithFeed = Prisma.SubscriptionGetPayload<{ include: { feed: true } }>
@@ -2276,5 +2282,42 @@ export const feedRouter = createTRPCRouter({
         data: { readListAppliedAt: new Date() },
       })
       return { updated: result.count }
+    }),
+
+  // The created_at of the newest kind 30405 event any of the caller's browsers
+  // applied or published, or null. Read state lives here, shared by all of
+  // them, so a browser must not apply an event this says is already applied,
+  // even though its own watermark (in localStorage) has never seen it.
+  getReadListAppliedCreatedAt: subscribedProcedure
+    .input(getReadListAppliedInputSchema)
+    .query(async ({ ctx }) => {
+      limitPerUser('feed.getReadListAppliedCreatedAt', ctx.nostrPubkey, READ_LIST_APPLIED_CREATED_AT_PER_10_MIN, 10 * 60 * 1000)
+      const row = await ctx.db.readSyncState.findUnique({
+        where: { userPubkey: ctx.nostrPubkey },
+        select: { readListAppliedCreatedAt: true },
+      })
+      return { createdAt: row ? Number(row.readListAppliedCreatedAt) : null }
+    }),
+
+  // Record that an event with this created_at was applied or published. Only
+  // ever raised: each step is one conditional statement, so a browser that
+  // records an older event after another recorded a newer one changes nothing.
+  advanceReadListAppliedCreatedAt: subscribedProcedure
+    .input(advanceReadListAppliedInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      limitPerUser('feed.advanceReadListAppliedCreatedAt', ctx.nostrPubkey, READ_LIST_APPLIED_CREATED_AT_PER_10_MIN, 10 * 60 * 1000)
+      const createdAt = BigInt(input.createdAt)
+      // An insert that skips an existing row, so two browsers recording at
+      // once cannot both create it and fail on the key.
+      const created = await ctx.db.readSyncState.createMany({
+        data: [{ userPubkey: ctx.nostrPubkey, readListAppliedCreatedAt: createdAt }],
+        skipDuplicates: true,
+      })
+      if (created.count > 0) return { advanced: true }
+      const raised = await ctx.db.readSyncState.updateMany({
+        where: { userPubkey: ctx.nostrPubkey, readListAppliedCreatedAt: { lt: createdAt } },
+        data: { readListAppliedCreatedAt: createdAt },
+      })
+      return { advanced: raised.count > 0 }
     }),
 })
