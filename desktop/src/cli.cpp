@@ -24,6 +24,7 @@ void usage(QTextStream &stream) {
     stream << "Usage: readstr [open]\n"
               "       readstr feeds [--json]\n"
               "       readstr articles [--feed ID] [--unread] [--starred] [--limit N] [--json]\n"
+              "       readstr search QUERY [--feed ID] [--unread] [--starred] [--limit N] [--json]\n"
               "       readstr subscribe URL|NPUB [--json]\n"
               "       readstr unsubscribe ID\n"
               "       readstr refresh [--feed ID] [--json]\n"
@@ -190,13 +191,25 @@ int feeds(const QString &command, const QStringList &arguments, QTextStream &out
     return 0;
 }
 
+// `articles`, and `search`, which takes the words to search for and lists
+// the best matches first.
 int articles(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
     Options options;
     if (!parseOptions(command, arguments, {"--json", "--unread", "--starred"}, {"--feed", "--limit"}, options, err))
         return 1;
-    if (!options.positional.isEmpty())
-        return fail(command, "takes no arguments", err);
     ArticleFilter filter;
+    if (command == QLatin1String("search")) {
+        if (options.positional.isEmpty())
+            return fail(command, "needs words to search for", err);
+        filter.query = options.positional.join(' ');
+        if (filter.query.size() > Store::maxQueryLength)
+            return fail(command, QStringLiteral("the query is longer than %1 characters").arg(Store::maxQueryLength),
+                        err);
+        if (Store::matchExpression(filter.query).isEmpty())
+            return fail(command, "the query has no letters or digits to search for", err);
+    } else if (!options.positional.isEmpty()) {
+        return fail(command, "takes no arguments", err);
+    }
     filter.unreadOnly = options.flags.contains("--unread");
     filter.starredOnly = options.flags.contains("--starred");
     if (options.values.contains("--feed") && !parseId(command, options.values.value("--feed"), filter.feedId, err))
@@ -575,6 +588,7 @@ int help(const QString &, const QStringList &, QTextStream &out, QTextStream &) 
 constexpr Command commands[] = {
     {"feeds", feeds},
     {"articles", articles},
+    {"search", articles},
     {"subscribe", subscribe},
     {"unsubscribe", unsubscribe},
     {"refresh", refresh},

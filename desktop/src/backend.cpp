@@ -229,7 +229,19 @@ ArticleFilter Backend::currentFilter() const {
         filter.starredOnly = true;
     else if (row.kind == SourceModel::Kind::Feed)
         filter.feedId = row.feedId;
+    filter.query = m_searchQuery;
     return filter;
+}
+
+void Backend::setSearchQuery(const QString &query) {
+    if (query == m_searchQuery)
+        return;
+    const QString before = Store::matchExpression(m_searchQuery);
+    m_searchQuery = query;
+    emit searchChanged();
+    // A space typed after a word, or a stray quote, searches for the same.
+    if (Store::matchExpression(query) != before)
+        loadArticles();
 }
 
 void Backend::reloadLibrary() {

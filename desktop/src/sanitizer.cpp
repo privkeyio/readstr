@@ -138,7 +138,8 @@ QtStyle readQtStyle(const QString &style) {
 
 class Writer {
 public:
-    Writer(const QUrl &base, bool qtStyles) : m_base(base), m_qtStyles(qtStyles) {}
+    Writer(const QUrl &base, bool qtStyles, bool imageLabels)
+        : m_base(base), m_qtStyles(qtStyles), m_imageLabels(imageLabels) {}
 
     void text(QStringView raw) {
         if (raw.isEmpty())
@@ -397,20 +398,30 @@ private:
         alt = alt.simplified();
         if (alt.size() > maxAltLength)
             alt = alt.left(maxAltLength) + QChar(0x2026);
-        const QString label = alt.isEmpty()
-                                  ? QCoreApplication::translate("Sanitizer", "[image]")
-                                  : QCoreApplication::translate("Sanitizer", "[image: %1]").arg(alt);
+        QString label;
+        if (!m_imageLabels)
+            label = alt;
+        else if (alt.isEmpty())
+            label = QCoreApplication::translate("Sanitizer", "[image]");
+        else
+            label = QCoreApplication::translate("Sanitizer", "[image: %1]").arg(alt);
+        if (label.isEmpty())
+            return;
+        // The description alone has no brackets to part it from the words
+        // around it, which a link holding the image would run into it.
+        const QString padding = m_imageLabels ? QString() : QStringLiteral(" ");
         // Inside a link the label is part of that link already.
         if (m_open.contains(QLatin1String("a")))
-            m_out += label.toHtmlEscaped();
+            m_out += padding + label.toHtmlEscaped() + padding;
         else
-            m_out += QLatin1String("<a href=\"") + url.toHtmlEscaped() + QLatin1String("\">") + label.toHtmlEscaped()
-                     + QLatin1String("</a>");
+            m_out += padding + QLatin1String("<a href=\"") + url.toHtmlEscaped() + QLatin1String("\">")
+                     + label.toHtmlEscaped() + QLatin1String("</a>") + padding;
         m_boundary = false;
     }
 
     QUrl m_base;
     bool m_qtStyles = false;
+    bool m_imageLabels = true;
     bool m_quoting = false;
     QList<qsizetype> m_spans;
     int m_spanOverflow = 0;
@@ -570,7 +581,7 @@ QString linesToRichText(const QString &text) {
 QString toRichText(const QString &input, const QUrl &base, const Options &options) {
     const QString html = input.left(options.maxInputLength);
     const qsizetype size = html.size();
-    Writer writer(base, options.qtStyles);
+    Writer writer(base, options.qtStyles, options.imageLabels);
     // Inside an element dropped with its content: its name and how deeply it
     // nests in itself.
     QString skipping;

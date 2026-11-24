@@ -115,6 +115,11 @@ struct ArticleFilter {
     qint64 alsoId = 0;
     // Lists in the window leave the content out; the reader asks article().
     bool withContent = true;
+    // Words to search the title, author, summary, and text for, as the user
+    // typed them (Store::matchExpression()). When set, only the articles
+    // with every word are listed, best match first; alsoId is listed only
+    // if it matches too. A query without a word lists as though none was set.
+    QString query = {};
 };
 
 struct LibraryCounts {
@@ -232,6 +237,17 @@ public:
 
     // The key two feed URLs share when they are the same subscription.
     static QString urlKey(const QString &url);
+    // `query` as an FTS5 MATCH expression that is only ever words: every
+    // whitespace-separated term with a letter or digit in it, quoted as a
+    // string, so none can be an operator (AND, OR, NOT, NEAR), a column
+    // filter, a parenthesis, or a ^ or *, and the last matched as a prefix,
+    // as it may still be being typed, unless its last word is a single letter
+    // or digit (of a script that separates words with spaces).
+    // An unpaired surrogate becomes U+FFFD. Empty when no term is left. Input
+    // past maxQueryLength characters or maxQueryTerms terms is ignored.
+    static QString matchExpression(const QString &query);
+    static constexpr int maxQueryLength = 256;
+    static constexpr int maxQueryTerms = 16;
 
 private:
     bool migrate();
@@ -245,6 +261,12 @@ private:
     bool updateSyncAccount(const QString &pubkey, const QString &assignments, const QVariantList &values);
     qint64 categoryId(const QString &name);
     bool clearSyncState();
+    // Puts the item `id` in the search index, or puts it there again in
+    // place of what it had, with `insert` prepared by prepareIndex().
+    bool indexItem(QSqlQuery &insert, qint64 id, const QString &title, const QString &author, const QString &summary,
+                   const QString &content, const QString &address, const QString &url);
+    bool prepareIndex(QSqlQuery &insert);
+    bool backfillSearchIndex();
 
     QString m_connection;
     QSqlDatabase m_db;

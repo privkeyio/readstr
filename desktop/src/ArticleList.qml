@@ -3,15 +3,37 @@ import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Layouts
 
-// The articles of the selected source, newest first.
+// The articles of the selected source, newest first, or those of them a
+// search finds, best match first.
 Rectangle {
     id: pane
 
     property bool active: false
+    // Whether Esc has a search to clear: one typed, or the field ready for one.
+    readonly property bool searchOpen: searchField.activeFocus || searchField.text !== ""
 
     signal activated()
 
     color: theme.background
+
+    function focusSearch() {
+        searchField.forceActiveFocus()
+        searchField.selectAll()
+    }
+
+    function clearSearch() {
+        searchDelay.stop()
+        searchField.clear()
+        backend.searchQuery = ""
+        leaveSearch()
+    }
+
+    // The keyboard goes back to the list, so J, K and the other single keys
+    // act on it rather than type into the field.
+    function leaveSearch() {
+        if (searchField.activeFocus)
+            list.forceActiveFocus()
+    }
 
     function viewName() {
         switch (backend.sourceKind) {
@@ -53,6 +75,34 @@ Rectangle {
                 font.pixelSize: 11
                 opacity: 0.55
             }
+        }
+
+        TextField {
+            id: searchField
+            objectName: "searchField"
+            Layout.fillWidth: true
+            Layout.leftMargin: 12
+            Layout.rightMargin: 12
+            Layout.bottomMargin: 6
+            placeholderText: qsTr("Search articles")
+            // As much as the library searches for; the rest would be ignored.
+            maximumLength: 256
+            inputMethodHints: Qt.ImhNoAutoUppercase
+            Material.roundedScale: theme.radius
+            // The list follows a pause in typing rather than every key, so a
+            // large library is not searched once a letter.
+            onTextEdited: searchDelay.restart()
+            onAccepted: {
+                searchDelay.stop()
+                backend.searchQuery = text
+                pane.leaveSearch()
+            }
+        }
+
+        Timer {
+            id: searchDelay
+            interval: 250
+            onTriggered: backend.searchQuery = searchField.text
         }
 
         ListView {
@@ -162,6 +212,7 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     onClicked: {
+                        pane.leaveSearch()
                         backend.selectArticle(row.index)
                         pane.activated()
                     }
@@ -176,7 +227,8 @@ Rectangle {
         visible: backend.articles.count === 0 && backend.feedCount > 0
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.Wrap
-        text: backend.sourceKind === "unread" ? qsTr("All caught up")
+        text: backend.searching ? qsTr("No articles match the search")
+            : backend.sourceKind === "unread" ? qsTr("All caught up")
             : backend.sourceKind === "starred" ? qsTr("Press S to star an article")
             : qsTr("No articles yet")
         textFormat: Text.PlainText

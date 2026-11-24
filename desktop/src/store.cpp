@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QThread>
@@ -13,6 +14,7 @@
 #include <QUrl>
 #include <QUrlQuery>
 #include <QVariant>
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstring>
@@ -20,7 +22,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "feedparser.h"
+#include "markdown.h"
 #include "paths.h"
+#include "sanitizer.h"
 
 namespace {
 // Each entry moves the schema up one version (PRAGMA user_version), inside a
@@ -156,7 +161,105 @@ const QList<QStringList> migrations = {
         "ALTER TABLE sync_account ADD COLUMN publish_confirmed INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE sync_account ADD COLUMN publish_pending INTEGER NOT NULL DEFAULT 0",
     },
+    {
+        // Full-text search over each item's title, author, and body: its
+        // summary and the plain text of its content, as the reader shows it
+        // (searchBody()), so no tag, attribute, or link address it hides
+        // matches. SQL cannot strip HTML, so an external-content table,
+        // which triggers keep from the item's own columns, would index the
+        // markup; and a stored plain-text column would hold every article's
+        // text twice.
+        // So the index is contentless (it keeps only the index, rowid being
+        // the item's id) and saveItems() writes it, in the same transaction
+        // as the item, whenever the text changes. A deleted item leaves it
+        // by this trigger, which a feed's cascade fires as well, whatever
+        // deletes it. Contentless deletes need SQLite 3.43; Store::open()
+        // checks first. The tokenizer folds case and diacritics (creme
+        // finds crème). The last word of a search is a prefix, and each
+        // keystroke searches, so prefixes of two and three characters have
+        // an index of their own; it is set here because a contentless table
+        // cannot be rebuilt with one later. migrate() fills it from the
+        // existing items.
+        "CREATE VIRTUAL TABLE items_fts USING fts5(title, author, body, content='', contentless_delete=1,"
+        " prefix='2 3', tokenize='unicode61 remove_diacritics 2')",
+        "CREATE TRIGGER items_fts_delete AFTER DELETE ON items BEGIN"
+        " DELETE FROM items_fts WHERE rowid = old.id; END",
+    },
 };
+
+// The migration that creates items_fts, after which migrate() indexes the
+// items already there.
+constexpr int searchIndexVersion = 7;
+
+// Title, author, and body, as bm25() weighs a match in each.
+const char searchScore[] = "bm25(items_fts, 10.0, 5.0, 1.0)";
+
+// The text of a Markdown article without its link and image addresses,
+// "[text](address)" keeping only the text: one pass, and a "](" that is not
+// closed on its line is kept as written, so hostile input stays linear.
+QString withoutLinkTargets(const QString &markdown) {
+    QString text;
+    text.reserve(markdown.size());
+    const qsizetype size = markdown.size();
+    for (qsizetype i = 0; i < size;) {
+        if (markdown.at(i) != ']' || i + 1 >= size || markdown.at(i + 1) != '(') {
+            text += markdown.at(i++);
+            continue;
+        }
+        qsizetype end = i + 2;
+        while (end < size && markdown.at(end) != ')' && markdown.at(end) != '\n')
+            ++end;
+        if (end < size && markdown.at(end) == ')') {
+            text += QLatin1String("] ");
+            i = end + 1;
+        } else {
+            text += QStringView(markdown).mid(i, end - i);
+            i = end;
+        }
+    }
+    // Reference definitions, "[label]: address", show nothing.
+    static const QRegularExpression definition(QStringLiteral("^ {0,3}\\[[^\\]\\n]{1,999}\\]:[^\\n]*$"),
+                                               QRegularExpression::MultilineOption);
+    text.remove(definition);
+    return text;
+}
+
+// What the search index holds as an item's body: its summary, which is
+// plain text already, and the words of its content as the reader shows
+// them. HTML goes through the sanitizer first, so what it drops (scripts,
+// styles, forms, every attribute) is not indexed either, and then loses its
+// tags. Markdown (a Nostr long-form article's) loses only its link
+// addresses: the reader renders it without HTML, showing any tag, comment,
+// or autolink as the text it is, so stripping tags would drop words the
+// reader shows (all of an article after an unclosed <style>, an <https://…>
+// autolink, the text of `a<b && c>d`). Its entities are decoded, as the
+// reader shows them, and its Markdown punctuation the tokenizer skips. Both
+// are cut where the reader cuts them.
+QString searchBody(const QString &summary, const QString &content, const QString &address, const QString &url) {
+    QString text;
+    if (!content.isEmpty()) {
+        if (!address.isEmpty()) {
+            QString markdown = content.left(Markdown::maxInputLength);
+            if (content.size() > Markdown::maxInputLength && markdown.back().isHighSurrogate())
+                markdown.chop(1);
+            text = FeedParser::cleanText(FeedParser::decodeEntities(withoutLinkTargets(markdown)));
+        } else {
+            Sanitizer::Options options;
+            options.imageLabels = false;
+            // The sanitizer keeps only Qt's tags, and of those an inline
+            // one (a, b, em, code, ...) is no break in the reader's text,
+            // so it is none in the index; its blocks and <br> still part
+            // words, as do the spaces it puts around an image's description.
+            text = FeedParser::plainText(Sanitizer::toRichText(content, QUrl(url), options),
+                                         FeedParser::InlineTags::Join);
+        }
+        // The sanitizer's breaks in long words, which would split them.
+        text.remove(QChar(0x200B));
+    }
+    if (summary.isEmpty())
+        return text;
+    return text.isEmpty() ? summary : summary + QLatin1Char('\n') + text;
+}
 
 std::atomic<int> connectionCounter{0};
 
@@ -192,6 +295,12 @@ Feed feedFrom(const QSqlQuery &query) {
 
 QVariant timestamp(const QDateTime &time) {
     return time.isValid() ? QVariant(time.toSecsSinceEpoch()) : QVariant(QMetaType::fromType<qint64>());
+}
+
+QByteArray sqliteVersion(const QSqlDatabase &db) {
+    QSqlQuery query(db);
+    return query.exec(QStringLiteral("SELECT sqlite_version()")) && query.next() ? query.value(0).toByteArray()
+                                                                              : QByteArrayLiteral("unknown version");
 }
 
 // NULL for none.
@@ -317,6 +426,17 @@ bool Store::open(const QString &path) {
     for (const char *pragma : {"PRAGMA foreign_keys = ON", "PRAGMA synchronous = NORMAL"})
         if (!query.exec(QString::fromLatin1(pragma)))
             return fail(query.lastError().text());
+    // Search needs FTS5 with contentless deletes in the SQLite Qt's driver
+    // loaded, which a distribution may build without; asked of a throwaway
+    // table in the connection's own temporary schema, so the library is
+    // neither locked nor touched, and refused with the reason rather than
+    // with a migration or a search failing on it later.
+    if (!query.exec(QStringLiteral("CREATE VIRTUAL TABLE temp.readstr_fts_check USING fts5(text, content='',"
+                                   " contentless_delete=1, tokenize='unicode61 remove_diacritics 2')")))
+        return fail(QStringLiteral("this SQLite (%1) cannot search: Readstr needs SQLite 3.43 or later with FTS5 (%2)")
+                        .arg(QString::fromLatin1(sqliteVersion(m_db)), query.lastError().text()));
+    if (!query.exec(QStringLiteral("DROP TABLE temp.readstr_fts_check")))
+        return fail(query.lastError().text());
     return migrate();
 }
 
@@ -391,6 +511,11 @@ bool Store::migrate() {
                 return fail(QStringLiteral("migration %1 failed: %2").arg(version + 1).arg(message));
             }
         }
+        if (version + 1 == searchIndexVersion && !backfillSearchIndex()) {
+            const QString message = m_error;
+            rollback();
+            return fail(QStringLiteral("migration %1 failed: %2").arg(version + 1).arg(message));
+        }
     }
     if (!query.exec(QStringLiteral("PRAGMA user_version = %1").arg(migrations.size()))) {
         rollback();
@@ -398,6 +523,99 @@ bool Store::migrate() {
     }
     query.finish();
     return commit();
+}
+
+bool Store::prepareIndex(QSqlQuery &insert) {
+    return insert.prepare(QStringLiteral("INSERT OR REPLACE INTO items_fts (rowid, title, author, body)"
+                                         " VALUES (?, ?, ?, ?)"))
+           || fail(insert.lastError().text());
+}
+
+bool Store::indexItem(QSqlQuery &insert, qint64 id, const QString &title, const QString &author,
+                      const QString &summary, const QString &content, const QString &address, const QString &url) {
+    insert.addBindValue(id);
+    insert.addBindValue(title);
+    insert.addBindValue(author);
+    insert.addBindValue(searchBody(summary, content, address, url));
+    return insert.exec() || fail(insert.lastError().text());
+}
+
+bool Store::backfillSearchIndex() {
+    QSqlQuery items(m_db), insert(m_db);
+    items.setForwardOnly(true);
+    if (!prepareIndex(insert))
+        return false;
+    if (!items.exec(QStringLiteral("SELECT id, title, author, summary, content, address, url FROM items")))
+        return fail(items.lastError().text());
+    while (items.next())
+        if (!indexItem(insert, items.value(0).toLongLong(), items.value(1).toString(), items.value(2).toString(),
+                       items.value(3).toString(), items.value(4).toString(), items.value(5).toString(),
+                       items.value(6).toString()))
+            return false;
+    return !items.lastError().isValid() || fail(items.lastError().text());
+}
+
+QString Store::matchExpression(const QString &query) {
+    QString limited = query.left(maxQueryLength);
+    // Never half of a surrogate pair, which the cut (or a text field's own
+    // limit) can leave at the end.
+    if (!limited.isEmpty() && limited.back().isHighSurrogate())
+        limited.chop(1);
+    // Control characters become spaces and bidirectional formatting goes,
+    // as in every text field, so none reaches FTS5's parser.
+    const QStringList chunks = FeedParser::cleanText(limited).split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    QStringList terms;
+    bool lastIsOneLetter = false;
+    for (const QString &chunk : chunks) {
+        // A term of only punctuation would be an empty phrase, which matches
+        // nothing; the tokenizer splits words where the term has punctuation.
+        const QList<uint> points = chunk.toUcs4();
+        const auto letters =
+            std::count_if(points.begin(), points.end(), [](uint point) { return QChar::isLetterOrNumber(point); });
+        if (letters == 0)
+            continue;
+        // The term is rebuilt from its code points, in which toUcs4() made
+        // every unpaired surrogate U+FFFD: Qt binds the text as UTF-16, and
+        // SQLite reads a lone high surrogate together with the unit after
+        // it, which would swallow the closing quote.
+        QString quoted;
+        quoted.reserve(chunk.size() + 2);
+        quoted += QLatin1Char('"');
+        for (const uint point : points)
+            if (point == '"')
+                quoted += QLatin1String("\"\"");
+            else
+                quoted += QStringView(QChar::fromUcs4(char32_t(point)));
+        quoted += QLatin1Char('"');
+        terms << quoted;
+        // The prefix applies to the last word the tokenizer finds in the
+        // term (the "b" of "foo-b"), so that is the word measured: its run of
+        // letters and digits, with combining marks kept inside it. A lone
+        // letter of a script written without spaces (Chinese, Japanese,
+        // Thai) still matches as a prefix, as the tokenizer keeps a whole
+        // run of such text as one word and a single one would find nothing.
+        auto end = points.rbegin();
+        while (!QChar::isLetterOrNumber(*end))
+            ++end;
+        qsizetype lastWord = 0;
+        uint lastLetter = 0;
+        for (auto it = end; it != points.rend() && (QChar::isLetterOrNumber(*it) || QChar::isMark(*it)); ++it)
+            if (QChar::isLetterOrNumber(*it)) {
+                ++lastWord;
+                lastLetter = *it;
+            }
+        lastIsOneLetter = lastWord == 1 && QChar::category(lastLetter) != QChar::Letter_Other;
+        if (terms.size() == maxQueryTerms)
+            break;
+    }
+    if (terms.isEmpty())
+        return {};
+    // A last word of a single letter or digit is matched whole: as a prefix it
+    // would merge every word it starts, which no prefix index covers, on
+    // each keystroke.
+    if (!lastIsOneLetter)
+        terms.last() += QLatin1Char('*');
+    return terms.join(QLatin1Char(' '));
 }
 
 QString Store::urlKey(const QString &url) {
@@ -606,8 +824,9 @@ bool Store::recordFetch(qint64 id, const QString &etag, const QString &lastModif
 int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
     if (!begin())
         return -1;
-    QSqlQuery exists(m_db), upsert(m_db), version(m_db), replace(m_db);
-    exists.prepare(QStringLiteral("SELECT 1 FROM items WHERE feed_id = ? AND guid = ?"));
+    QSqlQuery exists(m_db), upsert(m_db), version(m_db), replace(m_db), index(m_db);
+    exists.prepare(QStringLiteral(
+        "SELECT id, title, author, summary, content, address, url FROM items WHERE feed_id = ? AND guid = ?"));
     upsert.prepare(QStringLiteral(
         "INSERT INTO items (feed_id, guid, title, url, author, summary, content, published_at, created_at, address,"
         " revision, media_url, thumbnail_url, duration, is_read) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
@@ -629,6 +848,16 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         fail(message);
         return -1;
     };
+    auto indexFailed = [this] {
+        const QString message = m_error;
+        rollback();
+        fail(message);
+        return -1;
+    };
+    if (!prepareIndex(index)) {
+        rollback();
+        return -1;
+    }
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     int added = 0;
     for (const ParsedItem &item : items) {
@@ -658,6 +887,9 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
                 replace.addBindValue(rowId);
                 if (!replace.exec())
                     return failed(replace);
+                if (!indexItem(index, rowId, item.title, item.author, item.summary, item.content, item.address,
+                               item.url))
+                    return indexFailed();
                 continue;
             }
             version.finish();
@@ -667,6 +899,22 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         if (!exists.exec())
             return failed(exists);
         const bool isNew = !exists.next();
+        qint64 rowId = 0;
+        // A refresh sends most items again as they were; only new or changed
+        // text is indexed again, sparing the sanitizer. The URL counts too:
+        // the sanitizer resolves relative images against it, so a new one
+        // can bring an image's description into the index or take it out.
+        bool textChanged = true;
+        QString address = item.address;
+        if (!isNew) {
+            rowId = exists.value(0).toLongLong();
+            textChanged = exists.value(1).toString() != item.title || exists.value(2).toString() != item.author
+                          || exists.value(3).toString() != item.summary
+                          || exists.value(4).toString() != item.content || exists.value(6).toString() != item.url;
+            // The upsert keeps the address the row has, which says how its
+            // content reads.
+            address = exists.value(5).toString();
+        }
         exists.finish();
         upsert.addBindValue(feedId);
         upsert.addBindValue(item.guid);
@@ -685,12 +933,18 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         upsert.addBindValue(item.guid);
         if (!upsert.exec())
             return failed(upsert);
+        if (isNew)
+            rowId = upsert.lastInsertId().toLongLong();
+        if (textChanged
+            && !indexItem(index, rowId, item.title, item.author, item.summary, item.content, address, item.url))
+            return indexFailed();
         added += isNew;
     }
     exists.finish();
     upsert.finish();
     version.finish();
     replace.finish();
+    index.finish();
     return commit() ? added : -1;
 }
 
@@ -748,18 +1002,32 @@ QString filterSql(const ArticleFilter &filter, QVariantList &values) {
 QList<Article> Store::articles(const ArticleFilter &filter) {
     m_error.clear();
     QVariantList values;
-    const QString order = QStringLiteral(" ORDER BY COALESCE(i.published_at, i.created_at) DESC, i.id DESC");
-    QString sql = QString::fromLatin1(articleColumns).arg(filter.withContent ? "i.content" : "NULL");
+    // A search lists only the matches, best first, and newest first among
+    // equally good ones.
+    const QString match = matchExpression(filter.query);
+    const QString searchJoin = match.isEmpty() ? QString()
+                                               : QStringLiteral(" JOIN (SELECT rowid AS id, %1 AS score FROM items_fts"
+                                                                " WHERE items_fts MATCH ?) s ON s.id = i.id")
+                                                     .arg(QLatin1String(searchScore));
+    const QString order = QStringLiteral(" ORDER BY ") + (match.isEmpty() ? QString() : QStringLiteral("s.score, "))
+                          + QStringLiteral("COALESCE(i.published_at, i.created_at) DESC, i.id DESC");
+    QString sql = QString::fromLatin1(articleColumns).arg(filter.withContent ? "i.content" : "NULL") + searchJoin;
+    if (!match.isEmpty())
+        values << match;
     if (!filter.alsoId) {
         sql += " WHERE 1" + filterSql(filter, values) + order + " LIMIT ?";
         values << (filter.limit > 0 ? filter.limit : -1);
     } else {
         // The limit applies to the rest, so the open article is listed even
-        // when it is older than every one of them, still within feedId.
+        // when it is older than every one of them, still within feedId (and
+        // the search, which the join outside holds it to).
         ArticleFilter rest = filter;
         rest.alsoId = 0;
-        sql += " WHERE i.id IN (SELECT id FROM (SELECT i.id FROM items i WHERE 1" + filterSql(rest, values)
-               + " AND i.id <> ?" + order + " LIMIT ?) UNION SELECT i.id FROM items i WHERE i.id = ?";
+        if (!match.isEmpty())
+            values << match;
+        sql += " WHERE i.id IN (SELECT id FROM (SELECT i.id FROM items i" + searchJoin + " WHERE 1"
+               + filterSql(rest, values) + " AND i.id <> ?" + order
+               + " LIMIT ?) UNION SELECT i.id FROM items i WHERE i.id = ?";
         values << filter.alsoId << (filter.limit > 0 ? filter.limit : -1) << filter.alsoId;
         if (filter.feedId) {
             sql += " AND i.feed_id = ?";
@@ -816,8 +1084,15 @@ std::optional<LibraryCounts> Store::counts() {
 int Store::markRead(const ArticleFilter &filter, qint64 upToId) {
     QVariantList values;
     QSqlQuery query(m_db);
-    query.prepare(QStringLiteral("UPDATE items AS i SET is_read = 1, read_at = ? WHERE i.is_read = 0 AND i.id <= ?")
-                  + filterSql(filter, values));
+    QString sql = QStringLiteral("UPDATE items AS i SET is_read = 1, read_at = ? WHERE i.is_read = 0 AND i.id <= ?")
+                  + filterSql(filter, values);
+    // A search marks only its matches read, as only they are in the view.
+    const QString match = matchExpression(filter.query);
+    if (!match.isEmpty()) {
+        sql += QStringLiteral(" AND i.id IN (SELECT rowid FROM items_fts WHERE items_fts MATCH ?)");
+        values << match;
+    }
+    query.prepare(sql);
     query.addBindValue(QDateTime::currentSecsSinceEpoch());
     query.addBindValue(upToId);
     for (const QVariant &value : values)

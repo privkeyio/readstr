@@ -724,12 +724,12 @@ private slots:
         {
             Store store;
             QVERIFY2(store.open(path), qPrintable(store.lastError()));
-            QCOMPARE(store.schemaVersion(), 6);
+            QCOMPARE(store.schemaVersion(), 7);
             QVERIFY(store.addFeed("https://a.example.com/feed", "A"));
         }
         Store again;
         QVERIFY2(again.open(path), qPrintable(again.lastError()));
-        QCOMPARE(again.schemaVersion(), 6);
+        QCOMPARE(again.schemaVersion(), 7);
         QCOMPARE(again.feeds().size(), 1);
 
         QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "raw");
@@ -747,6 +747,658 @@ private slots:
         Store newer;
         QVERIFY(!newer.open(path));
         QVERIFY(newer.lastError().contains("newer readstr"));
+    }
+
+    // Search
+
+    void searchMatchExpressionIsOnlyQuotedWords()
+    {
+        QCOMPARE(Store::matchExpression("rust"), QString("\"rust\"*"));
+        QCOMPARE(Store::matchExpression("  Rust   async\t"), QString("\"Rust\" \"async\"*"));
+        QCOMPARE(Store::matchExpression("say \"hi\""), QString("\"say\" \"\"\"hi\"\"\"*"));
+        QCOMPARE(Store::matchExpression("title:x NEAR(a b)"), QString("\"title:x\" \"NEAR(a\" \"b)\""));
+        // A last term of one letter or digit is a whole word, not a prefix.
+        QCOMPARE(Store::matchExpression("a OR b"), QString("\"a\" \"OR\" \"b\""));
+        QCOMPARE(Store::matchExpression("x"), QString("\"x\""));
+        QCOMPARE(Store::matchExpression("(7)"), QString("\"(7)\""));
+        QCOMPARE(Store::matchExpression("xy"), QString("\"xy\"*"));
+        // An unpaired surrogate never reaches SQLite, which would read it
+        // with the closing quote; a cut never splits a pair.
+        const QString replacement(QChar(0xFFFD));
+        QCOMPARE(Store::matchExpression(QString("hello") + QChar(0xD83D)), QString("\"hello\"*"));
+        QCOMPARE(Store::matchExpression(QString("he") + QChar(0xDE00) + "llo"), "\"he" + replacement + "llo\"*");
+        QCOMPARE(Store::matchExpression(QString("he") + QChar(0xD83D) + "\" x"),
+                 "\"he" + replacement + "\"\"\" \"x\"");
+        QCOMPARE(Store::matchExpression(QString(QChar(0xD800)) + "a" + QChar(0xDFFF)),
+                 "\"" + replacement + "a" + replacement + "\"");
+        QCOMPARE(Store::matchExpression(QString(255, 'a') + "😀"), "\"" + QString(255, 'a') + "\"*");
+        QCOMPARE(Store::matchExpression(QString(255, 'a') + "\U00010400"), "\"" + QString(255, 'a') + "\"*");
+        QCOMPARE(Store::matchExpression("crab 🦀sea"), QString("\"crab\" \"🦀sea\"*"));
+        for (const QString &none : {QString(), QString("   \t\n "), QString("*"), QString("\"\""), QString("( ) ^ * : -"),
+                                    QString("🦀 ✓")})
+            QVERIFY2(Store::matchExpression(none).isEmpty(), qPrintable(none));
+        // Control and bidirectional formatting characters never reach FTS5.
+        QCOMPARE(Store::matchExpression(QString("ab") + QChar(0) + "c" + QChar(0x202E) + "d"), QString("\"ab\" \"cd\"*"));
+        QCOMPARE(Store::matchExpression("日本語 naïve"), QString("\"日本語\" \"naïve\"*"));
+        const QString longest = Store::matchExpression(QString("word ").repeated(1000));
+        QCOMPARE(longest.count("\"word\""), Store::maxQueryTerms);
+        QVERIFY(Store::matchExpression(QString(5000, 'a')).size() <= Store::maxQueryLength + 3);
+    }
+
+    // A library from before search has its articles indexed as it migrates.
+    void searchMigrationIndexesExistingArticles()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        {
+            Store store;
+            QVERIFY2(store.open(path), qPrintable(store.lastError()));
+            const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+            ParsedItem item;
+            item.guid = "kept";
+            item.title = "Kept title";
+            item.author = "Ada Lovelace";
+            item.summary = "A summary";
+            item.content = "<p>Analytical <em>engine</em> notes</p><a href=\"https://elsewhere.example.com/hidden\">x</a>";
+            QCOMPARE(store.saveItems(feed, {item}), 1);
+        }
+        {
+            // As version 6 left it: no index, and an article written by
+            // that version straight into the table.
+            QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "v6");
+            raw.setDatabaseName(path);
+            QVERIFY(raw.open());
+            QSqlQuery query(raw);
+            for (const char *statement :
+                 {"DROP TRIGGER items_fts_delete", "DROP TABLE items_fts",
+                  "INSERT INTO items (feed_id, guid, title, content, created_at, address)"
+                  " VALUES (1, 'nostr', 'Long form', 'See [the page](https://hidden.example.com/needle) on *bees*', 2,"
+                  " '30023:abc:d')",
+                  "PRAGMA user_version = 6"})
+                QVERIFY2(query.exec(statement), qPrintable(query.lastError().text()));
+            query = QSqlQuery();
+            raw.close();
+            raw = QSqlDatabase();
+            QSqlDatabase::removeDatabase("v6");
+        }
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        QCOMPARE(store.schemaVersion(), 7);
+        QCOMPARE(searchTitles(store, "engine"), QStringList{"Kept title"});
+        QCOMPARE(searchTitles(store, "lovelace"), QStringList{"Kept title"});
+        QCOMPARE(searchTitles(store, "summary"), QStringList{"Kept title"});
+        QCOMPARE(searchTitles(store, "bees"), QStringList{"Long form"});
+        QCOMPARE(searchTitles(store, "page"), QStringList{"Long form"});
+        for (const char *address : {"hidden", "needle", "elsewhere", "href", "https"})
+            QVERIFY2(searchTitles(store, address).isEmpty(), address);
+        // And the new trigger is in place.
+        QVERIFY(store.removeFeed(1));
+        QCOMPARE(indexed(path, "engine OR bees"), 0);
+        QCOMPARE(rawExec(path, "INSERT INTO items_fts(items_fts, rank) VALUES('integrity-check', 0)"), QString());
+    }
+
+    // saveItems() indexes what is new or changed, a newer version of a
+    // replaceable article replaces its words, and an item that goes, as
+    // with its feed, leaves the index.
+    void searchIndexFollowsSavesUpdatesAndRemovals()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+        const qint64 other = store.addFeed("https://b.example.com/feed", "B");
+        ParsedItem item;
+        item.guid = "one";
+        item.url = "https://a.example.com/one";
+        item.title = "Alpha report";
+        item.content = "<p title=\"giraffe\">Quantum <a href=\"https://tracker.example.com/zebra\">link</a></p>"
+                       "<script>secretword()</script><style>.hippo{}</style><!-- walrus -->"
+                       "<img src=\"https://img.example.com/i.png\" alt=\"Sunset photo\"><img src=\"/x.png\">"
+                       "<form>formword</form>&amp; caf&#233;"
+                       "<p>before<img src=\"/a.png\" alt=\"axolotl\">after"
+                       " <a href=\"/p\">ahead<img src=\"/b.png\" alt=\"newt\">behind</a></p>"
+                       "<p>pro<em>gram</em>ming Java<b>Script</b> hyper<a href=\"/l\">text</a>ual"
+                       " sp<span>lit</span>word</p><p>leftside</p><p>rightside</p><div>upper</div>lower";
+        QCOMPARE(store.saveItems(feed, {item}), 1);
+        // An inline tag is no break in a word, as the reader shows it; a
+        // block still is.
+        for (const char *word : {"programming", "javascript", "hypertextual", "splitword", "leftside", "rightside",
+                                 "upper", "lower"})
+            QVERIFY2(searchTitles(store, word) == QStringList{"Alpha report"}, word);
+        for (const char *piece : {"gram", "ming", "textual", "ual", "lit", "leftsiderightside", "upperlower"})
+            QVERIFY2(searchTitles(store, piece).isEmpty(), piece);
+        QCOMPARE(searchTitles(store, "quantum"), QStringList{"Alpha report"});
+        // An image's description is a word of its own, inside a link too.
+        for (const char *word : {"axolotl", "after", "newt", "behind"})
+            QVERIFY2(searchTitles(store, word) == QStringList{"Alpha report"}, word);
+        QCOMPARE(searchTitles(store, "sunset"), QStringList{"Alpha report"});
+        QCOMPARE(searchTitles(store, "cafe"), QStringList{"Alpha report"});
+        QCOMPARE(searchTitles(store, "link"), QStringList{"Alpha report"});
+        for (const char *hidden : {"giraffe", "zebra", "tracker", "href", "secretword", "hippo", "walrus", "image",
+                                   "img", "png", "formword", "amp", "title", "script"})
+            QVERIFY2(searchTitles(store, hidden).isEmpty(), hidden);
+
+        // The same text again leaves the index as it is; new text replaces
+        // the old words.
+        QCOMPARE(store.saveItems(feed, {item}), 0);
+        QCOMPARE(searchTitles(store, "quantum"), QStringList{"Alpha report"});
+        item.title = "Beta report";
+        item.author = "Grace";
+        item.content = "<p>Lorem</p>";
+        QCOMPARE(store.saveItems(feed, {item}), 0);
+        QCOMPARE(searchTitles(store, "beta"), QStringList{"Beta report"});
+        QCOMPARE(searchTitles(store, "grace lorem"), QStringList{"Beta report"});
+        QCOMPARE(indexed(path, "alpha OR quantum OR sunset"), 0);
+
+        ParsedItem version;
+        version.guid = "event-1";
+        version.address = "30023:abc:d";
+        version.revision = 1;
+        version.title = "Notes";
+        version.content = "Check [this page](https://hidden.example.com/needle) out\n\n[ref]: https://ref.example.com/x";
+        QCOMPARE(store.saveItems(other, {version}), 1);
+        QCOMPARE(searchTitles(store, "page"), QStringList{"Notes"});
+        QVERIFY(searchTitles(store, "needle").isEmpty());
+        QVERIFY(searchTitles(store, "ref").isEmpty());
+        version.guid = "event-2";
+        version.revision = 2;
+        version.content = "Fresh words";
+        QCOMPARE(store.saveItems(other, {version}), 0);
+        QCOMPARE(searchTitles(store, "fresh"), QStringList{"Notes"});
+        QCOMPARE(indexed(path, "page"), 0);
+
+        QVERIFY(store.removeFeed(feed));
+        QCOMPARE(indexed(path, "beta OR grace OR lorem"), 0);
+        QCOMPARE(searchTitles(store, "fresh"), QStringList{"Notes"});
+        QVERIFY(store.removeFeed(other));
+        QCOMPARE(indexed(path, "notes OR fresh"), 0);
+        // A new item never takes a stale entry's place: ids are never reused.
+        item.guid = "two";
+        item.title = "Gamma";
+        const qint64 third = store.addFeed("https://c.example.com/feed", "C");
+        QCOMPARE(store.saveItems(third, {item}), 1);
+        QCOMPARE(searchTitles(store, "gamma lorem"), QStringList{"Gamma"});
+        QCOMPARE(indexed(path, "fresh OR notes OR beta"), 0);
+        QCOMPARE(rawExec(path, "INSERT INTO items_fts(items_fts, rank) VALUES('integrity-check', 0)"), QString());
+    }
+
+    // A relative image needs the article's URL to be kept, so a save that
+    // brings only a URL indexes its description.
+    void searchIndexFollowsUrlChange()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+        ParsedItem item;
+        item.guid = "one";
+        item.title = "Pictures";
+        item.content = "<p>Look <img src=\"/x.png\" alt=\"axolotl\"></p>";
+        QCOMPARE(store.saveItems(feed, {item}), 1);
+        QVERIFY(searchTitles(store, "axolotl").isEmpty());
+        item.url = "https://example.com/post";
+        QCOMPARE(store.saveItems(feed, {item}), 0);
+        QCOMPARE(searchTitles(store, "axolotl"), QStringList{"Pictures"});
+        item.url.clear();
+        QCOMPARE(store.saveItems(feed, {item}), 0);
+        QVERIFY(searchTitles(store, "axolotl").isEmpty());
+        QCOMPARE(searchTitles(store, "look"), QStringList{"Pictures"});
+        QCOMPARE(rawExec(path, "INSERT INTO items_fts(items_fts, rank) VALUES('integrity-check', 0)"), QString());
+    }
+
+    void searchFoldsCaseAndDiacritics()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+        ParsedItem accented;
+        accented.guid = "a";
+        accented.title = "Crème brûlée à São Paulo";
+        ParsedItem plain;
+        plain.guid = "p";
+        plain.title = "Creme of the CROP";
+        QCOMPARE(store.saveItems(feed, {accented, plain}), 2);
+        QCOMPARE(searchTitles(store, "BRULEE"), QStringList{"Crème brûlée à São Paulo"});
+        QCOMPARE(searchTitles(store, "sao"), QStringList{"Crème brûlée à São Paulo"});
+        QCOMPARE(searchTitles(store, "crop"), QStringList{"Creme of the CROP"});
+        QCOMPARE(searchTitles(store, "crème").size(), 2);
+        // The last word is a prefix, as it may still be being typed.
+        QCOMPARE(searchTitles(store, "brû"), QStringList{"Crème brûlée à São Paulo"});
+        QVERIFY(searchTitles(store, "rulee").isEmpty());
+    }
+
+    // The best match first: a word in the title counts for more than one in
+    // the text, and among equal matches the newest comes first. The view's
+    // feed, unread, starred, and limit still apply.
+    void searchRanksAndFilters()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
+        const qint64 first = store.addFeed("https://a.example.com/feed", "A");
+        const qint64 second = store.addFeed("https://b.example.com/feed", "B");
+        auto item = [](const char *guid, const char *title, const char *content, int day) {
+            ParsedItem item;
+            item.guid = guid;
+            item.title = title;
+            item.content = content;
+            item.published = QDateTime(QDate(2026, 1, day), QTime(12, 0), QTimeZone::UTC);
+            return item;
+        };
+        QCOMPARE(store.saveItems(first, {item("old", "Rust news", "<p>weekly</p>", 1),
+                                         item("body", "Weekly digest", "<p>rust and more rust</p>", 20)}),
+                 2);
+        QCOMPARE(store.saveItems(second, {item("new", "Rust news", "<p>weekly</p>", 10),
+                                          item("none", "Go news", "<p>weekly</p>", 25)}),
+                 2);
+        QCOMPARE(searchTitles(store, "rust"), (QStringList{"Rust news", "Rust news", "Weekly digest"}));
+        const QList<Article> ranked = store.articles({0, false, false, 0, 0, true, "rust"});
+        QCOMPARE(ranked.at(0).guid, QString("new"));
+        QCOMPARE(ranked.at(1).guid, QString("old"));
+        // Every word must be there.
+        QCOMPARE(searchTitles(store, "rust weekly").size(), 3);
+        QCOMPARE(searchTitles(store, "rust digest"), QStringList{"Weekly digest"});
+
+        ArticleFilter filter;
+        filter.feedId = first;
+        QCOMPARE(searchTitles(store, "rust", filter), (QStringList{"Rust news", "Weekly digest"}));
+        for (const Article &article : store.articles({}))
+            if (article.guid == "old")
+                QVERIFY(store.setRead(article.id, true));
+            else if (article.guid == "body")
+                QVERIFY(store.setStarred(article.id, true));
+        filter = {};
+        filter.unreadOnly = true;
+        QCOMPARE(searchTitles(store, "rust", filter), (QStringList{"Rust news", "Weekly digest"}));
+        filter = {};
+        filter.starredOnly = true;
+        QCOMPARE(searchTitles(store, "rust", filter), QStringList{"Weekly digest"});
+        filter = {};
+        filter.query = "rust";
+        filter.limit = 1;
+        QCOMPARE(store.articles(filter).size(), 1);
+        QCOMPARE(store.articles(filter).first().guid, QString("new"));
+
+        // The open article stays listed past the limit or the unread filter
+        // only while it matches.
+        const qint64 oldId = ranked.at(1).id;
+        filter.unreadOnly = true;
+        filter.alsoId = oldId;
+        QList<Article> listed = store.articles(filter);
+        QCOMPARE(listed.size(), 2);
+        QCOMPARE(listed.at(0).guid, QString("new"));
+        QCOMPARE(listed.at(1).id, oldId);
+        filter.query = "digest";
+        listed = store.articles(filter);
+        QCOMPARE(listed.size(), 1);
+        QCOMPARE(listed.first().guid, QString("body"));
+        QVERIFY(store.lastError().isEmpty());
+
+        // Marking a search's view read marks only its matches.
+        filter = {};
+        filter.query = "go";
+        QCOMPARE(store.markRead(filter, store.counts()->lastId), 1);
+        QCOMPARE(store.counts()->unread, 2);
+    }
+
+    // Whatever is typed, a search never fails, and it finds the words typed
+    // rather than whatever FTS5 syntax they spell.
+    void searchSurvivesHostileQueries()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+        ParsedItem secret;
+        secret.guid = "s";
+        secret.title = "secret";
+        secret.content = "<p>rust beta</p>";
+        ParsedItem phrase;
+        phrase.guid = "p";
+        phrase.title = "Not near the title secret";
+        QCOMPARE(store.saveItems(feed, {secret, phrase}), 2);
+
+        const QStringList hostile{"\"",
+                                  "\"\"",
+                                  "\"unbalanced",
+                                  "rust\"",
+                                  "rust\"*",
+                                  "NEAR(rust beta)",
+                                  "NEAR(rust beta, 2)",
+                                  "title:secret",
+                                  "{title author}: secret",
+                                  "- secret",
+                                  "*",
+                                  "rust*beta",
+                                  "^rust",
+                                  "(rust",
+                                  "rust)",
+                                  "((((",
+                                  "rust AND",
+                                  "AND",
+                                  "OR rust",
+                                  "NOT rust",
+                                  "rust NOT beta",
+                                  "AND OR NOT NEAR",
+                                  "+ - : ^ * ( ) { } [ ] , . ;",
+                                  "'; DROP TABLE items; --",
+                                  "rowid:1",
+                                  "items_fts:x",
+                                  QString("a ").repeated(5000),
+                                  QString(10000, 'x'),
+                                  QString(300, '"'),
+                                  "",
+                                  "   \t\n  ",
+                                  "日本語",
+                                  "🦀🦀",
+                                  QString("rust") + QChar(0) + "beta",
+                                  QString(QChar(0xD800)) + "rust",
+                                  "ŕust"};
+        for (const QString &query : hostile) {
+            ArticleFilter filter;
+            filter.query = query;
+            store.articles(filter);
+            QVERIFY2(store.lastError().isEmpty(), qPrintable(query.left(40) + ": " + store.lastError()));
+            QVERIFY2(store.markRead(filter, 0) >= 0, qPrintable(query.left(40) + ": " + store.lastError()));
+        }
+        // Words, not operators: each finds only where its words are.
+        QCOMPARE(searchTitles(store, "title:secret"), QStringList{"Not near the title secret"});
+        QCOMPARE(searchTitles(store, "NEAR(the"), QStringList{"Not near the title secret"});
+        QVERIFY(searchTitles(store, "NEAR(rust beta)").isEmpty());
+        QVERIFY(searchTitles(store, "rust NOT beta").isEmpty());
+        QVERIFY(searchTitles(store, "rust OR missing").isEmpty());
+        QCOMPARE(searchTitles(store, "^rust"), QStringList{"secret"});
+        QCOMPARE(searchTitles(store, "\"rust beta\""), QStringList{"secret"});
+        QCOMPARE(searchTitles(store, "rust*beta"), QStringList{"secret"});
+        QCOMPARE(searchTitles(store, "(rust)"), QStringList{"secret"});
+        QCOMPARE(searchTitles(store, "secret").size(), 2);
+        // No word at all is no search: the view lists as it would.
+        QCOMPARE(searchTitles(store, "* ( ^").size(), 2);
+        QCOMPARE(searchTitles(store, "").size(), 2);
+    }
+
+    // An unpaired surrogate, pasted or left by the field's length limit
+    // cutting a pair, never breaks the quoting: the search and marking its
+    // view read neither fail nor match more than the words typed.
+    void searchSurvivesUnpairedSurrogates()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+        auto item = [](const char *guid, const QString &title) {
+            ParsedItem item;
+            item.guid = guid;
+            item.title = title;
+            return item;
+        };
+        QCOMPARE(store.saveItems(feed, {item("h", "hello world"), item("l", QString(255, 'a') + " long"),
+                                        item("a", "a lone letter"), item("o", "other things"),
+                                        item("n", "nothing to see")}),
+                 5);
+        const QList<std::pair<QString, QStringList>> cases{
+            {QString("hello") + QChar(0xD83D), {"hello world"}},
+            {QString(255, 'a') + "😀", {QString(255, 'a') + " long"}},
+            {QString(255, 'a') + "\U00010400", {QString(255, 'a') + " long"}},
+            {QString(QChar(0xD800)) + "a" + QChar(0xDFFF), {"a lone letter"}},
+            {QString("other") + QChar(0xD800), {"other things"}},
+        };
+        for (const auto &[query, titles] : cases) {
+            QCOMPARE(searchTitles(store, query), titles);
+            ArticleFilter filter;
+            filter.query = query;
+            QVERIFY2(store.markRead(filter, store.counts()->lastId) >= 0, qPrintable(store.lastError()));
+        }
+        // Each marked only its own match read.
+        QCOMPARE(store.counts()->unread, 1);
+        QCOMPARE(searchTitles(store, "nothing", {0, true}), QStringList{"nothing to see"});
+    }
+
+    // A Nostr long-form article is Markdown, which the reader shows with
+    // any HTML in it as text, so the words after what would be a tag are
+    // found, and so are an autolink's and inline code's.
+    void searchIndexesMarkdownAsTheReaderShowsIt()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+        const QList<std::pair<QString, QString>> bodies{
+            {"style", "Intro <style> then stylefollow words"},
+            {"script", "Intro <script> then scriptfollow words"},
+            {"comment", "Intro <!-- then commentfollow words"},
+            {"autolink", "See <https://autolinkhost.example.com/page> for more"},
+            {"code", "Compare `a<b && c>inlinecode` here &amp; there"},
+        };
+        QList<ParsedItem> items;
+        for (const auto &[guid, content] : bodies) {
+            ParsedItem item;
+            item.guid = guid;
+            item.address = "30023:abc:" + guid;
+            item.revision = 1;
+            item.title = guid;
+            item.content = content;
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 5);
+        QCOMPARE(searchTitles(store, "stylefollow words"), QStringList{"style"});
+        QCOMPARE(searchTitles(store, "scriptfollow"), QStringList{"script"});
+        QCOMPARE(searchTitles(store, "commentfollow"), QStringList{"comment"});
+        QCOMPARE(searchTitles(store, "autolinkhost"), QStringList{"autolink"});
+        QCOMPARE(searchTitles(store, "inlinecode"), QStringList{"code"});
+        QCOMPARE(searchTitles(store, "compare there"), QStringList{"code"});
+        QVERIFY(searchTitles(store, "amp").isEmpty());
+        QCOMPARE(rawExec(path, "INSERT INTO items_fts(items_fts, rank) VALUES('integrity-check', 0)"), QString());
+    }
+
+    // A last word of one letter or digit is a whole word: as a prefix it
+    // would merge most of the index on every first keystroke.
+    void searchMatchesOneLetterAsAWord()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+        ParsedItem letter;
+        letter.guid = "c";
+        letter.title = "The C language";
+        ParsedItem word;
+        word.guid = "w";
+        word.title = "Cobol and Crystal";
+        QCOMPARE(store.saveItems(feed, {letter, word}), 2);
+        QCOMPARE(searchTitles(store, "c"), QStringList{"The C language"});
+        QCOMPARE(searchTitles(store, "co"), QStringList{"Cobol and Crystal"});
+        QCOMPARE(searchTitles(store, "cry"), QStringList{"Cobol and Crystal"});
+        QCOMPARE(searchTitles(store, "the c"), QStringList{"The C language"});
+        // The last word the tokenizer sees is what counts, and a letter of a
+        // script written without spaces still finds the run it starts.
+        QCOMPARE(Store::matchExpression("foo-b"), QString("\"foo-b\""));
+        QCOMPARE(Store::matchExpression("b-foo"), QString("\"b-foo\"*"));
+        QCOMPARE(Store::matchExpression("c."), QString("\"c.\""));
+        ParsedItem cjk;
+        cjk.guid = "j";
+        cjk.title = QString::fromUtf8("日本語の記事");
+        QCOMPARE(store.saveItems(feed, {cjk}), 1);
+        QCOMPARE(Store::matchExpression(QString::fromUtf8("日")), QString::fromUtf8("\"日\"*"));
+        QCOMPARE(searchTitles(store, QString::fromUtf8("日")), QStringList{QString::fromUtf8("日本語の記事")});
+    }
+
+    // A save that fails partway leaves neither the items it saved before
+    // the failure nor their words, whether the item or its index fails.
+    void searchRollsBackWithTheItem()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+        ParsedItem taken;
+        taken.guid = "taken";
+        taken.title = "Taken guid";
+        ParsedItem version;
+        version.guid = "event-1";
+        version.address = "30023:abc:d";
+        version.revision = 1;
+        version.title = "Original words";
+        QCOMPARE(store.saveItems(feed, {taken, version}), 2);
+
+        // A newer version whose id another item of the feed has already
+        // fails its update on UNIQUE(feed_id, guid).
+        ParsedItem fresh;
+        fresh.guid = "fresh";
+        fresh.title = "Freshly saved";
+        version.guid = "taken";
+        version.revision = 2;
+        version.title = "Replacement words";
+        QCOMPARE(store.saveItems(feed, {fresh, version}), -1);
+        QVERIFY(!store.lastError().isEmpty());
+        QVERIFY(searchTitles(store, "freshly").isEmpty());
+        QVERIFY(searchTitles(store, "replacement").isEmpty());
+        QCOMPARE(searchTitles(store, "original"), QStringList{"Original words"});
+        QCOMPARE(indexed(path, "freshly OR replacement"), 0);
+        QCOMPARE(store.articles({}).size(), 2);
+        QCOMPARE(rawExec(path, "INSERT INTO items_fts(items_fts, rank) VALUES('integrity-check', 0)"), QString());
+
+        // An index that refuses an item's words takes the item back with it:
+        // a plain table stands in for it, refusing one title.
+        for (const char *statement : {"DROP TRIGGER items_fts_delete", "DROP TABLE items_fts",
+                                      "CREATE TABLE items_fts (title TEXT CHECK (title <> 'Refused'), author, body)"})
+            QCOMPARE(rawExec(path, statement), QString());
+        ParsedItem refused;
+        refused.guid = "refused";
+        refused.title = "Refused";
+        QCOMPARE(store.saveItems(feed, {fresh, refused}), -1);
+        QVERIFY(store.lastError().contains("CHECK"));
+        QCOMPARE(store.articles({}).size(), 2);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items_fts"), 0);
+    }
+
+    void cliSearchesAsArticlesLists()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+
+        QString out, err;
+        QCOMPARE(run({"search", "full", "--json"}, out, err), 0);
+        QVERIFY2(err.isEmpty(), qPrintable(err));
+        QJsonArray list = QJsonDocument::fromJson(out.toUtf8()).array();
+        QCOMPARE(list.size(), 1);
+        const QStringList keys{"author", "feedId", "feedTitle", "guid", "id", "published", "read", "starred",
+                               "summary", "title", "url"};
+        QCOMPARE(list.at(0).toObject().keys(), keys);
+        QCOMPARE(list.at(0).toObject().value("title").toString(), QString("Newest"));
+        // The script the sanitizer drops is not searched either.
+        out.clear();
+        QCOMPARE(run({"search", "alert", "--json"}, out, err), 0);
+        QCOMPARE(out, QString("[]\n"));
+
+        out.clear();
+        QCOMPARE(run({"search", "second", "--json"}, out, err), 0);
+        QCOMPARE(QJsonDocument::fromJson(out.toUtf8()).array().size(), 2);
+        out.clear();
+        QCOMPARE(run({"search", "second", "--unread", "--json"}, out, err), 0);
+        list = QJsonDocument::fromJson(out.toUtf8()).array();
+        QCOMPARE(list.size(), 1);
+        QCOMPARE(list.at(0).toObject().value("guid").toString(), QString("second-a"));
+        out.clear();
+        QCOMPARE(run({"search", "second", "--limit", "1", "--json"}, out, err), 0);
+        QCOMPARE(QJsonDocument::fromJson(out.toUtf8()).array().size(), 1);
+        out.clear();
+        QCOMPARE(run({"search", "second", "--feed", QString::number(first), "--json"}, out, err), 0);
+        QCOMPARE(out, QString("[]\n"));
+        out.clear();
+        QCOMPARE(run({"search", "--starred", "second", "--json"}, out, err), 0);
+        QCOMPARE(out, QString("[]\n"));
+        // Several words are one query, each word required.
+        out.clear();
+        QCOMPARE(run({"search", "second", "b", "--json"}, out, err), 0);
+        list = QJsonDocument::fromJson(out.toUtf8()).array();
+        QCOMPARE(list.size(), 1);
+        QCOMPARE(list.at(0).toObject().value("guid").toString(), QString("second-b"));
+        out.clear();
+        QCOMPARE(run({"search", "(second", "a)"}, out, err), 0);
+        QVERIFY(out.contains("Second A"));
+        QVERIFY(!out.contains("Second B"));
+        QVERIFY2(err.isEmpty(), qPrintable(err));
+
+        for (const QStringList &bad : {QStringList{"search"}, QStringList{"search", "--json"},
+                                       QStringList{"search", "*", "--json"}, QStringList{"search", QString(300, 'a')},
+                                       QStringList{"search", "x", "--feed", "9999"},
+                                       QStringList{"search", "x", "--limit", "-1"},
+                                       QStringList{"search", "x", "--bogus"}}) {
+            out.clear();
+            err.clear();
+            QCOMPARE(run(bad, out, err), 1);
+            QVERIFY2(err.startsWith("readstr search: "), qPrintable(err));
+            QVERIFY(out.isEmpty());
+        }
+    }
+
+    // Ctrl+F puts the keyboard in the search field, where letters type
+    // rather than act; the list follows the typing, Enter hands the keyboard
+    // back to the list, and Esc closes the shortcuts before it clears the
+    // search.
+    void windowSearchesWithCtrlF()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        write(dir.path() + "/language", "en");
+        QTest::failOnWarning(QRegularExpression("Binding loop|qrc:/"));
+        LoadedWindow loaded(dir.path() + "/language");
+        QVERIFY(loaded.window);
+        QVERIFY(QTest::qWaitForWindowExposed(loaded.window));
+        Backend &backend = *loaded.backend;
+        QQuickItem *field = loaded.window->findChild<QQuickItem *>("searchField");
+        QVERIFY(field);
+        QCOMPARE(backend.articles()->count(), 5);
+        const auto type = [&loaded](const char *text) {
+            for (const char *key = text; *key; ++key)
+                QTest::keyClick(loaded.window, *key);
+        };
+
+        QTest::keyClick(loaded.window, Qt::Key_F, Qt::ControlModifier);
+        QTRY_VERIFY(field->hasActiveFocus());
+        type("nskm");
+        QCOMPARE(field->property("text").toString(), QString("nskm"));
+        QVERIFY(!backend.hasArticle());
+        QTRY_COMPARE(backend.searchQuery(), QString("nskm"));
+        QVERIFY(backend.searching());
+        QCOMPARE(backend.articles()->count(), 0);
+
+        QTest::keyClick(loaded.window, Qt::Key_Escape);
+        QCOMPARE(field->property("text").toString(), QString());
+        QVERIFY(!field->hasActiveFocus());
+        QCOMPARE(backend.searchQuery(), QString());
+        QCOMPARE(backend.articles()->count(), 5);
+
+        QTest::keyClick(loaded.window, Qt::Key_F, Qt::ControlModifier);
+        QTRY_VERIFY(field->hasActiveFocus());
+        type("second");
+        QTest::keyClick(loaded.window, Qt::Key_Return);
+        QCOMPARE(backend.searchQuery(), QString("second"));
+        QVERIFY(!field->hasActiveFocus());
+        QCOMPARE(backend.articles()->count(), 2);
+        QTest::keyClick(loaded.window, Qt::Key_J);
+        QCOMPARE(backend.articleIndex(), 0);
+        QVERIFY(backend.articleTitle().startsWith("Second"));
+        QTest::keyClick(loaded.window, Qt::Key_J);
+        QCOMPARE(backend.articleIndex(), 1);
+
+        loaded.window->setProperty("helpVisible", true);
+        QTest::keyClick(loaded.window, Qt::Key_Escape);
+        QVERIFY(!loaded.window->property("helpVisible").toBool());
+        QCOMPARE(backend.searchQuery(), QString("second"));
+        QTest::keyClick(loaded.window, Qt::Key_Escape);
+        QCOMPARE(backend.searchQuery(), QString());
+        QCOMPARE(backend.articles()->count(), 5);
     }
 
     void storeRestrictsItsFiles()
@@ -899,7 +1551,7 @@ private slots:
             for (int i = 0; i < 8; ++i)
                 threads << QThread::create([&failures, path] {
                     Store store;
-                    if (!store.open(path) || store.schemaVersion() != 6) {
+                    if (!store.open(path) || store.schemaVersion() != 7) {
                         qWarning("%s", qPrintable(store.lastError()));
                         ++failures;
                     }
@@ -954,7 +1606,7 @@ private slots:
 
         Store writer;
         QVERIFY2(writer.open(path), qPrintable(writer.lastError()));
-        QCOMPARE(writer.schemaVersion(), 6);
+        QCOMPARE(writer.schemaVersion(), 7);
         QCOMPARE(writer.articles({0, false, false, 0}).size(), workers * perRound);
 
         // A reader in the middle of a transaction neither blocks a writer
@@ -1264,6 +1916,15 @@ private slots:
         QCOMPARE(FeedParser::plainText("kept <script>never closed"), QString("kept"));
         QCOMPARE(FeedParser::plainText("1 < 2 <b and <!-- open"), QString("1 < 2 <b and <!-- open"));
         QCOMPARE(FeedParser::plainText("<scripts>x</scripts>"), QString("x"));
+        // For the index an inline tag joins the words around it; a block,
+        // a break, a comment, and a tag it does not know still part them.
+        const auto join = FeedParser::InlineTags::Join;
+        QCOMPARE(FeedParser::plainText("<p>pro<em>gram</em>ming</p>"), QString("pro gram ming"));
+        QCOMPARE(FeedParser::plainText("<p>pro<em>gram</em>ming</p>", join), QString("programming"));
+        QCOMPARE(FeedParser::plainText("Java<B class=x>Script</B > a<a href=\"/\">b</a>c d<br/>e<b1>f</b1>g", join),
+                 QString("JavaScript abc d e f g"));
+        QCOMPARE(FeedParser::plainText("<p>a</p><p>b</p>x<!--c-->y<span/>z<x-b>w", join), QString("a b x yz w"));
+        QCOMPARE(FeedParser::plainText("a<b>c<script>no</script>d", join), QString("ac d"));
     }
 
     // Each of these took quadratic time with a regular expression.
@@ -7383,7 +8044,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 6);
+        QCOMPARE(store.schemaVersion(), 7);
         QCOMPARE(store.articles({}).first().title, QString("Old"));
         QVERIFY(store.articles({}).first().starred);
         const SyncAccount none = store.syncAccount();
@@ -8805,7 +9466,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 6);
+        QCOMPARE(store.schemaVersion(), 7);
         QList<Article> articles = store.articles({});
         QCOMPARE(articles.size(), 1);
         QCOMPARE(articles.first().title, QString("Old"));
@@ -8868,7 +9529,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 6);
+        QCOMPARE(store.schemaVersion(), 7);
         const QList<Feed> feeds = store.feeds();
         QCOMPARE(feeds.size(), 2);
         for (const Feed &feed : feeds) {
@@ -9178,7 +9839,7 @@ private slots:
         {
             Store store;
             QVERIFY2(store.open(path), qPrintable(store.lastError()));
-            QCOMPARE(store.schemaVersion(), 6);
+            QCOMPARE(store.schemaVersion(), 7);
             const QList<Feed> feeds = store.feeds();
             QCOMPARE(feeds.size(), 1);
             QCOMPARE(feeds.first().title, QString("Ada"));
@@ -11484,6 +12145,77 @@ private:
         Store store;
         QVERIFY(store.open());
         QTRY_COMPARE(store.syncAccount().publishPending, 0);
+    }
+
+    // The titles of the matches of `query`, best first, so a test reads as
+    // what a user sees.
+    static QStringList searchTitles(Store &store, const QString &query, ArticleFilter filter = {})
+    {
+        filter.query = query;
+        filter.limit = 0;
+        QStringList titles;
+        for (const Article &article : store.articles(filter))
+            titles << article.title;
+        if (!store.lastError().isEmpty())
+            titles << "error: " + store.lastError();
+        return titles;
+    }
+
+    // What the index itself holds for `match` (an FTS5 expression), asked
+    // over a connection of its own, so a row the index kept after its item
+    // went is counted even though no listing would show it.
+    static int indexed(const QString &path, const QString &match)
+    {
+        int count = -1;
+        {
+            QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "fts");
+            raw.setDatabaseName(path);
+            if (raw.open()) {
+                QSqlQuery query(raw);
+                query.prepare("SELECT COUNT(*) FROM items_fts WHERE items_fts MATCH ?");
+                query.addBindValue(match);
+                if (query.exec() && query.next())
+                    count = query.value(0).toInt();
+                else
+                    qWarning("%s", qPrintable(query.lastError().text()));
+            }
+            raw.close();
+        }
+        QSqlDatabase::removeDatabase("fts");
+        return count;
+    }
+
+    // Runs `sql` over a connection of its own, as another process would:
+    // its error, or empty when it succeeds. `count` gets the first column
+    // of its first row, if any.
+    static QString rawExec(const QString &path, const QString &sql, int *count = nullptr)
+    {
+        QString error;
+        {
+            QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "rawExec");
+            raw.setDatabaseName(path);
+            if (!raw.open()) {
+                error = raw.lastError().text();
+            } else {
+                QSqlQuery query(raw);
+                if (!query.exec(sql))
+                    error = query.lastError().text();
+                else if (count && query.next())
+                    *count = query.value(0).toInt();
+            }
+            raw.close();
+        }
+        QSqlDatabase::removeDatabase("rawExec");
+        return error;
+    }
+
+    static int rawCount(const QString &path, const QString &sql)
+    {
+        int count = -1;
+        const QString error = rawExec(path, sql, &count);
+        if (!error.isEmpty())
+            qWarning("%s", qPrintable(error));
+        return count;
     }
 
     static int run(const QStringList &arguments, QString &out, QString &err)

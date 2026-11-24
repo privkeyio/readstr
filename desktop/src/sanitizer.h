@@ -36,6 +36,10 @@ struct Options {
     // margins: those few styles become em, strong, code, s, and blockquote.
     // Every other style still goes.
     bool qtStyles = false;
+    // Off for the search index: an image becomes its description alone, not
+    // the "[image: description]" label, whose word (in the window's language)
+    // would otherwise match every article with an image.
+    bool imageLabels = true;
 };
 
 QString toRichText(const QString &html, const QUrl &base, const Options &options = {});
