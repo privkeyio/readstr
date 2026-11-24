@@ -251,5 +251,6 @@
   "The signer sent back another event than the one asked for": "O assinante devolveu um evento diferente do pedido",
   "The signer signed with another key than the one for %1": "O assinante assinou com uma chave diferente da de %1",
   "The signer's signature does not check out": "A assinatura do assinante não é válida",
-  "This event is too large for a remote signer to sign": "Este evento é grande demais para um assinante remoto o assinar"
+  "This event is too large for a remote signer to sign": "Este evento é grande demais para um assinante remoto o assinar",
+  "Copy the selected text": "Copiar o texto selecionado"
 }

@@ -8,6 +8,7 @@
 #include <QDBusMetaType>
 #include <QDBusObjectPath>
 #include <QDBusVariant>
+#include <QQmlApplicationEngine>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -424,6 +425,44 @@ private:
     QByteArray m_signerSecret;
     std::unique_ptr<LocalSigner> m_signer;
     std::unique_ptr<LocalSigner> m_user;
+};
+
+// The real window, loaded as main() loads it but with a fake picker and
+// keyring and a Translator reading a language file the test writes, so
+// the window's own Shortcuts and menus can be checked against what it
+// shows.
+struct LoadedWindow {
+    FakePicker picker;
+    FakeKeyStore keys;
+    std::unique_ptr<Translator> translator;
+    std::unique_ptr<Backend> backend;
+    LocalNetworkFactory network;
+    std::unique_ptr<QQmlApplicationEngine> engine;
+    QQuickWindow *window = nullptr;
+
+    explicit LoadedWindow(const QString &languageFile) {
+        translator = std::make_unique<Translator>(languageFile);
+        QCoreApplication::installTranslator(translator.get());
+        backend = std::make_unique<Backend>(&picker);
+        backend->setKeyStore(&keys);
+        backend->setClipboardWriter([](const QString &) {});
+        engine = std::make_unique<QQmlApplicationEngine>();
+        engine->setNetworkAccessManagerFactory(&network);
+        QObject::connect(translator.get(), &Translator::changed, engine.get(), &QQmlEngine::retranslate);
+        engine->rootContext()->setContextProperty("translator", translator.get());
+        engine->rootContext()->setContextProperty(
+            "theme", QVariantMap{{"radius", 0}, {"background", "#000000"}, {"foreground", "#ffffff"},
+                                 {"accent", "#FFD60A"}, {"accentForeground", "black"}});
+        engine->rootContext()->setContextProperty("backend", backend.get());
+        engine->load(QUrl("qrc:/Main.qml"));
+        if (!engine->rootObjects().isEmpty())
+            window = qobject_cast<QQuickWindow *>(engine->rootObjects().first());
+    }
+    ~LoadedWindow() {
+        engine.reset();
+        backend.reset();
+        QCoreApplication::removeTranslator(translator.get());
+    }
 };
 
 class ReadstrTests : public QObject {
@@ -2061,6 +2100,118 @@ private slots:
         for (const QString &text : strings)
             if (text.contains("%n"))
                 QVERIFY2(!english.translate("Main", text.toUtf8().constData(), nullptr, 1).isNull(), qPrintable(text));
+    }
+
+    // The ? overlay lists every shortcut of the window, so a new Shortcut
+    // cannot ship without telling the user about it. The window is loaded
+    // for real rather than its source parsed, so a Shortcut in any file the
+    // window uses is found, however it is written. Shortcuts inside a
+    // dialog, such as Enter for its default button, belong to that dialog
+    // and are not listed.
+    void shortcutsOverlayListsEveryShortcut()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        write(dir.path() + "/language", "en");
+        QTest::failOnWarning(QRegularExpression("Binding loop|qrc:/"));
+        LoadedWindow loaded(dir.path() + "/language");
+        QVERIFY(loaded.window);
+
+        const auto portable = [](const QKeySequence &sequence) {
+            return sequence.toString(QKeySequence::PortableText);
+        };
+        QSet<QString> listed;
+        const QVariantList shortcuts = loaded.window->property("shortcuts").toList();
+        QVERIFY(shortcuts.size() > 10);
+        for (const QVariant &shortcut : shortcuts)
+            for (const QString &key : shortcut.toMap().value("keys").toString().split(", "))
+                listed << portable(QKeySequence(key, QKeySequence::PortableText));
+
+        QSet<QString> bound;
+        QStringList missing;
+        int found = 0;
+        for (QObject *object : loaded.window->findChildren<QObject *>()) {
+            if (!object->inherits("QQuickShortcut"))
+                continue;
+            bool inDialog = false;
+            for (QObject *parent = object->parent(); parent && !inDialog; parent = parent->parent())
+                inDialog = parent->inherits("QQuickPopup");
+            if (inDialog)
+                continue;
+            ++found;
+            // A Shortcut has keys in `sequence` or in `sequences`, which
+            // holds a standard key once for every key the platform binds it to.
+            QVariantList values = object->property("sequences").toList();
+            if (values.isEmpty())
+                values << object->property("sequence");
+            QStringList texts;
+            for (const QVariant &value : values) {
+                // The overlay lists a standard key's first binding, the one
+                // users know.
+                texts << (value.typeId() == QMetaType::QString
+                              ? portable(QKeySequence(value.toString(), QKeySequence::PortableText))
+                              : portable(QKeySequence::keyBindings(QKeySequence::StandardKey(value.toInt())).value(0)));
+            }
+            texts.removeDuplicates();
+            for (const QString &text : texts) {
+                bound << text;
+                if (text.isEmpty() || !listed.contains(text))
+                    missing << text;
+            }
+        }
+        QVERIFY(found > 20);
+        QVERIFY2(missing.isEmpty(), qPrintable(missing.join(" | ")));
+        // Nor does the overlay list a key that no Shortcut handles.
+        QStringList unbound;
+        for (const QString &key : std::as_const(listed))
+            if (!bound.contains(key))
+                unbound << key;
+        unbound.sort();
+        QVERIFY2(unbound.isEmpty(), qPrintable(unbound.join(" | ")));
+    }
+
+    // The menus are as wide as their widest item, so no label is elided in
+    // English or in the longer Russian.
+    void menusFitTheirLongestItem()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        write(dir.path() + "/language", "en");
+        QTest::failOnWarning(QRegularExpression("Binding loop|qrc:/"));
+        LoadedWindow loaded(dir.path() + "/language");
+        QVERIFY(loaded.window);
+        QVERIFY(QTest::qWaitForWindowExposed(loaded.window));
+
+        for (const char *language : {"en", "ru"}) {
+            write(dir.path() + "/language", language);
+            QTRY_COMPARE(loaded.translator->language(), QString(language));
+            const QString markAll = QCoreApplication::translate("Main", "Mark everything in the view read");
+            bool sawMarkAll = false;
+            for (const char *name : {"appMenu", "feedMenu"}) {
+                QObject *menu = loaded.window->findChild<QObject *>(name);
+                QVERIFY2(menu, name);
+                QVERIFY(QMetaObject::invokeMethod(menu, "open"));
+                QTRY_VERIFY(menu->property("opened").toBool());
+                const int count = menu->property("count").toInt();
+                QVERIFY(count >= 4);
+                for (int i = 0; i < count; ++i) {
+                    QQuickItem *item = nullptr;
+                    QVERIFY(QMetaObject::invokeMethod(menu, "itemAt", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, i)));
+                    QVERIFY(item);
+                    const QString text = item->property("text").toString();
+                    sawMarkAll = sawMarkAll || text == markAll;
+                    QVERIFY2(item->width() >= item->implicitWidth(), qPrintable(QString("%1 %2: %3 < %4")
+                                                                                     .arg(language, text)
+                                                                                     .arg(item->width())
+                                                                                     .arg(item->implicitWidth())));
+                }
+                QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+                QTRY_VERIFY(!menu->property("visible").toBool());
+            }
+            QVERIFY2(sawMarkAll, qPrintable(markAll));
+        }
     }
 
     // NIP-44 v2
