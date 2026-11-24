@@ -27,7 +27,7 @@ ApplicationWindow {
     // Single keys must not fire while a dialog or menu has the keyboard, or
     // typing an address would star articles.
     readonly property bool dialogsClosed: !addDialog.visible && !unsubscribeDialog.visible && !syncDialog.visible
-                                          && !sourcePane.menuOpen
+                                          && !settingsDialog.visible && !sourcePane.menuOpen
     // Nor behind the shortcuts overlay, which only ? and Esc close.
     readonly property bool keysFree: dialogsClosed && !helpVisible
 
@@ -42,6 +42,7 @@ ApplicationWindow {
         { keys: "S", action: qsTr("Star or unstar") },
         { keys: "O", action: qsTr("Open the original in the browser") },
         { keys: "P", action: qsTr("Play the video in mpv") },
+        { keys: "I", action: qsTr("Load images for this article") },
         { keys: "Ctrl+R", action: qsTr("Refresh all feeds") },
         { keys: "Ctrl+N", action: qsTr("Add a feed") },
         { keys: "Ctrl+Shift+A", action: qsTr("Mark everything in the view read") },
@@ -87,6 +88,8 @@ ApplicationWindow {
     Shortcut { sequence: "S"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.toggleStar() }
     Shortcut { sequence: "O"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.openOriginal() }
     Shortcut { sequence: "P"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.playVideo() }
+    // The button above the article takes no focus, so this is how the keyboard loads its images.
+    Shortcut { sequence: "I"; context: Qt.ApplicationShortcut; enabled: win.keysFree && backend.articleHasImages && !backend.articleImagesShown; onActivated: backend.loadArticleImages() }
     Shortcut { sequence: "Ctrl+R"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.refreshAll() }
     Shortcut { sequence: "Ctrl+N"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: addDialog.open() }
     Shortcut { sequence: "Ctrl+Shift+A"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.markViewRead() }
@@ -123,6 +126,7 @@ ApplicationWindow {
                     onUnsubscribeRequested: (feedId, feedTitle) => win.askUnsubscribe(feedId, feedTitle)
                     onHelpRequested: win.helpVisible = true
                     onSyncRequested: syncDialog.open()
+                    onSettingsRequested: settingsDialog.open()
                 }
 
                 Rectangle { Layout.fillHeight: true; Layout.preferredWidth: 1; color: Qt.alpha(theme.foreground, 0.1) }
@@ -204,4 +208,5 @@ ApplicationWindow {
     AddFeedDialog { id: addDialog }
     UnsubscribeDialog { id: unsubscribeDialog }
     SyncDialog { id: syncDialog }
+    SettingsDialog { id: settingsDialog }
 }

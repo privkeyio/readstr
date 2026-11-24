@@ -246,5 +246,13 @@
   "The signer signed with another key than the one for %1": "Signeren signerede med en anden nøgle end den til %1",
   "The signer's signature does not check out": "Signerens signatur holder ikke",
   "This event is too large for a remote signer to sign": "Begivenheden er for stor til, at en fjernsigner kan signere den",
-  "Copy the selected text": "Kopiér den markerede tekst"
+  "Copy the selected text": "Kopiér den markerede tekst",
+  "Settings": "Indstillinger",
+  "Settings…": "Indstillinger…",
+  "Load remote images": "Indlæs eksterne billeder",
+  "Shows the images of the article you open. Fetching them tells their sites that you read it. When this is off, images are links, and an article's images can be loaded for it alone.": "Viser billederne i den artikel, du åbner. Når de hentes, får deres websteder at vide, at du læser den. Når dette er slået fra, er billeder links, og en artikels billeder kan indlæses for den alene.",
+  "Close": "Luk",
+  "Load images for this article": "Indlæs billederne i denne artikel",
+  "Cannot read the settings, so the defaults apply: %1": "Kan ikke læse indstillingerne, så standardindstillingerne gælder: %1",
+  "Cannot save the settings: %1": "Kan ikke gemme indstillingerne: %1"
 }

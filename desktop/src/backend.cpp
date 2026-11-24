@@ -4,6 +4,7 @@
 #include <QDesktopServices>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QImageReader>
 #include <QPointer>
 #include <QProcess>
 #include <QRandomGenerator>
@@ -45,13 +46,15 @@ struct SearchStep {
     QString error;
 };
 
-QString richText(const Article &article) {
+QString richText(const Article &article, const Sanitizer::Images &images) {
     if (article.content.isEmpty())
         return Sanitizer::plainToRichText(article.summary);
     // Nostr long-form is Markdown.
     if (!article.address.isEmpty())
-        return Markdown::toRichText(article.content);
-    return Sanitizer::toRichText(article.content, QUrl(article.url));
+        return Markdown::toRichText(article.content, images);
+    Sanitizer::Options options;
+    options.images = images;
+    return Sanitizer::toRichText(article.content, QUrl(article.url), options);
 }
 
 // What a keyring call would have answered had there been a keyring to ask.
@@ -68,7 +71,8 @@ QString noKeyStored(const QString &npub) {
 
 Backend::Backend(FilePicker *picker, QObject *parent)
     : QObject(parent), m_fetcher(std::make_unique<Fetcher>()), m_relays(std::make_unique<RelayPool>()),
-      m_syncRelays(std::make_unique<RelayPool>()), m_thumbnails(std::make_unique<Thumbnails>()), m_picker(picker) {
+      m_syncRelays(std::make_unique<RelayPool>()), m_thumbnails(std::make_unique<Thumbnails>()),
+      m_images(std::make_unique<Thumbnails>(QStringLiteral("images"), imageLimits())), m_picker(picker) {
     m_openUrl = [](const QUrl &url) { return QDesktopServices::openUrl(url); };
     m_writeClipboard = [](const QString &text) { QGuiApplication::clipboard()->setText(text, QClipboard::Clipboard); };
     m_launch = &Backend::launchDetached;
@@ -86,6 +90,34 @@ Backend::Backend(FilePicker *picker, QObject *parent)
     connect(&m_autoRefresh, &QTimer::timeout, this, &Backend::refreshAll);
     m_publishTimer.setSingleShot(true);
     connect(&m_publishTimer, &QTimer::timeout, this, [this] { startPublish(); });
+
+    // A new article is new text too.
+    connect(this, &Backend::articleChanged, this, &Backend::articleHtmlChanged);
+    // Images coming in together are shown together, rather than the text
+    // being laid out again for each.
+    m_imagesArrived.setSingleShot(true);
+    m_imagesArrived.setInterval(100);
+    connect(&m_imagesArrived, &QTimer::timeout, this, [this] {
+        renderArticle();
+        emit articleHtmlChanged();
+    });
+    connect(&m_settings, &Settings::loadRemoteImagesChanged, this, [this] {
+        // articleImagesShown changed even when the text did not.
+        if (!updateImages())
+            emit articleHtmlChanged();
+    });
+    if (!m_settings.error().isEmpty())
+        setStatus(tr("Cannot read the settings, so the defaults apply: %1").arg(m_settings.error()), true);
+    // The file is read again whenever it changes, so it may turn out
+    // unreadable later as well.
+    connect(&m_settings, &Settings::errorChanged, this, [this] {
+        if (m_settings.error().isEmpty())
+            return;
+        if (m_settings.unreadable())
+            setStatus(tr("Cannot read the settings, so the defaults apply: %1").arg(m_settings.error()), true);
+        else
+            setStatus(tr("Cannot save the settings: %1").arg(m_settings.error()), true);
+    });
 
     if (m_picker) {
         connect(m_picker, &FilePicker::openSelected, this, &Backend::importFrom);
@@ -127,6 +159,7 @@ Backend::~Backend() {
     m_relays.reset();
     m_syncRelays.reset();
     m_thumbnails.reset();
+    m_images.reset();
     m_thread.quit();
     m_thread.wait();
     // The user's own changes still queued behind a refresh are not lost
@@ -321,7 +354,7 @@ void Backend::loadArticles() {
         list.removeIf([this](const Article &article) { return m_removing.contains(article.feedId); });
         if (m_removing.contains(m_article.feedId)) {
             m_article = Article{};
-            m_articleHtml.clear();
+            renderArticle();
         }
     }
     m_articles.setArticles(list);
@@ -334,13 +367,16 @@ void Backend::loadArticles() {
                                      || article->url != m_article.url;
             m_article = *article;
             if (textChanged)
-                m_articleHtml = richText(m_article);
+                renderArticle();
         } else {
             m_article = Article{};
-            m_articleHtml.clear();
+            renderArticle();
         }
     }
     m_articleIndex = m_article.id ? m_articles.rowOf(m_article.id) : -1;
+    // The cached images go into the text before it is announced, so the
+    // reader never shows their links first.
+    updateImages(false);
     emit articleChanged();
     updateThumbnail();
 }
@@ -350,7 +386,7 @@ void Backend::selectSource(int row) {
         return;
     m_sourceIndex = row;
     m_article = Article{};
-    m_articleHtml.clear();
+    renderArticle();
     emit sourceChanged();
     loadArticles();
 }
@@ -363,9 +399,154 @@ void Backend::moveSource(int step) {
 
 void Backend::showArticle(const Article &article) {
     m_article = article;
-    m_articleHtml = richText(article);
+    renderArticle();
+    // As in loadArticles(): cached images are in the first text shown.
+    updateImages(false);
     emit articleChanged();
     updateThumbnail();
+}
+
+Thumbnails::Limits Backend::imageLimits() {
+    Thumbnails::Limits limits;
+    limits.maxBytes = 4 * 1024 * 1024;
+    limits.maxWidth = Sanitizer::imageWidth;
+    // 1600 by 2500 pixels, 16 MiB once decoded: a tall infographic stays
+    // legible, at less than its full width, while a strip of 1600 by 8192
+    // pixels is no longer 52 MiB in the window for each copy of it.
+    limits.maxStoredPixels = 4 * 1000 * 1000;
+    // Well past a photograph of that size at quality 85, so only noise,
+    // which JPEG cannot compress, is refused; 30 of them still fit in the
+    // cache together.
+    limits.maxStoredBytes = 2 * 1024 * 1024;
+    limits.maxConcurrent = 4;
+    limits.maxImages = 30;
+    limits.maxTotalBytes = 24 * 1024 * 1024;
+    limits.cacheMaxBytes = 128 * 1024 * 1024;
+    return limits;
+}
+
+bool Backend::articleImagesShown() const {
+    return hasArticle() && (m_settings.loadRemoteImages() || m_imagesFor == m_article.id);
+}
+
+void Backend::clearLocalImages() {
+    m_localImages.clear();
+    m_imagePixels = 0;
+}
+
+void Backend::renderArticle() {
+    // The images fetched for another article are not this one's.
+    if (m_imagesAskedFor != m_article.id)
+        clearLocalImages();
+    QStringList found;
+    m_articleHtml = richText(m_article, {articleImagesShown() ? &m_localImages : nullptr, &found});
+    m_articleImages = found;
+}
+
+void Backend::loadArticleImages() {
+    if (!hasArticle() || articleImagesShown())
+        return;
+    m_imagesFor = m_article.id;
+    // articleImagesShown changed even when the text did not.
+    if (!updateImages())
+        emit articleHtmlChanged();
+}
+
+bool Backend::updateImages(bool announce) {
+    // Asking for one article's images is for that article alone.
+    if (m_imagesFor != m_article.id)
+        m_imagesFor = 0;
+    if (!articleImagesShown() || m_articleImages.isEmpty()) {
+        // Nothing is fetched for an article it is not shown for, and what
+        // was is shown no longer.
+        if (!m_imagesAsked.isEmpty()) {
+            m_images->cancel();
+            m_imagesAsked.clear();
+            m_imagesAskedFor = 0;
+            ++m_imagesRequest;
+        }
+        m_imagesArrived.stop();
+        if (!m_localImages.isEmpty()) {
+            clearLocalImages();
+            renderArticle();
+            if (announce)
+                emit articleHtmlChanged();
+            return true;
+        }
+        return false;
+    }
+    const int most = m_images->limits().maxImages;
+    const QStringList sources = most > 0 ? m_articleImages.mid(0, most) : m_articleImages;
+    if (m_imagesAskedFor == m_article.id && m_imagesAsked == sources)
+        return false;
+    m_imagesAsked = sources;
+    m_imagesAskedFor = m_article.id;
+    const quint64 request = ++m_imagesRequest;
+    // A batch of another article's images, or of sources no longer asked
+    // for, is not this request's to show.
+    m_imagesArrived.stop();
+    clearLocalImages();
+    // Kept by the sanitizer's own string for it, the key it looks the local
+    // copy up by. Past the article's budget of pixels the rest stay links,
+    // since the window holds every image shown decoded.
+    const auto keep = [this](const QString &source, const QUrl &file) {
+        if (m_localImages.contains(source))
+            return false;
+        const QSize size = QImageReader(file.toLocalFile(), "jpeg").size();
+        const qint64 pixels = size.isValid() ? qint64(size.width()) * size.height() : 0;
+        if (m_imagePixels + pixels > maxArticleImagePixels)
+            return false;
+        m_imagePixels += pixels;
+        m_localImages.insert(source, {file, size.width()});
+        return true;
+    };
+    // Each source as the URL it is fetched and cached by, with every source
+    // that reads as the same URL, so a cache hit and a fetched copy are kept
+    // under the same key.
+    QList<QUrl> urls;
+    QHash<QUrl, QStringList> sourcesOf;
+    for (const QString &source : sources) {
+        const QUrl url(source, QUrl::StrictMode);
+        if (!sourcesOf.contains(url))
+            urls << url;
+        sourcesOf[url] << source;
+    }
+    // The cached ones show at once, and only the rest are fetched.
+    bool missing = false;
+    for (const QUrl &url : std::as_const(urls)) {
+        const QUrl hit = Thumbnails::cached(url, m_images->cacheName());
+        if (!hit.isValid()) {
+            missing = true;
+            continue;
+        }
+        for (const QString &source : sourcesOf.value(url))
+            keep(source, hit);
+    }
+    // The article was laid out with its links before this, and must be
+    // again with the copies, even when nothing more arrives.
+    const bool rendered = !m_localImages.isEmpty();
+    if (rendered) {
+        renderArticle();
+        if (announce)
+            emit articleHtmlChanged();
+    }
+    if (!missing) {
+        m_images->cancel();
+        return rendered;
+    }
+    // The cached ones are asked for too, though they come back at once and
+    // are already kept, so the cache's prunes during this fetch spare them.
+    // One that fails stays a link, and says nothing.
+    m_images->fetchEach(urls, [this, request, keep, sourcesOf](const QUrl &url, const QUrl &file) {
+        if (m_closing || request != m_imagesRequest || !file.isValid())
+            return;
+        bool kept = false;
+        for (const QString &source : sourcesOf.value(url))
+            kept = keep(source, file) || kept;
+        if (kept && !m_imagesArrived.isActive())
+            m_imagesArrived.start();
+    });
+    return rendered;
 }
 
 void Backend::updateThumbnail() {

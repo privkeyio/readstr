@@ -191,8 +191,21 @@ Rectangle {
                 color: Qt.alpha(theme.foreground, 0.12)
             }
 
+            // With Load remote images off, an article's images are links
+            // until this fetches them for it alone.
+            Button {
+                objectName: "loadImages"
+                visible: backend.articleHasImages && !backend.articleImagesShown
+                text: qsTr("Load images for this article")
+                flat: true
+                focusPolicy: Qt.NoFocus
+                Material.roundedScale: theme.radius
+                onClicked: backend.loadArticleImages()
+            }
+
             TextEdit {
                 id: body
+                objectName: "articleBody"
                 Layout.fillWidth: true
                 readOnly: true
                 selectByMouse: true

@@ -9,6 +9,7 @@
 #include "feedparser.h"
 #include "fetcher.h"
 #include "library.h"
+#include "settings.h"
 #include "store.h"
 #include "sync.h"
 
@@ -34,6 +35,8 @@ void usage(QTextStream &stream) {
               "       readstr sync [--json]\n"
               "       readstr sync login NPUB\n"
               "       readstr sync logout\n"
+              "       readstr settings [--json]\n"
+              "       readstr settings set KEY VALUE\n"
               "       readstr version [--json]\n"
               "       readstr --version\n";
 }
@@ -579,6 +582,41 @@ int version(const QString &command, const QStringList &arguments, QTextStream &o
     return 0;
 }
 
+// Lists the settings, or sets one, which a running window picks up as it lands.
+int settings(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
+    Options options;
+    if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
+        return 1;
+    Settings settings;
+    if (!options.positional.isEmpty()) {
+        if (options.positional.size() != 3 || options.positional.first() != "set" || options.json)
+            return fail(command, "takes 'set KEY VALUE', or no arguments to list the settings", err);
+        // A JSON value (true, false, a number, a quoted string), or else
+        // the text as a string.
+        const QString text = options.positional.at(2);
+        const QJsonDocument parsed = QJsonDocument::fromJson("[" + text.toUtf8() + "]");
+        const QJsonValue value =
+            parsed.isArray() && parsed.array().size() == 1 ? parsed.array().first() : QJsonValue(text);
+        QString error;
+        if (!settings.set(options.positional.at(1), value, &error))
+            return fail(command, error, err);
+        return 0;
+    }
+    if (!settings.error().isEmpty())
+        err << "readstr " << command << ": " << settings.error() << "; these are the defaults\n";
+    const QJsonObject all = settings.all();
+    if (options.json) {
+        out << QJsonDocument(all).toJson(QJsonDocument::Compact) << "\n";
+    } else {
+        // Each value as JSON, as `set` takes it.
+        for (auto it = all.constBegin(); it != all.constEnd(); ++it) {
+            const QByteArray json = QJsonDocument(QJsonArray{*it}).toJson(QJsonDocument::Compact);
+            out << it.key() << " " << QString::fromUtf8(json.mid(1).chopped(1)) << "\n";
+        }
+    }
+    return settings.error().isEmpty() ? 0 : 1;
+}
+
 int help(const QString &, const QStringList &, QTextStream &out, QTextStream &) {
     usage(out);
     return 0;
@@ -599,6 +637,7 @@ constexpr Command commands[] = {
     {"import", importOpml},
     {"export", exportOpml},
     {"sync", sync},
+    {"settings", settings},
     {"version", version},
     {"--version", version},
     {"help", help},

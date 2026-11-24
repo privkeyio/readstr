@@ -45,6 +45,7 @@
 #include <stdexcept>
 #include <sys/stat.h>
 #include <thread>
+#include <tuple>
 
 #include "articlemodel.h"
 #include "backend.h"
@@ -70,6 +71,7 @@
 #include "relaypool.h"
 #include "remotesigner.h"
 #include "sanitizer.h"
+#include "settings.h"
 #include "signer.h"
 #include "sourcemodel.h"
 #include "store.h"
@@ -2620,6 +2622,48 @@ private slots:
         QCOMPARE(run({"export", dir.path() + "/old.opml"}, out, err), 0);
         QCOMPARE(mode(dir.path() + "/old.opml"), 0600);
         QVERIFY(fixtureAt(dir.path() + "/old.opml").contains("daily.example.com"));
+    }
+
+    void cliListsAndSetsSettings()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        QString out, err;
+        QCOMPARE(run({"settings"}, out, err), 0);
+        QCOMPARE(out, QString("loadRemoteImages false\n"));
+        out.clear();
+        QCOMPARE(run({"settings", "--json"}, out, err), 0);
+        QCOMPARE(out, QString("{\"loadRemoteImages\":false}\n"));
+        QVERIFY(!QFileInfo::exists(dir.path() + "/config/settings.json"));
+
+        out.clear();
+        QCOMPARE(run({"settings", "set", "loadRemoteImages", "true"}, out, err), 0);
+        QVERIFY(out.isEmpty());
+        QVERIFY(Settings().loadRemoteImages());
+        QCOMPARE(mode(dir.path() + "/config/settings.json"), 0600);
+        QCOMPARE(run({"settings", "--json"}, out, err), 0);
+        QCOMPARE(out, QString("{\"loadRemoteImages\":true}\n"));
+
+        for (const QStringList &bad : {QStringList{"settings", "set", "loadRemoteImages", "yes"},
+                                       QStringList{"settings", "set", "nope", "true"},
+                                       QStringList{"settings", "set", "loadRemoteImages"},
+                                       QStringList{"settings", "get"}}) {
+            err.clear();
+            QCOMPARE(run(bad, out, err), 1);
+            QVERIFY(err.startsWith("readstr settings: "));
+        }
+        QVERIFY(Settings().loadRemoteImages());
+
+        // A corrupt file lists the defaults, and says so.
+        write(dir.path() + "/config/settings.json", "{");
+        out.clear();
+        err.clear();
+        QCOMPARE(run({"settings"}, out, err), 1);
+        QCOMPARE(out, QString("loadRemoteImages false\n"));
+        QVERIFY2(err.contains("these are the defaults"), qPrintable(err));
+        QCOMPARE(run({"settings", "set", "loadRemoteImages", "true"}, out, err), 0);
+        QVERIFY(Settings().loadRemoteImages());
     }
 
     void cliSubscribeLeavesNothingBehindOnFailure()
@@ -7024,13 +7068,24 @@ private slots:
                                  "::192.168.1.1", "64:ff9b::192.168.1.1", "64:ff9b::7f00:1", "64:ff9b::0.0.0.0",
                                  "2002:c0a8:0101::1", "2002:7f00:1::", "2002:0a00:0001:1234::5", "198.18.0.1",
                                  "198.19.255.255", "240.0.0.1", "250.1.2.3", "255.255.255.255",
-                                 "::ffff:198.18.0.1", "64:ff9b::100.64.0.1"})
+                                 "::ffff:198.18.0.1", "64:ff9b::100.64.0.1", "2001::1",
+                                 "2001:0:4136:e378:8000:63bf:3fff:fdd2", "64:ff9b:1::a00:1", "64:ff9b:1:ffff::1"})
             QVERIFY2(Fetcher::isLocalHost(host), host);
+        // Home router names stay public here, as on main, so Sync with Nostr
+        // and a bunker relay still reach them; only images refuse them.
+        for (const char *host : {"nas.lan", "router.home", "home.arpa", "printer.home.arpa", "printer.home.arpa."}) {
+            QVERIFY2(!Fetcher::isLocalHost(host), host);
+            QVERIFY2(Fetcher::isHomeNetworkName(host), host);
+        }
+        for (const char *host :
+             {"example.com", "lan.example.com", "home.example.com", "arpa.lan.example", "homearpa.org"})
+            QVERIFY2(!Fetcher::isHomeNetworkName(host), host);
         // The same forms around public IPv4 addresses, and the edges of the
         // ranges, stay public.
         for (const char *host : {"1.1.1.1", "198.17.255.255", "198.20.0.0", "223.255.255.255", "::ffff:1.1.1.1",
                                  "::1.1.1.1", "64:ff9b::1.1.1.1", "64:ff9b::808:808", "2002:0101:0101::1",
-                                 "64:ff9c::a00:1", "2606:4700:4700::1111", "2001:db9::1", "example.com"})
+                                 "64:ff9c::a00:1", "2606:4700:4700::1111", "2001:db9::1", "2001:1::1",
+                                 "64:ff9b:2::1", "example.com", "lan.example.com", "home.example.com", "arpa.lan.example"})
             QVERIFY2(!Fetcher::isLocalHost(host), host);
         // As URLs give them, which is how they arrive.
         QVERIFY(Fetcher::isLocalHost(QUrl("http://[::]:8080/").host()));
@@ -10115,6 +10170,16 @@ private slots:
         QVERIFY(fetcher.get({QUrl("http://localhost:1/x"), {}, {}}).error.contains("local network"));
         QVERIFY(fetcher.get({QUrl("http://[::1]:1/x"), {}, {}}).error.contains("local network"));
         QCOMPARE(server.requests.size(), asked);
+        // Nor a name a home router hands out, which only the image path
+        // refuses; these are refused before any lookup.
+        for (const char *url : {"http://nas.lan/a.png", "https://router.home/a.png", "http://home.arpa/a.png",
+                                "https://printer.home.arpa./a.png"}) {
+            strictFailed.clear();
+            QVERIFY2(!fetchThumbnail(strict, QUrl(url)).isValid(), url);
+            QCOMPARE(strictFailed.size(), 1);
+            QVERIFY2(strictFailed.first().at(1).toString().contains("local network"),
+                     qPrintable(strictFailed.first().at(1).toString()));
+        }
     }
 
     void thumbnailsSniffTheFormatBeforeAnyReader()
@@ -10392,6 +10457,1021 @@ private slots:
         QTRY_COMPARE(backend.articleThumbnail(),
                      QUrl::fromLocalFile(Thumbnails::cachePath(server.url("/missing.png"))));
         QCOMPARE(server.requests.size(), asked + 2);
+    }
+
+    // Article images
+
+    // srcset and lazy loaders' attributes pick the source; it is a link
+    // unless the caller hands over a local copy, and only a file: one.
+    void sanitizerPicksImageSourcesAndShowsOnlyLocalCopies()
+    {
+        const QUrl base("https://blog.example.com/");
+        const auto source = [&base](const QString &html) {
+            QStringList found;
+            Sanitizer::Options options;
+            options.images.found = &found;
+            Sanitizer::toRichText(html, base, options);
+            return found.join(' ');
+        };
+        QCOMPARE(source("<img src=https://t.example/s.png srcset=\"https://t.example/a.png 400w, "
+                        "https://t.example/b.png 1500w,https://t.example/c.png 3000w\">"),
+                 QString("https://t.example/b.png"));
+        QCOMPARE(source("<img srcset=\"https://t.example/c.png 3000w, https://t.example/d.png 2000w\">"),
+                 QString("https://t.example/d.png"));
+        QCOMPARE(source("<img srcset=\"https://t.example/a.png, https://t.example/b.png 2x, "
+                        "https://t.example/c.png 3x\">"),
+                 QString("https://t.example/b.png"));
+        QCOMPARE(source("<img srcset=\"/rel.png 1.5x\">"), QString("https://blog.example.com/rel.png"));
+        QCOMPARE(source("<img src=https://t.example/blank.gif data-src=https://t.example/real.png>"),
+                 QString("https://t.example/real.png"));
+        QCOMPARE(source("<img data-srcset=\"https://t.example/lazy.png 800w\" srcset=\"https://t.example/eager.png "
+                        "800w\" data-src=https://t.example/x.png>"),
+                 QString("https://t.example/lazy.png"));
+        QCOMPARE(source("<img srcset=\"javascript:alert(1) 1x\" src=https://t.example/a.png>"),
+                 QString("https://t.example/a.png"));
+        // A candidate that cannot be used never wins over one that can, and
+        // with none usable the other attributes are tried.
+        QCOMPARE(source("<img srcset=\"javascript:alert(1) 1500w, /good.png 800w\">"),
+                 QString("https://blog.example.com/good.png"));
+        QCOMPARE(source("<img srcset=\"https://t.example/good.png 1x, ftp://t.example/bad.png 2x\">"),
+                 QString("https://t.example/good.png"));
+        QCOMPARE(source("<img srcset=\"javascript:alert(1) 1500w, data:image/png;base64,AAAA 800w\" "
+                        "data-src=https://t.example/lazy.png src=https://t.example/a.png>"),
+                 QString("https://t.example/lazy.png"));
+        QCOMPARE(source("<img src=https://t.example/a.png><p>x</p><img src=https://t.example/b.png>"
+                        "<img src=https://t.example/a.png><img src=data:image/png;base64,AAAA>"),
+                 QString("https://t.example/a.png https://t.example/b.png"));
+        QCOMPARE(Sanitizer::toRichText("<img srcset=\"https://t.example/b.png 2x\" alt=b>", base),
+                 QString("<a href=\"https://t.example/b.png\">[image: b]</a>"));
+
+        QHash<QString, Sanitizer::LocalImage> local{
+            {"https://t.example/a.png", {QUrl::fromLocalFile("/cache/images/a.jpg"), 640}},
+            {"https://t.example/b.png", {QUrl("https://elsewhere.example/b.jpg"), 10}},
+        };
+        QStringList found;
+        Sanitizer::Options options;
+        options.images = {&local, &found};
+        const QString html = Sanitizer::toRichText(
+            "<p>x</p><img src=https://t.example/a.png alt=a><img src=https://t.example/b.png alt=b>"
+            "<a href=https://a.example/><img src=https://t.example/a.png></a><img src=https://t.example/c.png>",
+            base, options);
+        QCOMPARE(html, QString("<p>x</p><p><img src=\"file:///cache/images/a.jpg\" width=\"640\" style=\"max-width: "
+                               "100%\"></p><a href=\"https://t.example/b.png\">[image: b]</a><a "
+                               "href=\"https://a.example/\"><img src=\"file:///cache/images/a.jpg\" width=\"640\" "
+                               "style=\"max-width: 100%\"></a><a href=\"https://t.example/c.png\">[image]</a>"));
+        QCOMPARE(found, QStringList({"https://t.example/a.png", "https://t.example/b.png", "https://t.example/c.png"}));
+        for (const auto &match : QRegularExpression("<img src=\"([^\"]*)\"").globalMatch(html))
+            QVERIFY2(match.captured(1).startsWith("file:///"), qPrintable(html));
+
+        // Markdown's images too.
+        found.clear();
+        const QString markdown = Markdown::toRichText("![a](https://t.example/a.png)\n\n![c](https://t.example/c.png)",
+                                                      {&local, &found});
+        QVERIFY2(markdown.contains("<img src=\"file:///cache/images/a.jpg\" width=\"640\""), qPrintable(markdown));
+        QVERIFY2(markdown.contains("<a href=\"https://t.example/c.png\">[image: c]</a>"), qPrintable(markdown));
+        QCOMPARE(found, QStringList({"https://t.example/a.png", "https://t.example/c.png"}));
+    }
+
+    void settingsPersistAndFallBackToDefaults()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString path = dir.path() + "/config/settings.json";
+        {
+            Settings settings;
+            QCOMPARE(settings.path(), path);
+            QVERIFY(!settings.loadRemoteImages());
+            QVERIFY(settings.error().isEmpty());
+            QVERIFY(!QFileInfo::exists(path));
+            QSignalSpy changed(&settings, &Settings::loadRemoteImagesChanged);
+            settings.setLoadRemoteImages(true);
+            settings.setLoadRemoteImages(true);
+            QCOMPARE(changed.size(), 1);
+            QVERIFY(settings.error().isEmpty());
+        }
+        QCOMPARE(mode(path), 0600);
+        QCOMPARE(mode(dir.path() + "/config"), 0700);
+        QCOMPARE(QDir(dir.path() + "/config").entryList(QDir::Files), QStringList({"settings.json"}));
+        // As after a restart.
+        QVERIFY(Settings().loadRemoteImages());
+        QCOMPARE(Settings().all(), QJsonObject({{"loadRemoteImages", true}}));
+
+        // A newer version's keys survive a change.
+        write(path, "{\"loadRemoteImages\": true, \"future\": [1, 2]}");
+        {
+            Settings settings;
+            QVERIFY(settings.loadRemoteImages());
+            settings.setLoadRemoteImages(false);
+        }
+        QFile saved(path);
+        QVERIFY(saved.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(saved.readAll()).object(),
+                 QJsonObject({{"loadRemoteImages", false}, {"future", QJsonArray{1, 2}}}));
+        saved.close();
+
+        // A newer version's large key that reads now still reads after a
+        // change: indenting 10,000 zeros would take the file past the 64 KiB
+        // that is read.
+        QJsonArray zeros;
+        for (int i = 0; i < 10000; ++i)
+            zeros.append(0);
+        write(path, QJsonDocument(QJsonObject{{"future", zeros}}).toJson(QJsonDocument::Compact));
+        {
+            Settings settings;
+            QVERIFY(settings.error().isEmpty());
+            settings.setLoadRemoteImages(true);
+            QVERIFY2(settings.error().isEmpty(), qPrintable(settings.error()));
+        }
+        {
+            Settings reread;
+            QVERIFY2(reread.error().isEmpty(), qPrintable(reread.error()));
+            QVERIFY(reread.loadRemoteImages());
+        }
+        // One that the change would take past it is left as it is, and the
+        // change holds for the session and says why.
+        const QByteArray full = "{\"future\":\"" + QByteArray(64 * 1024 - 23, 'x') + "\"}";
+        QCOMPARE(full.size(), 64 * 1024 - 10);
+        write(path, full);
+        {
+            Settings settings;
+            QVERIFY(settings.error().isEmpty());
+            settings.setLoadRemoteImages(true);
+            QVERIFY(settings.loadRemoteImages());
+            QVERIFY2(settings.error().startsWith("cannot write " + path), qPrintable(settings.error()));
+        }
+        QFile unchanged(path);
+        QVERIFY(unchanged.open(QIODevice::ReadOnly));
+        QCOMPARE(unchanged.readAll(), full);
+        unchanged.close();
+        QVERIFY(Settings().error().isEmpty());
+        QVERIFY(!Settings().loadRemoteImages());
+
+        // A value of the wrong type is its default, and no error.
+        write(path, "{\"loadRemoteImages\": \"yes\"}");
+        QVERIFY(!Settings().loadRemoteImages());
+        QVERIFY(Settings().error().isEmpty());
+
+        // A corrupt file, or one that is no object, is the defaults, says
+        // so, and stays as it is until a setting changes.
+        for (const QByteArray &corrupt : {QByteArray("{\"loadRemoteImages\": tru"), QByteArray("[true]"), QByteArray()}) {
+            write(path, corrupt);
+            Settings settings;
+            QVERIFY(!settings.loadRemoteImages());
+            QVERIFY2(settings.error().startsWith("cannot read " + path), qPrintable(settings.error()));
+            QFile untouched(path);
+            QVERIFY(untouched.open(QIODevice::ReadOnly));
+            QCOMPARE(untouched.readAll(), corrupt);
+        }
+        {
+            Backend backend;
+            QVERIFY(backend.statusError());
+            QVERIFY2(backend.status().startsWith("Cannot read the settings, so the defaults apply: cannot read"),
+                     qPrintable(backend.status()));
+            QSignalSpy errors(backend.settings(), &Settings::errorChanged);
+            backend.settings()->setLoadRemoteImages(true);
+            QVERIFY(backend.settings()->error().isEmpty());
+            QCOMPARE(errors.size(), 1);
+        }
+        QVERIFY(Settings().loadRemoteImages());
+        QVERIFY(Settings().error().isEmpty());
+
+        // Neither a directory where the file goes nor a FIFO hangs or
+        // crashes it.
+        QVERIFY(QFile::remove(path));
+        QVERIFY(QDir().mkpath(path));
+        QVERIFY(!Settings().loadRemoteImages());
+        QVERIFY(!Settings().error().isEmpty());
+        QVERIFY(QDir(path).removeRecursively());
+        QVERIFY(::mkfifo(QFile::encodeName(path).constData(), 0600) == 0);
+        QVERIFY(!Settings().error().isEmpty());
+        QVERIFY(QFile::remove(path));
+
+        // A change that cannot be saved holds for the session and says why.
+        write(dir.path() + "/blocker", "x");
+        Settings stuck(dir.path() + "/blocker/settings.json");
+        stuck.setLoadRemoteImages(true);
+        QVERIFY(stuck.loadRemoteImages());
+        QVERIFY2(stuck.error().startsWith("cannot create"), qPrintable(stuck.error()));
+        Settings nowhere(QString{});
+        nowhere.setLoadRemoteImages(true);
+        QVERIFY(nowhere.error().startsWith("no config directory"));
+
+        // What the CLI may set.
+        QString error;
+        Settings settings;
+        QVERIFY(!settings.set("nope", true, &error));
+        QCOMPARE(error, QString("unknown setting nope"));
+        QVERIFY(!settings.set("loadRemoteImages", "on", &error));
+        QCOMPARE(error, QString("loadRemoteImages takes true or false"));
+        QVERIFY(settings.set("loadRemoteImages", false, &error));
+        QVERIFY(!Settings().loadRemoteImages());
+    }
+
+    // Each limit of an article's images holds, as the thumbnails' do.
+    void articleImagesHoldTheirLimits()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        for (const char *path : {"/1.png", "/2.png", "/3.png"})
+            server.serve(path, png(20, 10) + QByteArray(100 * 1024, 'x'), "image/png");
+        server.serve("/wide.png", png(4000, 100), "image/png");
+        server.serve("/svg.png", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>",
+                     "image/svg+xml");
+        const QList<QUrl> three{server.url("/1.png"), server.url("/2.png"), server.url("/3.png")};
+
+        Thumbnails images("images");
+        QSignalSpy failed(&images, &Thumbnails::failed);
+        QMap<QString, QUrl> got;
+        const auto fetchAll = [&](const QList<QUrl> &urls) {
+            got.clear();
+            failed.clear();
+            images.fetchEach(urls, [&got](const QUrl &url, const QUrl &file) { got.insert(url.toString(), file); });
+            QTRY_COMPARE(got.size(), urls.size());
+        };
+        const auto reason = [&failed](const QUrl &url) {
+            for (const QList<QVariant> &failure : std::as_const(failed))
+                if (failure.at(0).toUrl() == url)
+                    return failure.at(1).toString();
+            return QString();
+        };
+
+        // By default neither this machine nor the local network is asked,
+        // nor anything but http(s).
+        const QList<QUrl> refused{server.url("/1.png"), QUrl("http://10.0.0.1/a.png"),
+                                  QUrl("http://192.168.1.1/a.png"), QUrl("http://[::1]/a.png"),
+                                  QUrl("http://localhost/a.png"), QUrl("ftp://images.invalid/a.png"),
+                                  QUrl("file:///etc/hostname")};
+        fetchAll(refused);
+        for (const QUrl &url : refused) {
+            QVERIFY2(!got.value(url.toString()).isValid(), qPrintable(url.toString()));
+            const QString why = reason(url);
+            QVERIFY2(why.contains("local network") || why.contains("only http and https"), qPrintable(why));
+        }
+        QVERIFY(server.requests.isEmpty());
+
+        Thumbnails::Limits limits = Backend::imageLimits();
+        limits.publicHostsOnly = false;
+        limits.maxImages = 2;
+        images.setLimits(limits);
+        fetchAll(three);
+        QVERIFY(got.value(server.url("/1.png").toString()).isValid());
+        QVERIFY(got.value(server.url("/2.png").toString()).isValid());
+        QVERIFY(!got.value(server.url("/3.png").toString()).isValid());
+        QCOMPARE(reason(server.url("/3.png")), QString("past the 2 images fetched at once"));
+        QCOMPARE(server.requests.size(), 2);
+        QVERIFY(Thumbnails::cached(server.url("/1.png"), "images").toLocalFile().startsWith(dir.path()
+                                                                                           + "/cache/images/"));
+        QVERIFY(!Thumbnails::cached(server.url("/1.png")).isValid());
+
+        // Past the total, the rest are refused and none is cached.
+        QVERIFY(QDir(dir.path() + "/cache/images").removeRecursively());
+        server.requests.clear();
+        limits.maxImages = 0;
+        limits.maxConcurrent = 1;
+        limits.maxTotalBytes = 150 * 1024;
+        images.setLimits(limits);
+        fetchAll(three);
+        QVERIFY(got.value(server.url("/1.png").toString()).isValid());
+        for (const char *path : {"/2.png", "/3.png"}) {
+            QVERIFY(!got.value(server.url(path).toString()).isValid());
+            QCOMPARE(reason(server.url(path)), QString("past the 0.146 MiB fetched at once"));
+            QVERIFY(!Thumbnails::cached(server.url(path), "images").isValid());
+        }
+        QVERIFY(server.requests.size() <= 3);
+
+        // Scaled to the reader's width at most, and an SVG never decoded.
+        limits = Backend::imageLimits();
+        limits.publicHostsOnly = false;
+        images.setLimits(limits);
+        fetchAll({server.url("/wide.png"), server.url("/svg.png")});
+        QCOMPARE(QImage(got.value(server.url("/wide.png").toString()).toLocalFile()).width(), Sanitizer::imageWidth);
+        QVERIFY(!got.value(server.url("/svg.png").toString()).isValid());
+        QVERIFY(reason(server.url("/svg.png")).contains("not a PNG"));
+        QCOMPARE(Backend::imageLimits().maxImages, 30);
+        QCOMPARE(Backend::imageLimits().maxTotalBytes, 24 * 1024 * 1024);
+        QCOMPARE(Backend::imageLimits().maxBytes, 4 * 1024 * 1024);
+    }
+
+    void backendFetchesImagesOnlyWhenAsked()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.serve("/a.png", png(2000, 1000), "image/png");
+        server.serve("/b.png", png(300, 200), "image/png");
+        server.serve("/other.png", png(30, 30), "image/png");
+        seedImageArticles({"<p>One</p><img src=\"" + server.url("/a.png").toString() + "\" alt=a><img src=\""
+                               + server.url("/b.png").toString() + "\">",
+                           "<p>Two</p><img src=\"" + server.url("/other.png").toString() + "\" alt=o>"});
+        const auto sources = [](const QString &html) {
+            QStringList found;
+            for (const auto &match : QRegularExpression("<img src=\"([^\"]*)\"").globalMatch(html))
+                found << match.captured(1);
+            return found;
+        };
+        Backend backend;
+        Thumbnails::Limits limits = Backend::imageLimits();
+        limits.publicHostsOnly = false;
+        backend.setImageLimits(limits);
+        QVERIFY(!backend.settings()->loadRemoteImages());
+
+        // Off: the images are links, and nothing is asked.
+        backend.selectArticle(0);
+        backend.selectArticle(1);
+        backend.selectArticle(0);
+        QVERIFY(backend.articleHasImages());
+        QVERIFY(!backend.articleImagesShown());
+        QVERIFY2(backend.articleHtml().contains("[image: a]</a>"), qPrintable(backend.articleHtml()));
+        QVERIFY(!backend.articleHtml().contains("<img"));
+        QTest::qWait(300);
+        QVERIFY(server.requests.isEmpty());
+
+        // Asked for this article: its images alone, as local files.
+        QSignalSpy html(&backend, &Backend::articleHtmlChanged);
+        backend.loadArticleImages();
+        QVERIFY(backend.articleImagesShown());
+        QTRY_COMPARE(sources(backend.articleHtml()).size(), 2);
+        for (const QString &source : sources(backend.articleHtml()))
+            QVERIFY2(QUrl(source).toLocalFile().startsWith(dir.path() + "/cache/images/"), qPrintable(source));
+        QVERIFY(backend.articleHtml().contains("width=\"1600\""));
+        QVERIFY(backend.articleHtml().contains("width=\"300\""));
+        QCOMPARE(server.requests.size(), 2);
+        QVERIFY(html.size() >= 2);
+
+        // Only for that article, and only while it is open.
+        backend.selectArticle(1);
+        QVERIFY(!backend.articleImagesShown());
+        QVERIFY(!backend.articleHtml().contains("<img"));
+        backend.selectArticle(0);
+        QVERIFY(!backend.articleImagesShown());
+        QVERIFY(!backend.articleHtml().contains("<img"));
+        QTest::qWait(300);
+        QCOMPARE(server.requests.size(), 2);
+
+        // On: from the cache at once, and the next article's fetched.
+        backend.settings()->setLoadRemoteImages(true);
+        QVERIFY(backend.articleImagesShown());
+        QCOMPARE(sources(backend.articleHtml()).size(), 2);
+        QCOMPARE(server.requests.size(), 2);
+        backend.selectArticle(1);
+        QTRY_COMPARE(sources(backend.articleHtml()).size(), 1);
+        QCOMPARE(server.requests.size(), 3);
+        QCOMPARE(server.requests.last().path, QByteArray("/other.png"));
+        QVERIFY(Settings().loadRemoteImages());
+
+        // Off again: links, at once.
+        backend.settings()->setLoadRemoteImages(false);
+        QVERIFY(!backend.articleHtml().contains("<img"));
+        QVERIFY(backend.articleHtml().contains("[image: o]</a>"));
+    }
+
+    // Leaving an article drops its images on their way, and they never
+    // show on the next.
+    void backendDropsTheImagesOfAnArticleLeft()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.route("/slow.png", [](const FakeHttpServer::Request &) {
+            FakeHttpServer::Response response{200, {{"Content-Type", "image/png"}}, png(40, 20)};
+            response.delayMs = 400;
+            return response;
+        });
+        server.serve("/fast.png", png(20, 40), "image/png");
+        seedImageArticles({"<img src=\"" + server.url("/slow.png").toString() + "\" alt=s>",
+                           "<img src=\"" + server.url("/fast.png").toString() + "\" alt=f>"});
+        Settings().setLoadRemoteImages(true);
+        Backend backend;
+        Thumbnails::Limits limits = Backend::imageLimits();
+        limits.publicHostsOnly = false;
+        backend.setImageLimits(limits);
+        QVERIFY(backend.settings()->loadRemoteImages());
+        backend.selectArticle(0);
+        QTRY_COMPARE(server.requests.size(), 1);
+        backend.selectArticle(1);
+        QTRY_VERIFY(backend.articleHtml().contains("<img"));
+        QTest::qWait(700);
+        QVERIFY(!backend.articleHtml().contains("slow"));
+        QVERIFY(!Thumbnails::cached(server.url("/slow.png"), "images").isValid());
+    }
+
+    // Reopening an article whose images are cached lays it out with them,
+    // and says so last, so the reader's binding never keeps the links.
+    void backendShowsCachedImagesWhenAnArticleIsReopened()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.serve("/a.png", png(300, 200), "image/png");
+        server.serve("/b.png", png(30, 30), "image/png");
+        // Never there, so with a cached one beside it nothing more arrives.
+        seedImageArticles({"<img src=\"" + server.url("/a.png").toString() + "\"><img src=\""
+                               + server.url("/gone.png").toString() + "\">",
+                           "<img src=\"" + server.url("/b.png").toString() + "\">"});
+        Settings().setLoadRemoteImages(true);
+        Backend backend;
+        Thumbnails::Limits limits = Backend::imageLimits();
+        limits.publicHostsOnly = false;
+        backend.setImageLimits(limits);
+        QStringList said;
+        connect(&backend, &Backend::articleHtmlChanged, &backend,
+                [&backend, &said] { said << backend.articleHtml(); });
+        backend.selectArticle(0);
+        QTRY_VERIFY(!said.isEmpty() && said.last().contains("<img src=\"file:"));
+        QTRY_COMPARE(server.requests.size(), 2);
+        backend.selectArticle(1);
+        QTRY_VERIFY(said.last().contains("<img src=\"file:"));
+        said.clear();
+        backend.selectArticle(0);
+        QVERIFY(!said.isEmpty());
+        // The first text announced already has the cached copy, so its link
+        // never shows in between.
+        QVERIFY2(said.first().contains("<img src=\"file:"), qPrintable(said.first()));
+        QVERIFY2(said.last().contains("<img src=\"file:"), qPrintable(said.last()));
+        // The one that is not there fails again, and changes nothing.
+        QTRY_COMPARE(server.requests.size(), 4);
+        QTest::qWait(300);
+        QVERIFY2(said.last().contains("<img src=\"file:"), qPrintable(said.last()));
+        QCOMPARE(said.last(), backend.articleHtml());
+        // One whose images are all cached is announced once, with them,
+        // and fetches nothing.
+        said.clear();
+        backend.selectArticle(1);
+        QTest::qWait(300);
+        QCOMPARE(said.size(), 1);
+        QVERIFY2(said.first().contains("<img src=\"file:"), qPrintable(said.first()));
+        QCOMPARE(said.first(), backend.articleHtml());
+        QCOMPARE(server.requests.size(), 4);
+    }
+
+    // An article's images are held to a budget of pixels in the window,
+    // and each one to a size in pixels and in bytes in the cache.
+    void articleImagesHoldTheirSizes()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.serve("/tall.png", png(1000, 8000), "image/png");
+        QImage noise(400, 400, QImage::Format_RGB32);
+        for (int y = 0; y < noise.height(); ++y)
+            for (int x = 0; x < noise.width(); ++x)
+                noise.setPixel(x, y, QRandomGenerator::global()->generate());
+        QByteArray noisy;
+        QBuffer buffer(&noisy);
+        QVERIFY(buffer.open(QIODevice::WriteOnly));
+        QVERIFY(noise.save(&buffer, "PNG"));
+        server.serve("/noise.png", noisy, "image/png");
+
+        // A tall one is kept at its proportions within the stored pixels.
+        Thumbnails::Limits limits = Backend::imageLimits();
+        limits.publicHostsOnly = false;
+        Thumbnails images("images", limits);
+        QSignalSpy failed(&images, &Thumbnails::failed);
+        const QUrl tall = fetchThumbnail(images, server.url("/tall.png"));
+        const QSize size = QImage(tall.toLocalFile()).size();
+        QVERIFY2(qint64(size.width()) * size.height() <= limits.maxStoredPixels,
+                 qPrintable(QString("%1x%2").arg(size.width()).arg(size.height())));
+        QVERIFY(size.height() > 5600);
+        QVERIFY(qAbs(double(size.height()) / size.width() - 8.0) < 0.02);
+        QVERIFY(QFileInfo(tall.toLocalFile()).size() <= limits.maxStoredBytes);
+        // A side held at one pixel leaves the other no longer than the cap
+        // allows, and an image within the cap keeps its size.
+        Thumbnails::Limits cap;
+        cap.maxWidth = 8192;
+        cap.maxStoredPixels = 4096;
+        QString error;
+        QCOMPARE(Thumbnails::decode(png(1, 8192), cap, &error).size(), QSize(1, 4096));
+        QCOMPARE(Thumbnails::decode(png(8192, 1), cap, &error).size(), QSize(4096, 1));
+        QCOMPARE(Thumbnails::decode(png(64, 64), cap, &error).size(), QSize(64, 64));
+        QCOMPARE(Thumbnails::decode(png(200, 100), cap, &error).size(), QSize(90, 45));
+        // The video thumbnails keep their own limits: no cap on the pixels.
+        QCOMPARE(Thumbnails::Limits().maxStoredPixels, qint64(0));
+        QCOMPARE(Thumbnails::Limits().maxStoredBytes, qint64(0));
+
+        // One that JPEG cannot make small enough is refused, not kept.
+        limits.maxStoredBytes = 40 * 1024;
+        images.setLimits(limits);
+        QVERIFY(!fetchThumbnail(images, server.url("/noise.png")).isValid());
+        QVERIFY2(failed.last().at(1).toString().contains("too large to keep"),
+                 qPrintable(failed.last().at(1).toString()));
+        QVERIFY(!Thumbnails::cached(server.url("/noise.png"), "images").isValid());
+
+        // Past the article's budget, the rest stay links.
+        QStringList html;
+        const int count = int(Backend::maxArticleImagePixels / Backend::imageLimits().maxStoredPixels) + 1;
+        for (int i = 0; i < count; ++i) {
+            const QByteArray path = "/big" + QByteArray::number(i) + ".png";
+            server.serve(path, png(1600, 2500), "image/png");
+            html << "<p>" + QString::number(i) + "</p><img src=\"" + server.url(QString::fromLatin1(path)).toString()
+                    + "\" alt=big" + QString::number(i) + ">";
+        }
+        seedImageArticles({html.join(QString())});
+        Settings().setLoadRemoteImages(true);
+        Backend backend;
+        limits = Backend::imageLimits();
+        limits.publicHostsOnly = false;
+        backend.setImageLimits(limits);
+        backend.selectArticle(0);
+        const auto shown = [&backend] { return int(backend.articleHtml().count("<img src=\"file:")); };
+        QTRY_COMPARE_WITH_TIMEOUT(shown(), count - 1, 20000);
+        QTest::qWait(400);
+        QCOMPARE(shown(), count - 1);
+        QCOMPARE(backend.articleHtml().count("[image: big"), 1);
+    }
+
+    // The cache removes the least recently used first, and never what the
+    // fetch under way shows.
+    void imageCacheKeepsWhatIsInUse()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        for (const char *path : {"/1.png", "/2.png", "/3.png"})
+            server.serve(path, png(200, 100), "image/png");
+        const QList<QUrl> three{server.url("/1.png"), server.url("/2.png"), server.url("/3.png")};
+
+        // A cache of next to nothing is pruned after every write, and the
+        // batch's own images are spared all the same.
+        Thumbnails::Limits limits = Backend::imageLimits();
+        limits.publicHostsOnly = false;
+        limits.cacheMaxBytes = 1;
+        Thumbnails images("images", limits);
+        QMap<QString, QUrl> got;
+        images.fetchEach(three, [&got](const QUrl &url, const QUrl &file) { got.insert(url.toString(), file); });
+        QTRY_COMPARE(got.size(), 3);
+        for (const QUrl &url : three) {
+            QVERIFY2(got.value(url.toString()).isValid(), qPrintable(url.toString()));
+            QVERIFY2(QFileInfo::exists(got.value(url.toString()).toLocalFile()), qPrintable(url.toString()));
+        }
+
+        // A hit is dated now, so it is the last to go.
+        const QString first = got.value(three.at(0).toString()).toLocalFile();
+        const QDateTime now = QDateTime::currentDateTimeUtc();
+        for (const QUrl &file : std::as_const(got)) {
+            QFile old(file.toLocalFile());
+            QVERIFY(old.open(QIODevice::ReadWrite));
+            QVERIFY(old.setFileTime(now.addDays(-2), QFileDevice::FileModificationTime));
+        }
+        QVERIFY(Thumbnails::cached(three.at(0), "images").isValid());
+        QVERIFY(QFileInfo(first).lastModified() > now.addSecs(-60));
+        const qint64 each = QFileInfo(first).size();
+        QCOMPARE(Thumbnails::prune(dir.path() + "/cache/images", each, 30), 2);
+        QVERIFY(QFileInfo::exists(first));
+
+        // What is kept counts toward the size, but is never removed.
+        const QString cache = dir.filePath("kept");
+        QVERIFY(QDir().mkpath(cache));
+        for (int i = 0; i < 4; ++i) {
+            QFile file(cache + QString("/%1.jpg").arg(i));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write(QByteArray(100, 'x'));
+            QVERIFY(file.flush());
+            QVERIFY(file.setFileTime(now.addSecs(-3600 * i), QFileDevice::FileModificationTime));
+        }
+        QCOMPARE(Thumbnails::prune(cache, 150, 30,
+                                   {QFileInfo(cache + "/0.jpg").absoluteFilePath(),
+                                    QFileInfo(cache + "/3.jpg").absoluteFilePath()}),
+                 2);
+        QCOMPARE(QDir(cache).entryList(QDir::Files, QDir::Name), QStringList({"0.jpg", "3.jpg"}));
+
+        // What is kept takes its share first, wherever it falls in the
+        // order: a newer file that fits only beside nothing goes.
+        const QString shared = dir.filePath("shared");
+        QVERIFY(QDir().mkpath(shared));
+        for (const auto &[name, size, age] : {std::tuple{"new.jpg", 80, 0}, std::tuple{"old.jpg", 60, 3600}}) {
+            QFile file(shared + "/" + name);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write(QByteArray(size, 'x'));
+            QVERIFY(file.flush());
+            QVERIFY(file.setFileTime(now.addSecs(-age), QFileDevice::FileModificationTime));
+        }
+        QCOMPARE(Thumbnails::prune(shared, 100, 30, {QFileInfo(shared + "/old.jpg").absoluteFilePath()}), 1);
+        QCOMPARE(QDir(shared).entryList(QDir::Files), QStringList({"old.jpg"}));
+    }
+
+    // The prune at the start keeps to the limits the cache is made with:
+    // an article's images to 128 MiB, not the thumbnails' 64.
+    void imageCachePrunesToItsOwnLimitsAtTheStart()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString cache = dir.path() + "/cache/images";
+        QVERIFY(QDir().mkpath(cache));
+        const QDateTime now = QDateTime::currentDateTimeUtc();
+        // Sparse, so they take no room on the disk.
+        const auto make = [&cache](const QString &name, qint64 size, const QDateTime &time) {
+            QFile file(cache + "/" + name);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QVERIFY(file.resize(size));
+            QVERIFY(file.setFileTime(time, QFileDevice::FileModificationTime));
+        };
+        make("a.jpg", 40 * 1024 * 1024, now);
+        make("b.jpg", 40 * 1024 * 1024, now.addSecs(-60));
+        // Its going says the prune has run.
+        make("stale.jpg", 1, now.addDays(-31));
+        Backend backend;
+        QTRY_VERIFY(!QFileInfo::exists(cache + "/stale.jpg"));
+        QVERIFY(QFileInfo::exists(cache + "/a.jpg"));
+        QVERIFY(QFileInfo::exists(cache + "/b.jpg"));
+
+        Thumbnails::Limits small;
+        small.cacheMaxBytes = 50 * 1024 * 1024;
+        Thumbnails images("images", small);
+        QTRY_VERIFY(!QFileInfo::exists(cache + "/b.jpg"));
+        QVERIFY(QFileInfo::exists(cache + "/a.jpg"));
+    }
+
+    // An image fetch asks only for images, says little of the reader, stops
+    // a response that is no image at its headers, and goes to the web's own
+    // ports alone.
+    void imageFetchesAskForImagesAlone()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.serve("/a.png", png(10, 10), "image/png");
+        server.serve("/feed.xml", fixture("rss2.xml"));
+        server.redirect("/moved.png", server.url("/a.png").toString().toUtf8());
+        server.route("/page", [](const FakeHttpServer::Request &) {
+            FakeHttpServer::Response response{200, {{"Content-Type", "text/html"}}, {}};
+            response.stream = 8 * 1024 * 1024;
+            response.hold = true;
+            return response;
+        });
+        server.route("/missing.png", [](const FakeHttpServer::Request &) {
+            FakeHttpServer::Response response{404, {{"Content-Type", "text/html"}}, {}};
+            response.stream = 8 * 1024 * 1024;
+            response.hold = true;
+            return response;
+        });
+
+        Fetcher feeds;
+        QVERIFY(feeds.get({server.url("/feed.xml"), {}, {}}).ok());
+        const FakeHttpServer::Request feed = server.requests.last();
+        QCOMPARE(feed.headers.value("user-agent"), QByteArray("readstr-desktop/" READSTR_VERSION));
+        QVERIFY(feed.headers.value("accept").startsWith("application/rss+xml"));
+        // Qt makes one from the system's locale when a request has none.
+        QVERIFY(!feed.headers.value("accept-language").isEmpty());
+
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.images = true;
+        limits.timeoutMs = 5000;
+        fetcher.setLimits(limits);
+        const FetchResult image = fetcher.get({server.url("/a.png"), {}, {}});
+        QVERIFY2(image.ok(), qPrintable(image.error));
+        const FakeHttpServer::Request asked = server.requests.last();
+        QCOMPARE(asked.headers.value("user-agent"), QByteArray("readstr"));
+        QCOMPARE(asked.headers.value("accept"), QByteArray("image/png,image/jpeg,image/gif,image/webp"));
+        QCOMPARE(asked.headers.value("accept-language"), QByteArray("*"));
+        QVERIFY(fetcher.get({server.url("/moved.png"), {}, {}}).ok());
+
+        // Stopped at the headers, long before the body or the deadline.
+        QElapsedTimer clock;
+        clock.start();
+        const FetchResult page = fetcher.get({server.url("/page"), {}, {}});
+        QCOMPARE(page.error, QString("not an image (text/html)"));
+        QVERIFY(page.received < 4 * 1024 * 1024);
+        const FetchResult missing = fetcher.get({server.url("/missing.png"), {}, {}});
+        QCOMPARE(missing.error, QString("HTTP 404"));
+        QVERIFY(missing.received < 4 * 1024 * 1024);
+        QVERIFY(clock.elapsed() < 4000);
+
+        // Only 80 and 443, asked of no one.
+        limits.defaultPortsOnly = true;
+        fetcher.setLimits(limits);
+        server.requests.clear();
+        QCOMPARE(fetcher.get({server.url("/a.png"), {}, {}}).error,
+                 QString("refused port %1, which is not the default for http").arg(server.serverPort()));
+        QVERIFY(server.requests.isEmpty());
+        Thumbnails thumbnails;
+        QSignalSpy failed(&thumbnails, &Thumbnails::failed);
+        QVERIFY(!fetchThumbnail(thumbnails, QUrl("http://images.invalid:8080/a.png")).isValid());
+        QCOMPARE(failed.last().at(1).toString(), QString("refused port 8080, which is not the default for http"));
+        QVERIFY(!fetchThumbnail(thumbnails, QUrl("https://images.invalid:80/a.png")).isValid());
+        QCOMPARE(failed.last().at(1).toString(), QString("refused port 80, which is not the default for https"));
+    }
+
+    // Every body an article's images bring counts toward the total, not
+    // just those that make an image.
+    void articleImagesCountEveryBody()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        QList<QUrl> urls;
+        for (int i = 0; i < 4; ++i) {
+            const QByteArray path = "/" + QByteArray::number(i) + ".png";
+            // An image's type, but past the size, so each fails.
+            server.route(path, [](const FakeHttpServer::Request &) {
+                FakeHttpServer::Response response{200, {{"Content-Type", "image/png"}}, {}};
+                response.stream = 120 * 1024;
+                return response;
+            });
+            urls << server.url(QString::fromLatin1(path));
+        }
+        Thumbnails::Limits limits = Backend::imageLimits();
+        limits.publicHostsOnly = false;
+        limits.maxConcurrent = 1;
+        limits.maxBytes = 100 * 1024;
+        limits.maxTotalBytes = 250 * 1024;
+        Thumbnails images("images", limits);
+        QSignalSpy failed(&images, &Thumbnails::failed);
+        QMap<QString, QUrl> got;
+        images.fetchEach(urls, [&got](const QUrl &url, const QUrl &file) { got.insert(url.toString(), file); });
+        QTRY_COMPARE(got.size(), 4);
+        QMap<QString, QString> why;
+        for (const QList<QVariant> &failure : std::as_const(failed))
+            why.insert(failure.at(0).toUrl().toString(), failure.at(1).toString());
+        for (int i = 0; i < 3; ++i)
+            QVERIFY2(why.value(urls.at(i).toString()).startsWith("response is larger"),
+                     qPrintable(why.value(urls.at(i).toString())));
+        QCOMPARE(why.value(urls.at(3).toString()), QString("past the 0.244 MiB fetched at once"));
+        QVERIFY(server.requests.size() <= 4);
+    }
+
+    // A running window follows the settings changed elsewhere, and a
+    // change of its own keeps them.
+    void settingsFollowChangesMadeElsewhere()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString path = dir.path() + "/config/settings.json";
+        // Made before its directory is, as on a first start.
+        Settings window;
+        QSignalSpy changed(&window, &Settings::loadRemoteImagesChanged);
+        QString out, err;
+        QCOMPARE(run({"settings", "set", "loadRemoteImages", "true"}, out, err), 0);
+        QTRY_VERIFY(window.loadRemoteImages());
+        QCOMPARE(changed.size(), 1);
+
+        // Turned off from the CLI, it is off in the window, and stays off
+        // when the window saves.
+        QCOMPARE(run({"settings", "set", "loadRemoteImages", "false"}, out, err), 0);
+        QTRY_VERIFY(!window.loadRemoteImages());
+        QCOMPARE(changed.size(), 2);
+        // Written in place rather than renamed into place, too.
+        write(path, "{\"loadRemoteImages\": true}");
+        QTRY_VERIFY(window.loadRemoteImages());
+        write(path, "{\"loadRemoteImages\": false}");
+        QTRY_VERIFY(!window.loadRemoteImages());
+        QCOMPARE(changed.size(), 4);
+
+        // Before the window has heard of a change, its own write keeps the
+        // keys it did not change.
+        {
+            QFile file(path + ".new");
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("{\"loadRemoteImages\": true, \"future\": 1}");
+        }
+        QVERIFY(QFile::remove(path));
+        QVERIFY(QFile::rename(path + ".new", path));
+        window.setLoadRemoteImages(false);
+        QFile saved(path);
+        QVERIFY(saved.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(saved.readAll()).object(),
+                 QJsonObject({{"loadRemoteImages", false}, {"future", 1}}));
+        QVERIFY(!window.loadRemoteImages());
+        QTest::qWait(200);
+        QVERIFY(!window.loadRemoteImages());
+        QVERIFY(!Settings().loadRemoteImages());
+
+        // A file that turns unreadable is the defaults, and says so.
+        QCOMPARE(run({"settings", "set", "loadRemoteImages", "true"}, out, err), 0);
+        QTRY_VERIFY(window.loadRemoteImages());
+        write(path, "{\"loadRemoteImages\": tru");
+        QTRY_VERIFY(!window.loadRemoteImages());
+        QVERIFY(window.unreadable());
+        QVERIFY2(window.error().startsWith("cannot read " + path), qPrintable(window.error()));
+        window.setLoadRemoteImages(true);
+        QVERIFY(window.error().isEmpty());
+        QVERIFY(Settings().loadRemoteImages());
+
+        // A change that cannot be saved says so; when the file then turns
+        // unreadable and is mended elsewhere, the save's error is back, not
+        // the stale one that the file cannot be read. A file where the
+        // config directory goes makes the save fail; a read-only
+        // settings.json would not for root, who may write it all the same.
+        const QString config = dir.path() + "/config";
+        QVERIFY(QDir(config).removeRecursively());
+        write(config, "x");
+        QTRY_VERIFY(!window.loadRemoteImages());
+        QVERIFY(window.error().isEmpty());
+        window.setLoadRemoteImages(true);
+        QVERIFY(window.loadRemoteImages());
+        QVERIFY(!window.unreadable());
+        QVERIFY2(window.error().startsWith("cannot create " + config), qPrintable(window.error()));
+        const QString saveError = window.error();
+        QVERIFY(QFile::remove(config));
+        QVERIFY(QDir().mkpath(config));
+        write(path, "{\"loadRemoteImages\": tru");
+        QTRY_VERIFY(window.unreadable());
+        QVERIFY2(window.error().startsWith("cannot read " + path), qPrintable(window.error()));
+        QVERIFY(window.loadRemoteImages());
+        write(path, "{\"loadRemoteImages\": false}");
+        QTRY_VERIFY(!window.unreadable());
+        QCOMPARE(window.error(), saveError);
+        QVERIFY(window.loadRemoteImages());
+        // Asked for again, the change that could not be saved is saved now
+        // and its error cleared, though the window already shows it.
+        window.setLoadRemoteImages(true);
+        QVERIFY2(window.error().isEmpty(), qPrintable(window.error()));
+        QVERIFY(Settings().loadRemoteImages());
+        QCOMPARE(mode(config), 0700);
+
+        // The window turns the article's images off with it.
+        FakeHttpServer server;
+        server.serve("/a.png", png(30, 20), "image/png");
+        seedImageArticles({"<img src=\"" + server.url("/a.png").toString() + "\" alt=a>"});
+        Backend backend;
+        Thumbnails::Limits limits = Backend::imageLimits();
+        limits.publicHostsOnly = false;
+        backend.setImageLimits(limits);
+        backend.selectArticle(0);
+        QTRY_VERIFY(backend.articleHtml().contains("<img src=\"file:"));
+        QCOMPARE(run({"settings", "set", "loadRemoteImages", "false"}, out, err), 0);
+        QTRY_VERIFY(!backend.articleImagesShown());
+        QVERIFY(!backend.articleHtml().contains("<img"));
+        QVERIFY(backend.articleHtml().contains("[image: a]</a>"));
+    }
+
+    // An image is one image whatever its fragment, a srcset descriptor
+    // that is no finite number drops its candidate, and only this
+    // machine's files are shown.
+    void sanitizerKeysImagesAsTheCacheDoes()
+    {
+        const QUrl base("https://blog.example.com/");
+        const auto source = [&base](const QString &html) {
+            QStringList found;
+            Sanitizer::Options options;
+            options.images.found = &found;
+            Sanitizer::toRichText(html, base, options);
+            return found.join(' ');
+        };
+        QCOMPARE(source("<img src=https://t.example/a.png#one><img src=https://t.example/a.png#two>"),
+                 QString("https://t.example/a.png"));
+        for (const char *bad : {"inf", "infinity", "nan", "1e999"}) {
+            QCOMPARE(source(QString("<img srcset=\"https://t.example/a.png %1w, https://t.example/b.png 800w\">")
+                                .arg(bad)),
+                     QString("https://t.example/b.png"));
+            QCOMPARE(source(QString("<img srcset=\"https://t.example/a.png %1w\" src=https://t.example/s.png>").arg(bad)),
+                     QString("https://t.example/s.png"));
+            QCOMPARE(source(QString("<img srcset=\"https://t.example/a.png %1x\" src=https://t.example/s.png>").arg(bad)),
+                     QString("https://t.example/s.png"));
+        }
+        QCOMPARE(source("<img srcset=\"https://t.example/a.png nanx\" src=https://t.example/s.png>"),
+                 QString("https://t.example/s.png"));
+        // Descriptors part at any ASCII whitespace, as the URL does.
+        QCOMPARE(source("<img srcset=\"https://t.example/a.png\t400w,\nhttps://t.example/b.png\f1500w,\r"
+                        "https://t.example/c.png\t\n3000w\">"),
+                 QString("https://t.example/b.png"));
+
+        QHash<QString, Sanitizer::LocalImage> local{
+            {"https://t.example/a.png", {QUrl::fromLocalFile("/cache/images/a.jpg"), 64}},
+            {"https://t.example/b.png", {QUrl("file://elsewhere.example/cache/b.jpg"), 64}},
+        };
+        Sanitizer::Options options;
+        options.images.local = &local;
+        const QString html = Sanitizer::toRichText(
+            "<img src=https://t.example/a.png#x alt=a><img src=https://t.example/b.png alt=b>", base, options);
+        QCOMPARE(html, QString("<p><img src=\"file:///cache/images/a.jpg\" width=\"64\" style=\"max-width: 100%\"></p>"
+                               "<a href=\"https://t.example/b.png\">[image: b]</a>"));
+
+        // The cache reads the same, and an invalid URL has no place in it.
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        QTemporaryDir dir;
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        QCOMPARE(Thumbnails::cachePath(QUrl("https://t.example/a.png#x"), "images"),
+                 Thumbnails::cachePath(QUrl("https://t.example/a.png"), "images"));
+        QVERIFY(!Thumbnails::cachePath(QUrl("https://t.example/a.png"), "images").isEmpty());
+        QVERIFY(Thumbnails::cachePath(QUrl(), "images").isEmpty());
+        QVERIFY(Thumbnails::cachePath(QUrl("http://[x/", QUrl::StrictMode), "images").isEmpty());
+        Thumbnails images("images");
+        QSignalSpy failed(&images, &Thumbnails::failed);
+        QVERIFY(!fetchThumbnail(images, QUrl("http://[x/", QUrl::StrictMode)).isValid());
+        QCOMPARE(failed.last().at(1).toString(), QString("not a valid URL"));
+    }
+
+    // The menu opens the Settings dialog, whose switch is the setting; the
+    // reader's button loads the open article's images, which the window
+    // shows without asking anything itself.
+    void settingsDialogAndReaderShowImages()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.serve("/a.png", png(1200, 600), "image/png");
+        server.serve("/b.png", png(60, 30), "image/png");
+        seedImageArticles({"<p>One</p><img src=\"" + server.url("/a.png").toString() + "\" alt=a>",
+                           "<p>Two</p><img src=\"" + server.url("/b.png").toString() + "\" alt=b>"});
+        write(dir.path() + "/language", "en");
+        QTest::failOnWarning(QRegularExpression("Binding loop|qrc:/|QQuickPixmap"));
+        LoadedWindow loaded(dir.path() + "/language");
+        QVERIFY(loaded.window);
+        QVERIFY(QTest::qWaitForWindowExposed(loaded.window));
+        Thumbnails::Limits limits = Backend::imageLimits();
+        limits.publicHostsOnly = false;
+        loaded.backend->setImageLimits(limits);
+
+        QObject *menu = loaded.window->findChild<QObject *>("appMenu");
+        QVERIFY(menu);
+        QVERIFY(QMetaObject::invokeMethod(menu, "open"));
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QQuickItem *settingsItem = nullptr;
+        for (int i = 0; i < menu->property("count").toInt() && !settingsItem; ++i) {
+            QQuickItem *item = nullptr;
+            QVERIFY(QMetaObject::invokeMethod(menu, "itemAt", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, i)));
+            if (item && item->property("text").toString() == "Settings…")
+                settingsItem = item;
+        }
+        QVERIFY(settingsItem);
+        QVERIFY(QMetaObject::invokeMethod(settingsItem, "triggered"));
+        QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+        QObject *box = loaded.window->findChild<QObject *>("loadRemoteImages");
+        QVERIFY(box);
+        QTRY_VERIFY(box->property("visible").toBool());
+        QVERIFY(!box->property("checked").toBool());
+        const auto click = [box] {
+            QVERIFY(QMetaObject::invokeMethod(box, "toggle"));
+            QVERIFY(QMetaObject::invokeMethod(box, "toggled"));
+        };
+        click();
+        QVERIFY(loaded.backend->settings()->loadRemoteImages());
+        QVERIFY(Settings().loadRemoteImages());
+        click();
+        QVERIFY(!loaded.backend->settings()->loadRemoteImages());
+        QVERIFY(!Settings().loadRemoteImages());
+        loaded.backend->settings()->setLoadRemoteImages(true);
+        QVERIFY(box->property("checked").toBool());
+        loaded.backend->settings()->setLoadRemoteImages(false);
+        QVERIFY(!box->property("checked").toBool());
+        QObject *dialog = loaded.window->findChild<QObject *>("settingsDialog");
+        QVERIFY(dialog);
+        // The keyboard has the switch: Space and Enter turn it on and off,
+        // the window's single keys do nothing meanwhile, and Esc closes.
+        QTRY_VERIFY(qobject_cast<QQuickItem *>(box)->hasActiveFocus());
+        QTest::keyClick(loaded.window, Qt::Key_Space);
+        QVERIFY(loaded.backend->settings()->loadRemoteImages());
+        QVERIFY(box->property("checked").toBool());
+        QTest::keyClick(loaded.window, Qt::Key_Return);
+        QVERIFY(!loaded.backend->settings()->loadRemoteImages());
+        QVERIFY(!box->property("checked").toBool());
+        QTest::keyClick(loaded.window, Qt::Key_Enter, Qt::KeypadModifier);
+        QVERIFY(loaded.backend->settings()->loadRemoteImages());
+        QTest::keyClick(loaded.window, Qt::Key_Space);
+        QVERIFY(!Settings().loadRemoteImages());
+        QTest::keyClick(loaded.window, Qt::Key_Tab);
+        QCOMPARE(loaded.window->property("activePane").toString(), QString("articles"));
+        QTest::keyClick(loaded.window, Qt::Key_Question, Qt::ShiftModifier);
+        QVERIFY(!loaded.window->property("helpVisible").toBool());
+        QVERIFY(box->property("visible").toBool());
+        QTest::keyClick(loaded.window, Qt::Key_Escape);
+        QTRY_VERIFY(!box->property("visible").toBool());
+
+        // Off, the article lays out with its link alone and asks nothing.
+        loaded.backend->selectArticle(0);
+        QObject *button = loaded.window->findChild<QObject *>("loadImages");
+        QVERIFY(button);
+        QTRY_VERIFY(button->property("visible").toBool());
+        QQuickItem *body = loaded.window->findChild<QQuickItem *>("articleBody");
+        QVERIFY(body);
+        QTest::qWait(300);
+        QVERIFY(server.requests.isEmpty());
+        const qreal textHeight = body->property("contentHeight").toReal();
+        QVERIFY(textHeight < 100);
+
+        // The button: one request, the fetcher's, and the image shows.
+        QVERIFY(QMetaObject::invokeMethod(button, "clicked"));
+        QTRY_VERIFY(loaded.backend->articleHtml().contains("<img src=\"file:"));
+        QTRY_VERIFY(!button->property("visible").toBool());
+        // Laid out as wide as the text, at the image's proportions.
+        QTRY_VERIFY(body->property("contentHeight").toReal() > textHeight + body->width() * 0.45);
+        QVERIFY(body->property("contentHeight").toReal() < textHeight + body->width() * 0.5 + 60);
+        QVERIFY(body->property("contentWidth").toReal() <= body->width() + 1);
+        QTest::qWait(300);
+        QCOMPARE(server.requests.size(), 1);
+
+        // I does what the button does, for the keyboard.
+        loaded.backend->selectArticle(1);
+        QTRY_VERIFY(button->property("visible").toBool());
+        QVERIFY(!loaded.backend->articleImagesShown());
+        QTest::keyClick(loaded.window, Qt::Key_I);
+        QTRY_VERIFY(loaded.backend->articleHtml().contains("<img src=\"file:"));
+        QTRY_VERIFY(!button->property("visible").toBool());
+        QCOMPARE(server.requests.size(), 2);
     }
 
     // Publishing
@@ -11941,6 +13021,26 @@ private:
         return result.value_or(QUrl());
     }
 
+    // A blog with an article for each of `contents`, the first newest.
+    static void seedImageArticles(const QStringList &contents)
+    {
+        Store store;
+        if (!store.open())
+            qFatal("cannot open the library: %s", qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://blog.invalid/feed", "Blog");
+        QList<ParsedItem> items;
+        for (qsizetype i = 0; i < contents.size(); ++i) {
+            ParsedItem item;
+            item.guid = QString::number(i);
+            item.title = QString("Article %1").arg(i);
+            item.url = QString("https://blog.invalid/%1").arg(i);
+            item.content = contents.at(i);
+            item.published = QDateTime(QDate(2026, 1, 20 - int(i)), QTime(12, 0), QTimeZone::UTC);
+            items << item;
+        }
+        if (store.saveItems(feed, items) != contents.size())
+            qFatal("cannot seed the articles: %s", qPrintable(store.lastError()));
+    }
     // An author with three articles, newest first: the video "Slow" (75
     // seconds, its thumbnail at `first`), the video "Fast" (at `second`),
     // and the text "Text".

@@ -179,5 +179,10 @@
   "The signer sent back another event than the one asked for": "O assinante devolveu um evento diferente do solicitado",
   "The signer signed with another key than the one for %1": "O assinante assinou com uma chave diferente da de %1",
   "The signer's signature does not check out": "A assinatura do assinante não é válida",
-  "This event is too large for a remote signer to sign": "Este evento é grande demais para um assinante remoto assinar"
+  "This event is too large for a remote signer to sign": "Este evento é grande demais para um assinante remoto assinar",
+  "Settings": "Configurações",
+  "Settings…": "Configurações…",
+  "Shows the images of the article you open. Fetching them tells their sites that you read it. When this is off, images are links, and an article's images can be loaded for it alone.": "Mostra as imagens do artigo que você abrir. Ao buscá-las, os sites delas ficam sabendo que você o leu. Quando isto está desativado, as imagens são links, e as imagens de um artigo podem ser carregadas só para ele.",
+  "Cannot read the settings, so the defaults apply: %1": "Não foi possível ler as configurações, então os padrões são usados: %1",
+  "Cannot save the settings: %1": "Não foi possível salvar as configurações: %1"
 }

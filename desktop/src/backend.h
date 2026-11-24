@@ -22,6 +22,8 @@
 #include "library.h"
 #include "nip19.h"
 #include "relaypool.h"
+#include "sanitizer.h"
+#include "settings.h"
 #include "remotesigner.h"
 #include "signer.h"
 #include "sourcemodel.h"
@@ -70,7 +72,13 @@ class Backend : public QObject {
     Q_PROPERTY(QString articleAuthor READ articleAuthor NOTIFY articleChanged)
     Q_PROPERTY(QString articleUrl READ articleUrl NOTIFY articleChanged)
     Q_PROPERTY(QVariant articlePublished READ articlePublished NOTIFY articleChanged)
-    Q_PROPERTY(QString articleHtml READ articleHtml NOTIFY articleChanged)
+    // The article's text as rich text. Its images are links unless images
+    // are shown, when each becomes its local copy once that is fetched.
+    Q_PROPERTY(QString articleHtml READ articleHtml NOTIFY articleHtmlChanged)
+    // Whether the article has images, and whether they are shown: always
+    // with Load remote images on, else once loadArticleImages() asks.
+    Q_PROPERTY(bool articleHasImages READ articleHasImages NOTIFY articleHtmlChanged)
+    Q_PROPERTY(bool articleImagesShown READ articleImagesShown NOTIFY articleHtmlChanged)
     Q_PROPERTY(bool articleRead READ articleRead NOTIFY articleChanged)
     Q_PROPERTY(bool articleStarred READ articleStarred NOTIFY articleChanged)
     // A Nostr video's: whether there is one to play, its length in seconds
@@ -79,6 +87,7 @@ class Backend : public QObject {
     Q_PROPERTY(bool articleIsVideo READ articleIsVideo NOTIFY articleChanged)
     Q_PROPERTY(double articleDuration READ articleDuration NOTIFY articleChanged)
     Q_PROPERTY(QUrl articleThumbnail READ articleThumbnail NOTIFY thumbnailChanged)
+    Q_PROPERTY(Settings *settings READ settings CONSTANT)
 
     Q_PROPERTY(bool refreshing READ refreshing NOTIFY refreshChanged)
     Q_PROPERTY(int refreshDone READ refreshDone NOTIFY refreshChanged)
@@ -168,6 +177,9 @@ public:
     bool articleRead() const { return m_article.read; }
     bool articleStarred() const { return m_article.starred; }
     bool articleIsVideo() const { return !m_article.mediaUrl.isEmpty(); }
+    bool articleHasImages() const { return !m_articleImages.isEmpty(); }
+    bool articleImagesShown() const;
+    Settings *settings() { return &m_settings; }
     double articleDuration() const { return articleIsVideo() ? m_article.duration : -1; }
     QUrl articleThumbnail() const { return m_thumbnail; }
 
@@ -216,6 +228,9 @@ public:
     Q_INVOKABLE void playVideo();
     // Opens a link from an article, but only an http(s) one.
     Q_INVOKABLE bool openLink(const QString &link);
+    // Fetches and shows the open article's images, this once, with Load
+    // remote images off.
+    Q_INVOKABLE void loadArticleImages();
     Q_INVOKABLE void markViewRead();
     Q_INVOKABLE void addFeed(const QString &address);
     Q_INVOKABLE void clearAddError();
@@ -297,6 +312,13 @@ public:
     // tests that do not set one, no key can be kept.
     void setKeyStore(KeyStore *keyStore);
     void setThumbnailLimits(const Thumbnails::Limits &limits) { m_thumbnails->setLimits(limits); }
+    // An article's images: larger, more of them, and cached apart.
+    static Thumbnails::Limits imageLimits();
+    // The most pixels of one article's images shown at once: 160 MiB once
+    // decoded, which the window holds while the article is open. Past it,
+    // the rest stay links.
+    static constexpr qint64 maxArticleImagePixels = 40 * 1000 * 1000;
+    void setImageLimits(const Thumbnails::Limits &limits) { m_images->setLimits(limits); }
     void setFetchLimits(const Fetcher::Limits &limits) { m_fetcher->setLimits(limits); }
     void setRelayLimits(const RelayPool::Limits &limits) { m_relays->setLimits(limits); }
     // How long a change waits for more before it is published: a read, which
@@ -317,6 +339,7 @@ signals:
     void libraryChanged();
     void sourceChanged();
     void articleChanged();
+    void articleHtmlChanged();
     void searchChanged();
     void thumbnailChanged();
     void refreshChanged();
@@ -374,6 +397,16 @@ private:
     // fetched, when it is not the one already shown.
     void updateThumbnail();
     void setThumbnail(const QUrl &file);
+    // The article as rich text, with the images fetched so far, and the
+    // images it has.
+    void renderArticle();
+    // Fetches the open article's images when they are to be shown and are
+    // not already asked for, and drops them when they are not. True when it
+    // laid the article out again, which it says with articleHtmlChanged
+    // unless `announce` is false, for a caller that announces the article
+    // itself right after.
+    bool updateImages(bool announce = true);
+    void clearLocalImages();
     void setFlags(bool read, bool starred);
     // A local file path for a file: URL, or empty for anything else
     // (another host's file: URL included).
@@ -483,6 +516,8 @@ private:
     // an author's.
     std::unique_ptr<RelayPool> m_syncRelays;
     std::unique_ptr<Thumbnails> m_thumbnails;
+    std::unique_ptr<Thumbnails> m_images;
+    Settings m_settings;
     QThread m_thread;
     LibraryWorker *m_worker = nullptr;
     FilePicker *m_picker = nullptr;
@@ -506,6 +541,19 @@ private:
     QString m_thumbnailSource;
     QUrl m_thumbnail;
     quint64 m_thumbnailRequest = 0;
+    // The open article's images, by source; their local copies so far; the
+    // article loadArticleImages() asked for; the sources asked for, of
+    // which article; a count that tells a fetch for another from the
+    // current one; and the timer that shows images in batches as they come.
+    QStringList m_articleImages;
+    QHash<QString, Sanitizer::LocalImage> m_localImages;
+    // Their pixels, counted against maxArticleImagePixels.
+    qint64 m_imagePixels = 0;
+    qint64 m_imagesFor = 0;
+    QStringList m_imagesAsked;
+    qint64 m_imagesAskedFor = 0;
+    quint64 m_imagesRequest = 0;
+    QTimer m_imagesArrived;
     qint64 m_viewLastId = 0;
 
     bool m_refreshing = false;

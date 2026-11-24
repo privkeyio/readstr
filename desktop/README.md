@@ -61,13 +61,28 @@ status bar shows the progress and says what went wrong.
 Articles are shown as a strict subset of HTML: paragraphs, headings, lists,
 quotes, code, emphasis, simple tables, and links. Scripts, styles, frames,
 forms, and every attribute but a link's address are removed, and only http
-and https links open (in your browser). Images are never loaded inline, since
-loading them would tell the feed's owner who reads what and when. An image
-with an http or https address shows as an `[image: description]` link (or
-`[image]` without a description) that opens it in the browser instead; one
-with any other address, or none, is dropped along with its description. An
-image inside a link becomes that text inside the link, which opens the
+and https links open (in your browser). By default images are not loaded,
+since loading them would tell the image's host who reads what and when. An
+image with an http or https address shows as an `[image: description]` link
+(or `[image]` without a description) that opens it in the browser instead;
+one with any other address, or none, is dropped along with its description.
+An image inside a link becomes that text inside the link, which opens the
 link's address rather than the image's. `O` opens the whole article there.
+
+**Load images for this article** (or `I`), above an article that has
+images, fetches that article's images and shows them inline, this once: the
+next article, or this one opened again, shows links again. **Load remote images** (in
+**Settings…** on the ⋮ menu) does the same for every article you open.
+Either way only the open article's images are fetched, never those of the
+list, and leaving the article drops the fetches still on their way. They
+come through the same guarded fetcher as video thumbnails (see Limits), are
+re-encoded as JPEG into the cache, and the window shows only those local
+copies: the rich text view itself never loads anything, so an image that
+fails or is refused stays a link. An image's address is its `srcset`'s
+candidate closest to 1600 pixels wide (or a lazy loader's `data-srcset`),
+else its `data-src`, else its `src`; it is shown as wide as it is, up to the
+reader's width. GIF and WebP show their first frame, and SVG is never
+loaded, since it can name other files and run its own requests.
 
 ## Nostr
 
@@ -83,8 +98,8 @@ under the author instead of an error; the next refresh asks again for what
 was missed.
 
 An article's Markdown (GitHub's flavor) is shown through the same filter as
-a feed's HTML, so the same rules hold: images become `[image: …]` links and
-nothing loads inline. Raw HTML in the Markdown shows as the text it is,
+a feed's HTML, so the same rules hold: images become `[image: …]` links
+unless images are loaded as above. Raw HTML in the Markdown shows as the text it is,
 never as markup. A `nostr:` link to a valid `npub`, `nprofile`, `note`,
 `nevent`, or `naddr` opens its njump.me page; other links that are not http
 or https are dropped and keep their text.
@@ -309,6 +324,8 @@ those that take `--json` print one line of JSON whose shape is stable (below).
 | `readstr sync login NPUB` | Sync with an npub or nprofile from now on (public key only) |
 | `readstr sync logout` | Stop syncing and forget what was pulled for the npub |
 | `readstr sync [--json]` | Pull and merge the web app's sync events now; exits 1 if anything failed or was refused |
+| `readstr settings [--json]` | List the settings and their values |
+| `readstr settings set KEY VALUE` | Change a setting, such as `readstr settings set loadRemoteImages true`; a running window picks it up at once |
 | `readstr version [--json]`, `readstr --version` | Print the version |
 
 ```sh
@@ -368,6 +385,9 @@ ISO 8601 (`2026-11-19T20:57:14Z`), and anything unknown is `null`.
 {"npub": "npub1…", "added": 2, "skipped": 40, "unsupported": 0, "markedRead": 12,
  "pendingRead": 300, "views": 3, "syncedAt": "2026-11-19T21:30:00Z", "errors": []}
 
+// readstr settings --json (every setting, with its default when not set)
+{"loadRemoteImages": false}
+
 // readstr version --json
 {"name": "readstr", "version": "0.1.0", "qt": "6.12.0"}
 ```
@@ -390,13 +410,25 @@ Markdown is read up to 128 KiB. One with more than 2000 list items, or with
 tables of more than 1000 rows, 64 columns, or 10,000 cells in all, is shown
 as its plain lines instead, since laying those out takes Qt time that grows
 with their square. A video thumbnail is fetched over http(s) from a host
-that is not this machine or the local network, within 2 MiB and 30 seconds,
-only as an `image/*` whose bytes are a PNG, JPEG, GIF, or WebP image (no
+that is not this machine or the local network (nor a `.lan`, `.home`, or
+`home.arpa` name, nor a Teredo or local-use NAT64 address), on port 80 or
+443 only, within 2 MiB and 30 seconds, asking for PNG, JPEG, GIF, or WebP
+with a User-Agent of just `readstr` and no language of yours, stopped as
+soon as the response's headers give an error or a type other than
+`image/*`, and only as an `image/*` whose bytes are a PNG, JPEG, GIF, or WebP image (no
 other image reader ever sees it), of at most 8192 pixels a side and 128 MiB
 to decode, and a JPEG of at most 100 scans (16 megapixels when progressive or in several scans),
 and is kept at most 1280 pixels wide. Only the open video's thumbnail is
 fetched: leaving it drops the fetch. Media links longer than 8 KiB are
 dropped, and a video length past 10,000,000 seconds counts as unknown.
+
+An article's images are held to the same rules, but each may be 4 MiB and is
+kept at most 1600 pixels wide and 4 megapixels (a taller one is scaled down
+further, at its proportions) and 2 MiB as JPEG; at most 30 are fetched for
+one article, 4 at a time, and once the bodies received, an error's or a
+stray type's too, come to 24 MiB the rest are refused and those on their way
+aborted. At most 40 megapixels of one article's images are shown; past that
+the rest stay links.
 
 Relays get 6 seconds to connect and 15 seconds to answer each request, and
 messages are cut off past 4 MiB. Each author's refresh is two requests, one
@@ -424,8 +456,18 @@ recorded as the last sync; the events that fit still apply.
 The library lives in `$XDG_DATA_HOME/readstr/readstr.db` (SQLite, in a 0700
 directory, the file 0600), and video thumbnails in
 `$XDG_CACHE_HOME/readstr/thumbnails/` (also 0700, each file 0600), as JPEG,
-named by the SHA-256 of their address; the oldest go once they are past
-64 MiB in all or 30 days old. `READSTR_HOME` moves the data, config, and cache
+named by the SHA-256 of their address (without its fragment); the least
+recently used go once they are past 64 MiB in all, and any unused for 30
+days. Article images are kept the same way in
+`$XDG_CACHE_HOME/readstr/images/`, up to 128 MiB, and the open article's
+are never the ones that go. The settings are one JSON
+object in `$XDG_CONFIG_HOME/readstr/settings.json` (a 0700 directory, the file
+0600), read again before each change, which sets only its own key, and
+written whole beside it and renamed over it; a running window watches it,
+so `readstr settings set` takes effect there at once. A missing file means
+the defaults, and one that cannot be read means the defaults too, with the
+reason in the status bar, and is kept as it is until a setting changes.
+`READSTR_HOME` moves the data, config, and cache
 directories under one directory (`data/`, `config/`, `cache/`), which is how
 tests avoid touching your real files.
 
@@ -446,6 +488,7 @@ field.
 | `S` | Star or unstar |
 | `O` | Open the original in the browser |
 | `P` | Play the video in mpv |
+| `I` | Load images for this article |
 | `Ctrl+R` | Refresh all feeds |
 | `Ctrl+N` | Add a feed (its address, a site's, or a Nostr npub) |
 | `Ctrl+Shift+A` | Mark everything in the view read |

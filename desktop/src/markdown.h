@@ -4,10 +4,13 @@
 #include <QString>
 #include <QTextDocument>
 
+#include "sanitizer.h"
+
 // Nostr long-form articles (NIP-23) are Markdown. QTextDocument reads it as
 // GitHub's dialect with raw HTML kept as text rather than trusted, and its HTML
 // goes through Sanitizer::toRichText like any feed's, so nothing reaches the
-// view that the sanitizer would not let through: no <img>, no network, only
+// view that the sanitizer would not let through: no remote <img> (only the
+// local copies `images` hands over, as for any feed), no network, only
 // http(s) links, except that a nostr: link to a well-formed NIP-19 entity
 // becomes its njump.me page first.
 //
@@ -30,7 +33,7 @@ inline constexpr int maxTableRows = 1000;
 inline constexpr int maxTableColumns = 64;
 inline constexpr int maxTableCells = 10000;
 
-QString toRichText(const QString &markdown);
+QString toRichText(const QString &markdown, const Sanitizer::Images &images = {});
 // Whether QTextDocument lays `markdown` out quickly: its list items, table
 // rows, columns, and cells are within the caps.
 bool withinCaps(const QString &markdown);

@@ -264,5 +264,13 @@
   "The signer signed with another key than the one for %1": "Подписант подписал другим ключом, а не ключом %1",
   "The signer's signature does not check out": "Подпись подписанта не проходит проверку",
   "This event is too large for a remote signer to sign": "Это событие слишком велико для подписи удалённым подписантом",
-  "Copy the selected text": "Копировать выделенный текст"
+  "Copy the selected text": "Копировать выделенный текст",
+  "Settings": "Настройки",
+  "Settings…": "Настройки…",
+  "Load remote images": "Загружать внешние изображения",
+  "Shows the images of the article you open. Fetching them tells their sites that you read it. When this is off, images are links, and an article's images can be loaded for it alone.": "Показывает изображения открытой статьи. Их загрузка сообщает их сайтам, что вы её читаете. Когда это выключено, изображения показываются ссылками, и изображения статьи можно загрузить только для неё.",
+  "Close": "Закрыть",
+  "Load images for this article": "Загрузить изображения этой статьи",
+  "Cannot read the settings, so the defaults apply: %1": "Не удаётся прочитать настройки, поэтому действуют значения по умолчанию: %1",
+  "Cannot save the settings: %1": "Не удаётся сохранить настройки: %1"
 }

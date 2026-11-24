@@ -16,6 +16,15 @@ bool isWebUrl(const QUrl &url) {
 }
 
 QString megabytes(qint64 bytes) { return QString::number(double(bytes) / (1024 * 1024), 'g', 3); }
+
+// The port `url` is refused for, described, or empty when its port is the
+// scheme's own or none is given.
+QString refusedPort(const QUrl &url) {
+    const int standard = url.scheme().compare(QLatin1String("https"), Qt::CaseInsensitive) == 0 ? 443 : 80;
+    if (url.port() == -1 || url.port() == standard)
+        return {};
+    return QStringLiteral("port %1, which is not the default for %2").arg(url.port()).arg(url.scheme());
+}
 }
 
 Fetcher::Fetcher(QObject *parent) : QObject(parent) {
@@ -25,6 +34,8 @@ Fetcher::Fetcher(QObject *parent) : QObject(parent) {
 }
 
 QByteArray Fetcher::userAgent() { return QByteArrayLiteral("readstr-desktop/" READSTR_VERSION); }
+
+QByteArray Fetcher::imageUserAgent() { return QByteArrayLiteral("readstr"); }
 
 bool Fetcher::isLocalHost(const QString &host) {
     QString name = host.toLower();
@@ -41,6 +52,13 @@ bool Fetcher::isLocalHost(const QString &host) {
     if (address.protocol() == QAbstractSocket::IPv6Protocol) {
         // The unspecified address reaches this machine, as 0.0.0.0 does.
         if (address.isEqual(QHostAddress(QHostAddress::AnyIPv6)))
+            return true;
+        // Teredo (2001::/32) tunnels to an IPv4 address that is stored
+        // obfuscated, and local-use NAT64 (64:ff9b:1::/48) translates to
+        // whatever IPv4 address the local network's translator picks, so
+        // neither can be judged by an address it carries.
+        if (address.isInSubnet(QHostAddress(QStringLiteral("2001::")), 32)
+            || address.isInSubnet(QHostAddress(QStringLiteral("64:ff9b:1::")), 48))
             return true;
         // An IPv6 address that carries an IPv4 one is judged by the IPv4
         // one, since that is where it leads: IPv4-mapped (::ffff:a.b.c.d),
@@ -73,6 +91,18 @@ bool Fetcher::isLocalHost(const QString &host) {
         || address.isInSubnet(QHostAddress(QStringLiteral("240.0.0.0")), 4);
 }
 
+bool Fetcher::isHomeNetworkName(const QString &host) {
+    QString name = host.toLower();
+    if (name.endsWith('.'))
+        name.chop(1);
+    return name.endsWith(QLatin1String(".lan")) || name.endsWith(QLatin1String(".home"))
+        || name == QLatin1String("home.arpa") || name.endsWith(QLatin1String(".home.arpa"));
+}
+
+bool Fetcher::isRefusedPublicHost(const QString &host, const Limits &limits) {
+    return limits.publicHostsOnly && (isLocalHost(host) || isHomeNetworkName(host));
+}
+
 void Fetcher::fetch(const FetchRequest &request, std::function<void(const FetchResult &)> done) {
     fetchWithin(request, std::move(done), m_limits);
 }
@@ -83,19 +113,30 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
     result.url = request.url;
     if (!isWebUrl(request.url))
         result.error = QStringLiteral("only http and https URLs can be fetched");
-    else if (limits.publicHostsOnly && isLocalHost(request.url.host()))
+    else if (isRefusedPublicHost(request.url.host(), limits))
         result.error = QStringLiteral("refused a host on this machine or the local network");
+    else if (limits.defaultPortsOnly && !refusedPort(request.url).isEmpty())
+        result.error = QStringLiteral("refused ") + refusedPort(request.url);
     if (!result.error.isEmpty()) {
         QTimer::singleShot(0, this, [done, result] { done(result); });
         return;
     }
 
     QNetworkRequest networkRequest(request.url);
-    networkRequest.setRawHeader("User-Agent", userAgent());
-    networkRequest.setRawHeader("Accept",
-                                "application/rss+xml, application/atom+xml, application/feed+json, "
-                                "application/xml;q=0.9, text/xml;q=0.9, application/json;q=0.8, "
-                                "text/html;q=0.7, */*;q=0.5");
+    if (limits.images) {
+        networkRequest.setRawHeader("User-Agent", imageUserAgent());
+        networkRequest.setRawHeader("Accept", "image/png,image/jpeg,image/gif,image/webp");
+        // Qt sends the system locale's languages unless a request names its
+        // own, which would tell an article's image hosts the reader's
+        // language; any language will do for an image.
+        networkRequest.setRawHeader("Accept-Language", "*");
+    } else {
+        networkRequest.setRawHeader("User-Agent", userAgent());
+        networkRequest.setRawHeader("Accept",
+                                    "application/rss+xml, application/atom+xml, application/feed+json, "
+                                    "application/xml;q=0.9, text/xml;q=0.9, application/json;q=0.8, "
+                                    "text/html;q=0.7, */*;q=0.5");
+    }
     if (!request.etag.isEmpty())
         networkRequest.setRawHeader("If-None-Match", request.etag.toUtf8());
     if (!request.lastModified.isEmpty())
@@ -131,8 +172,10 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
     connect(reply, &QNetworkReply::redirected, reply, [reply, stop, state, request, limits](const QUrl &target) {
         if (!isWebUrl(target))
             return stop(QStringLiteral("refused a redirect to a non-http(s) URL"));
-        if (limits.publicHostsOnly && isLocalHost(target.host()))
+        if (isRefusedPublicHost(target.host(), limits))
             return stop(QStringLiteral("refused a redirect to this machine or the local network"));
+        if (limits.defaultPortsOnly && !refusedPort(target).isEmpty())
+            return stop(QStringLiteral("refused a redirect to ") + refusedPort(target));
         if (state->current.scheme().compare("https", Qt::CaseInsensitive) == 0
             && target.scheme().compare("http", Qt::CaseInsensitive) == 0)
             return stop(QStringLiteral("refused a redirect from https to http"));
@@ -150,7 +193,17 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
     connect(reply, &QNetworkReply::metaDataChanged, reply, [reply, stop, limits] {
         const QVariant length = reply->header(QNetworkRequest::ContentLengthHeader);
         if (length.isValid() && length.toLongLong() > limits.maxBytes)
-            stop(QStringLiteral("response is larger than %1 MiB").arg(megabytes(limits.maxBytes)));
+            return stop(QStringLiteral("response is larger than %1 MiB").arg(megabytes(limits.maxBytes)));
+        if (!limits.images)
+            return;
+        // A redirect's own headers say nothing of the image, so only the
+        // final response's are judged.
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QString type = QString::fromLatin1(reply->rawHeader("Content-Type")).trimmed();
+        if (status >= 400)
+            stop(QStringLiteral("HTTP %1").arg(status));
+        else if (status >= 200 && status < 300 && !type.startsWith(QLatin1String("image/"), Qt::CaseInsensitive))
+            stop(QStringLiteral("not an image (%1)").arg(type.isEmpty() ? QStringLiteral("no type") : type));
     });
     connect(reply, &QNetworkReply::readyRead, reply, [reply, state, stop, limits] {
         if (!state->error.isEmpty())
@@ -191,6 +244,7 @@ void Fetcher::fetchWithin(const FetchRequest &request, std::function<void(const 
             if (state->body.size() > limits.maxBytes)
                 state->error = QStringLiteral("response is larger than %1 MiB").arg(megabytes(limits.maxBytes));
         }
+        result.received = state->body.size();
         result.finalUrl = reply->url();
         result.status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         result.etag = QString::fromLatin1(reply->rawHeader("ETag"));

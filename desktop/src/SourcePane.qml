@@ -31,6 +31,7 @@ Rectangle {
     signal unsubscribeRequested(var feedId, string feedTitle)
     signal helpRequested()
     signal syncRequested()
+    signal settingsRequested()
 
     color: Qt.tint(theme.background, Qt.alpha(theme.foreground, 0.03))
 
@@ -91,6 +92,7 @@ Rectangle {
                     MenuItem { text: qsTr("Export OPML…"); onTriggered: backend.exportOpml() }
                     MenuItem { text: qsTr("Sync with Nostr…"); onTriggered: pane.syncRequested() }
                     MenuSeparator {}
+                    MenuItem { text: qsTr("Settings…"); onTriggered: pane.settingsRequested() }
                     MenuItem { text: qsTr("Keyboard shortcuts"); onTriggered: pane.helpRequested() }
                 }
             }
