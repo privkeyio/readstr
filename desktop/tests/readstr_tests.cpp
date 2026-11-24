@@ -10665,6 +10665,37 @@ private slots:
         QVERIFY(!listener.hasPendingConnections());
     }
 
+    // Picking the proxy can block (a PAC file), and that time comes out of
+    // the budget: a request whose budget it used up is not sent.
+    void publicHostsOnlyCountsTheTimeToPickAProxy()
+    {
+        QTcpServer listener;
+        QVERIFY(listener.listen(QHostAddress::LocalHost));
+        QSignalSpy connections(&listener, &QTcpServer::newConnection);
+        class Slow : public QNetworkProxyFactory {
+        public:
+            QList<QNetworkProxy> queryProxy(const QNetworkProxyQuery &) override
+            {
+                QThread::msleep(80);
+                return {QNetworkProxy(QNetworkProxy::NoProxy)};
+            }
+        };
+        QNetworkProxyFactory::setApplicationProxyFactory(new Slow);
+        const auto restore = qScopeGuard([] { QNetworkProxyFactory::setApplicationProxyFactory(nullptr); });
+        FakeResolver resolver([](const QString &) { return QList<QHostAddress>{QHostAddress(QHostAddress::LocalHost)}; },
+                              {QHostAddress(QHostAddress::LocalHost)});
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 50;
+        fetcher.setLimits(limits);
+        const QUrl url(QString("http://images.example.invalid:%1/a.png").arg(listener.serverPort()));
+        QCOMPARE(fetcher.get({url, {}, {}}).error, QString("timed out after 0.05 s"));
+        QTest::qWait(100);
+        QCOMPARE(connections.size(), 0);
+        QVERIFY(!listener.hasPendingConnections());
+    }
+
     // A pinned request goes through the proxy picked for its name, not the
     // one picked for the address it is pinned to, and asks that proxy for
     // the address.

@@ -383,7 +383,18 @@ void Fetcher::send(const FetchRequest &request, std::function<void(const FetchRe
         // same pinned URL whose names are routed differently cannot both
         // be told theirs; the later one fails rather than take the other's
         // route, which might be no proxy at all.
+        // Picking the proxy can block (a PAC file, a slow system service), so
+        // the time it takes comes out of the request's budget, and a request
+        // whose budget it used up is not sent.
+        QElapsedTimer picking;
+        picking.start();
         const QList<QNetworkProxy> proxies = QNetworkProxyFactory::proxyForQuery(QNetworkProxyQuery(request.url));
+        budgetMs -= picking.elapsed();
+        if (budgetMs <= 0) {
+            result.error = timedOut(limits);
+            QTimer::singleShot(0, this, [done, result] { done(result); });
+            return;
+        }
         if (!m_routes) {
             m_routes = new Routes;
             m_network.setProxyFactory(m_routes);
