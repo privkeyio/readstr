@@ -980,11 +980,20 @@ describe('the applied created_at kept on the server', () => {
   it('still finishes the pull when recording the applied event fails', async () => {
     setReadSyncEnabled(true)
     vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const server = { ...fakeServer([]), ...fakeApplied() }
+    const applied = fakeApplied()
+    const server = { ...fakeServer([]), ...applied }
     server.advanceAppliedCreatedAt.mockRejectedValueOnce(new Error('429'))
     await expect(pullReadStatus({ ...auth, ...server, session: newReadSyncSession(NPUB), fetchRemote: event(['a'], 100) })).resolves.toBe(true)
     expect(server.markRead).toHaveBeenCalledWith(['a'])
     expect(storage.data.get(WATERMARK)).toBe('100')
+    expect(applied.value).toBeNull()
+
+    // A later session in this browser records it without applying it again.
+    await expect(pullReadStatus({ ...auth, ...server, session: newReadSyncSession(NPUB), fetchRemote: event(['a'], 100) })).resolves.toBe(true)
+    expect(server.markRead).toHaveBeenCalledOnce()
+    expect(applied.advanceAppliedCreatedAt).toHaveBeenCalledTimes(2)
+    expect(applied.advanceAppliedCreatedAt).toHaveBeenLastCalledWith(100)
+    expect(applied.value).toBe(100)
   })
 
   it('neither applies nor records an event dated far in the future', async () => {
