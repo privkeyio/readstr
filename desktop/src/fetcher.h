@@ -28,6 +28,9 @@ struct FetchResult {
     QString etag;
     QString lastModified;
     QString contentType;
+    // The body's bytes received, whatever the outcome, which an error drops
+    // from `body`: what the response cost to fetch.
+    qint64 received = 0;
     // Empty on success: a 2xx with a body, or a 304.
     QString error;
     bool ok() const { return error.isEmpty(); }
@@ -38,7 +41,7 @@ struct FetchResult {
 // http, validators reach only the URL asked for, and each response is cut off
 // past a size cap while it streams in and past an overall deadline. It sends
 // a plain "readstr-desktop/<version>" User-Agent and nothing that identifies
-// the user.
+// the user; an image fetch (Limits::images) sends less still.
 class Fetcher : public QObject {
     Q_OBJECT
 
@@ -53,12 +56,24 @@ public:
         // queues the rest, with their deadlines already running, so this
         // stays at six.
         int maxConcurrent = 6;
-        // Refuses this machine and the local network (isLocalHost), on the
-        // first request and on every redirect, for URLs that come from
-        // someone else, such as a video's thumbnail. Feeds the user picked
-        // may live there, so it is off for them. A public name that
-        // resolves to a local address is not caught.
+        // Refuses this machine and the local network (isLocalHost and
+        // isHomeNetworkName), on the first request and on every redirect,
+        // for URLs that come from someone else, such as a video's thumbnail.
+        // Feeds the user picked may live there, so it is off for them. A
+        // public name that resolves to a local address is not caught.
         bool publicHostsOnly = false;
+        // Refuses a port other than the scheme's own (80 for http, 443 for
+        // https), on the first request and on every redirect, so a URL from
+        // someone else cannot reach a service that is not a web server.
+        bool defaultPortsOnly = false;
+        // For an image that someone else's article names: it asks for the
+        // four formats Thumbnails decodes, with a User-Agent that leaves out
+        // the version and a neutral Accept-Language in place of the one Qt
+        // would make from the system's locale, so the host learns as little
+        // about the reader as it can. It stops a response as soon as its
+        // headers give an error status or a type other than image/*, rather
+        // than downloading a body nobody will look at.
+        bool images = false;
     };
 
     explicit Fetcher(QObject *parent = nullptr);
@@ -95,14 +110,27 @@ public:
     FetchResult get(const FetchRequest &request) { return fetchAll({request}).constFirst(); }
 
     static QByteArray userAgent();
+    // What an image fetch sends instead: no version, which would narrow
+    // down who is reading.
+    static QByteArray imageUserAgent();
     // This machine and the local network, by name or literal address:
     // localhost, .local, .internal, a name without a dot, loopback,
     // unspecified, private, link-local, unique-local, CGNAT, benchmarking,
     // reserved, broadcast, and multicast addresses, and an IPv6 address that
-    // carries one of these IPv4 addresses (mapped, compatible, NAT64, 6to4).
+    // carries one of these IPv4 addresses (mapped, compatible, NAT64, 6to4),
+    // as well as Teredo (2001::/32) and local-use NAT64 (64:ff9b:1::/48),
+    // whose IPv4 address may be anything the network chose.
     static bool isLocalHost(const QString &host);
+    // The names home routers hand out (.lan, .home, home.arpa). They are
+    // refused only under Limits::publicHostsOnly, for URLs someone else
+    // names, and not by isLocalHost: Sync with Nostr and a pasted bunker
+    // relay keep treating them as public, since a user may run a feed or a
+    // relay on one.
+    static bool isHomeNetworkName(const QString &host);
 
 private:
+    // Whether publicHostsOnly turns `host` away under `limits`.
+    static bool isRefusedPublicHost(const QString &host, const Limits &limits);
     struct Batch;
     // Issues requests while slots are free, a batch at a time in turn, so a
     // long refresh does not hold up the few requests of a subscription.

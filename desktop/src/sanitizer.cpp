@@ -3,6 +3,8 @@
 #include <QCoreApplication>
 #include <QRegularExpression>
 #include <QSet>
+#include <algorithm>
+#include <cmath>
 
 #include "feedparser.h"
 
@@ -89,7 +91,7 @@ struct Tag {
     QString name;
     bool end = false;
     bool selfClosing = false;
-    QString href, src, dataSrc, alt, style;
+    QString href, src, dataSrc, srcset, dataSrcset, alt, style;
 };
 
 Tag named(const QString &name) {
@@ -136,10 +138,96 @@ QtStyle readQtStyle(const QString &style) {
     return read;
 }
 
+// The candidate of a srcset nearest Sanitizer::imageWidth: by width
+// descriptors, the widest at most that wide, else the narrowest; by pixel
+// densities (a bare URL is 1x), the densest at most 2x, else the least
+// dense. Empty when it names none. Only the first few candidates count.
+QString pickCandidate(const QString &srcset) {
+    constexpr int maxCandidates = 32;
+    struct Candidate {
+        QString url;
+        double width = 0;
+        double density = 1;
+    };
+    QList<Candidate> candidates;
+    const qsizetype size = srcset.size();
+    qsizetype i = 0;
+    while (i < size && candidates.size() < maxCandidates) {
+        while (i < size && (isSpace(srcset.at(i)) || srcset.at(i) == ','))
+            ++i;
+        const qsizetype start = i;
+        while (i < size && !isSpace(srcset.at(i)))
+            ++i;
+        QString url = srcset.mid(start, i - start);
+        // A comma ending the URL ends the candidate too.
+        bool ended = false;
+        while (url.endsWith(',')) {
+            url.chop(1);
+            ended = true;
+        }
+        Candidate candidate{url, 0, 1};
+        if (!ended) {
+            const qsizetype comma = srcset.indexOf(',', i);
+            const qsizetype end = comma < 0 ? size : comma;
+            // Descriptors are split on any ASCII whitespace, as the URL was.
+            const QStringView descriptors = QStringView(srcset).mid(i, end - i);
+            bool dropped = false;
+            for (qsizetype at = 0; at < descriptors.size() && !dropped;) {
+                while (at < descriptors.size() && isSpace(descriptors.at(at)))
+                    ++at;
+                const qsizetype from = at;
+                while (at < descriptors.size() && !isSpace(descriptors.at(at)))
+                    ++at;
+                const QStringView descriptor = descriptors.mid(from, at - from);
+                if (descriptor.isEmpty())
+                    continue;
+                bool number = false;
+                const double value = descriptor.chopped(1).toDouble(&number);
+                // A browser drops a candidate whose descriptor is no finite
+                // number (a NaN, an infinity, or one too large for a double),
+                // and an infinite width would beat every real one.
+                if (!number || !std::isfinite(value)) {
+                    dropped = true;
+                    continue;
+                }
+                if (value <= 0)
+                    continue;
+                if (descriptor.endsWith('w'))
+                    candidate.width = value;
+                else if (descriptor.endsWith('x'))
+                    candidate.density = value;
+            }
+            if (dropped)
+                candidate.url.clear();
+            i = end;
+        }
+        if (!candidate.url.isEmpty())
+            candidates << candidate;
+    }
+    const bool byWidth = std::any_of(candidates.cbegin(), candidates.cend(),
+                                     [](const Candidate &candidate) { return candidate.width > 0; });
+    const double target = byWidth ? Sanitizer::imageWidth : 2;
+    const Candidate *best = nullptr;
+    for (const Candidate &candidate : std::as_const(candidates)) {
+        const double measure = byWidth ? candidate.width : candidate.density;
+        if (byWidth && measure <= 0)
+            continue;
+        if (!best) {
+            best = &candidate;
+            continue;
+        }
+        const double current = byWidth ? best->width : best->density;
+        const bool fits = measure <= target, bestFits = current <= target;
+        if ((fits && (!bestFits || measure > current)) || (!fits && !bestFits && measure < current))
+            best = &candidate;
+    }
+    return best ? best->url : QString();
+}
+
 class Writer {
 public:
-    Writer(const QUrl &base, bool qtStyles, bool imageLabels)
-        : m_base(base), m_qtStyles(qtStyles), m_imageLabels(imageLabels) {}
+    Writer(const QUrl &base, bool qtStyles, bool imageLabels, const Sanitizer::Images &images)
+        : m_base(base), m_qtStyles(qtStyles), m_imageLabels(imageLabels), m_images(images) {}
 
     void text(QStringView raw) {
         if (raw.isEmpty())
@@ -387,12 +475,49 @@ private:
         return encoded.size() > maxUrlLength ? QString() : encoded;
     }
 
+    // The image's source: its srcset's candidate, its data-src, or its src.
+    QString imageSource(const Tag &tag) const {
+        for (const QString *candidates : {&tag.dataSrcset, &tag.srcset}) {
+            const QString url = linkTarget(pickCandidate(*candidates));
+            if (!url.isEmpty())
+                return url;
+        }
+        const QString lazy = linkTarget(tag.dataSrc);
+        return lazy.isEmpty() ? linkTarget(tag.src) : lazy;
+    }
+
     void image(const Tag &tag) {
-        QString url = linkTarget(tag.src);
-        if (url.isEmpty())
-            url = linkTarget(tag.dataSrc);
+        const QString url = imageSource(tag);
         if (url.isEmpty())
             return;
+        // A fragment names no other image, so the image is known without
+        // it. In a fully encoded URL, a '#' can only start the fragment.
+        const QString key = url.left(url.indexOf('#'));
+        if (m_images.found && !m_found.contains(key)) {
+            m_found.insert(key);
+            *m_images.found << key;
+        }
+        const Sanitizer::LocalImage *local =
+            m_images.local && m_images.local->contains(key) ? &*m_images.local->constFind(key) : nullptr;
+        // QUrl takes file://host/path for a local file too, though it is
+        // another machine's.
+        if (local && local->file.isLocalFile() && local->file.host().isEmpty()) {
+            // Qt adds an image outside any block to the block before it, on
+            // that block's last line, where a browser gives it a line of its
+            // own.
+            const bool own = m_open.isEmpty();
+            // Never wider than the text, and as tall as that makes it.
+            m_out += QLatin1String(own ? "<p><img src=\"" : "<img src=\"")
+                     + local->file.toString(QUrl::FullyEncoded).toHtmlEscaped() + QLatin1Char('"');
+            if (local->width > 0)
+                m_out += QStringLiteral(" width=\"%1\"").arg(local->width);
+            m_out += QLatin1String(own ? " style=\"max-width: 100%\"></p>" : " style=\"max-width: 100%\">");
+            if (own)
+                boundary();
+            else
+                m_boundary = false;
+            return;
+        }
         QString alt = tag.alt;
         alt.removeIf(isDirectionOverride);
         alt = alt.simplified();
@@ -422,6 +547,8 @@ private:
     QUrl m_base;
     bool m_qtStyles = false;
     bool m_imageLabels = true;
+    Sanitizer::Images m_images;
+    QSet<QString> m_found;
     bool m_quoting = false;
     QList<qsizetype> m_spans;
     int m_spanOverflow = 0;
@@ -493,20 +620,24 @@ qsizetype readTag(const QString &html, qsizetype i, Tag &tag) {
             }
         }
         // The first of a repeated attribute wins, as in a browser.
-        const int which = name == QLatin1String("href")       ? 1
-                          : name == QLatin1String("src")      ? 2
-                          : name == QLatin1String("data-src") ? 4
-                          : name == QLatin1String("alt")      ? 8
-                          : name == QLatin1String("style")    ? 16
-                                                              : 0;
+        const int which = name == QLatin1String("href")          ? 1
+                          : name == QLatin1String("src")         ? 2
+                          : name == QLatin1String("data-src")    ? 4
+                          : name == QLatin1String("alt")         ? 8
+                          : name == QLatin1String("style")       ? 16
+                          : name == QLatin1String("srcset")      ? 32
+                          : name == QLatin1String("data-srcset") ? 64
+                                                                 : 0;
         if (which && !(seen & which)) {
             seen |= which;
             const QString decoded = FeedParser::decodeEntities(value);
-            (which == 1   ? tag.href
-             : which == 2 ? tag.src
-             : which == 4 ? tag.dataSrc
-             : which == 8 ? tag.alt
-                          : tag.style) = decoded;
+            (which == 1    ? tag.href
+             : which == 2  ? tag.src
+             : which == 4  ? tag.dataSrc
+             : which == 8  ? tag.alt
+             : which == 16 ? tag.style
+             : which == 32 ? tag.srcset
+                           : tag.dataSrcset) = decoded;
         }
     }
     return -1;
@@ -581,7 +712,7 @@ QString linesToRichText(const QString &text) {
 QString toRichText(const QString &input, const QUrl &base, const Options &options) {
     const QString html = input.left(options.maxInputLength);
     const qsizetype size = html.size();
-    Writer writer(base, options.qtStyles, options.imageLabels);
+    Writer writer(base, options.qtStyles, options.imageLabels, options.images);
     // Inside an element dropped with its content: its name and how deeply it
     // nests in itself.
     QString skipping;

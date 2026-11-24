@@ -34,6 +34,7 @@ HEADERS += \
     $$PWD/relaypool.h \
     $$PWD/remotesigner.h \
     $$PWD/sanitizer.h \
+    $$PWD/settings.h \
     $$PWD/signer.h \
     $$PWD/smallfile.h \
     $$PWD/sourcemodel.h \
@@ -66,6 +67,7 @@ SOURCES += \
     $$PWD/relaypool.cpp \
     $$PWD/remotesigner.cpp \
     $$PWD/sanitizer.cpp \
+    $$PWD/settings.cpp \
     $$PWD/signer.cpp \
     $$PWD/sourcemodel.cpp \
     $$PWD/store.cpp \

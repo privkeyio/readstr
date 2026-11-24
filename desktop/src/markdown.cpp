@@ -134,7 +134,7 @@ QString nostrLinkTarget(const QString &href) {
     return entity.isEmpty() ? QString() : QStringLiteral("https://njump.me/") + entity;
 }
 
-QString toRichText(const QString &markdown) {
+QString toRichText(const QString &markdown, const Sanitizer::Images &images) {
     // Qt writes an empty paragraph for nothing at all.
     if (markdown.trimmed().isEmpty())
         return {};
@@ -190,6 +190,7 @@ QString toRichText(const QString &markdown) {
     Sanitizer::Options options;
     options.maxInputLength = maxHtmlLength;
     options.qtStyles = true;
+    options.images = images;
     // The line breaks Qt writes between its tags are no part of the text.
     const QString html = Sanitizer::toRichText(document.toHtml(), QUrl(), options).trimmed();
     // The sanitizer ends in the same ellipsis when it cut the HTML short.
