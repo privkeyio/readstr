@@ -111,9 +111,11 @@ button, or a click on the thumbnail) plays it in `mpv`, which is started on
 its own with the video's address and no shell; the status bar says when mpv
 is missing or does not start. A video or thumbnail address that names this
 machine or the local network is never used, since someone else's event chose
-it; a public name that resolves to a local address is not caught, and neither
-is a redirect, playlist entry, or HLS segment mpv follows to one, or a page
-mpv's yt-dlp fallback reads when the address does not play.
+it. Nor is a public name that resolves to a local address: readstr looks the
+name up itself and fetches the thumbnail from the address it checked, so a
+second DNS answer cannot redirect it. What mpv plays is not covered: a
+redirect, playlist entry, or HLS segment mpv follows to a local address, or a
+page mpv's yt-dlp fallback reads when the address does not play.
 
 Readstr asks relay.damus.io, relay.primal.net, nos.lol, and relay.snort.social
 (plus an nprofile's own relay hints when you subscribe), only over `wss://`.
@@ -411,9 +413,18 @@ tables of more than 1000 rows, 64 columns, or 10,000 cells in all, is shown
 as its plain lines instead, since laying those out takes Qt time that grows
 with their square. A video thumbnail is fetched over http(s) from a host
 that is not this machine or the local network (nor a `.lan`, `.home`, or
-`home.arpa` name, nor a Teredo or local-use NAT64 address), on port 80 or
-443 only, within 2 MiB and 30 seconds, asking for PNG, JPEG, GIF, or WebP
-with a User-Agent of just `readstr` and no language of yours, stopped as
+`home.arpa` name, nor a Teredo, local-use NAT64, IETF protocol
+(192.0.0.0/24), or documentation address), and whose name
+resolves to public addresses alone (one local address among them is enough
+to refuse it), on port 80 or 443 only. The request goes to the address that
+was checked, over HTTP/1.1, with the name in its `Host` header and, over
+https, as the name the certificate is verified for, so a name that rebinds
+to a local address after the check is not followed there; each redirect is
+looked up, checked, and pinned the same way. With a proxy configured (the
+system's, which readstr follows), the proxy connects on readstr's behalf, to
+the checked address, and its own network decides what that reaches. It is
+fetched within 2 MiB and
+30 seconds, asking for PNG, JPEG, GIF, or WebP with a User-Agent of just `readstr` and no language of yours, stopped as
 soon as the response's headers give an error or a type other than
 `image/*`, and only as an `image/*` whose bytes are a PNG, JPEG, GIF, or WebP image (no
 other image reader ever sees it), of at most 8192 pixels a side and 128 MiB

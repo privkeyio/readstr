@@ -21,10 +21,13 @@
 #include <QImageWriter>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QNetworkProxy>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSignalSpy>
+#include <QSslKey>
+#include <QSslServer>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -467,10 +470,115 @@ struct LoadedWindow {
     }
 };
 
+// Answers every lookup with an error, so no test asks the real DNS: the
+// resolver each test starts with.
+static void noLookups(const QString &, const Fetcher::Answer &answer) { answer({}, "no lookups in tests"); }
+
+// Answers lookups from `answers` alone, a name it maps to nothing failing,
+// and counts them, until it goes and noLookups is back.
+class FakeResolver {
+public:
+    explicit FakeResolver(std::function<QList<QHostAddress>(const QString &)> answers,
+                          const QList<QHostAddress> &treatedAsPublic = {})
+        : m_answers(std::move(answers))
+    {
+        Fetcher::setResolverForTests(
+            [this](const QString &host, const Fetcher::Answer &answer) {
+                asked << host;
+                const QList<QHostAddress> addresses = m_answers(host);
+                answer(addresses, addresses.isEmpty() ? QStringLiteral("not found") : QString());
+            },
+            treatedAsPublic);
+    }
+    ~FakeResolver() { Fetcher::setResolverForTests(noLookups); }
+    FakeResolver(const FakeResolver &) = delete;
+    FakeResolver &operator=(const FakeResolver &) = delete;
+
+    QStringList asked;
+
+private:
+    std::function<QList<QHostAddress>(const QString &)> m_answers;
+};
+
+// For images.example.invalid alone, self-signed, valid from 2020 to 2120.
+static const char testCertificate[] = R"(-----BEGIN CERTIFICATE-----
+MIIBzjCCAXSgAwIBAgIUOQYvkGLTNrSBEvXtJqlumg8IDXMwCgYIKoZIzj0EAwIw
+ITEfMB0GA1UEAwwWaW1hZ2VzLmV4YW1wbGUuaW52YWxpZDAgFw0yMDAxMDEwMDAw
+MDBaGA8yMTIwMDEwMTAwMDAwMFowITEfMB0GA1UEAwwWaW1hZ2VzLmV4YW1wbGUu
+aW52YWxpZDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABP/0D/0C+SPQxeNzPe80
+us0HaVQLWQ2x+aUIg/Se601Eu9L/JqdBhDoP/UfYJVUkVDVdnfbNh6yCwGjWhjf3
+r8qjgYcwgYQwHQYDVR0OBBYEFC1ySlfmYsq/AH50q38oHDcGBUDRMB8GA1UdIwQY
+MBaAFC1ySlfmYsq/AH50q38oHDcGBUDRMCEGA1UdEQQaMBiCFmltYWdlcy5leGFt
+cGxlLmludmFsaWQwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAoQwCgYI
+KoZIzj0EAwIDSAAwRQIgUiqDz+N61XwVctzM3+w6X9Oh+d9Qn26aiWUeUzkyPiUC
+IQCgHmD9E2tqkR40sygHvKrw0b15Xhb8y4dMzdlEWTAYVw==
+-----END CERTIFICATE-----
+)";
+static const char testKey[] = R"(-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcI6UvZHml4C/t4Y9
+YoFomN+8WKyIOPs81DCHBnVSjXihRANCAAT/9A/9Avkj0MXjcz3vNLrNB2lUC1kN
+sfmlCIP0nutNRLvS/yanQYQ6D/1H2CVVJFQ1XZ32zYesgsBo1oY396/K
+-----END PRIVATE KEY-----
+)";
+
+// An HTTPS/1.1 server on 127.0.0.1 with the test certificate, answering
+// "ok" to every path but /down, which redirects to http. It keeps each
+// connection open, so a later request may reuse one already verified.
+class FakeTlsServer : public QSslServer {
+public:
+    FakeTlsServer()
+    {
+        QSslConfiguration configuration = QSslConfiguration::defaultConfiguration();
+        configuration.setLocalCertificate(QSslCertificate(QByteArray(testCertificate)));
+        configuration.setPrivateKey(QSslKey(QByteArray(testKey), QSsl::Ec));
+        configuration.setPeerVerifyMode(QSslSocket::VerifyNone);
+        setSslConfiguration(configuration);
+        connect(this, &QTcpServer::pendingConnectionAvailable, this, [this] {
+            while (QTcpSocket *socket = nextPendingConnection()) {
+                ++connections;
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                auto buffer = std::make_shared<QByteArray>();
+                const auto read = [this, socket, buffer] {
+                    *buffer += socket->readAll();
+                    qsizetype end;
+                    while ((end = buffer->indexOf("\r\n\r\n")) >= 0) {
+                        const QList<QByteArray> lines = buffer->left(end).split('\n');
+                        buffer->remove(0, end + 4);
+                        for (const QByteArray &line : lines)
+                            if (line.toLower().startsWith("host:"))
+                                hosts << line.mid(5).trimmed();
+                        if (lines.first().startsWith("GET /down "))
+                            socket->write("HTTP/1.1 302 Found\r\nLocation: http://images.example.invalid/\r\n"
+                                          "Content-Length: 0\r\n\r\n");
+                        else
+                            socket->write("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok");
+                    }
+                };
+                connect(socket, &QTcpSocket::readyRead, socket, read);
+                read();
+            }
+        });
+        listen(QHostAddress::LocalHost);
+    }
+
+    QList<QByteArray> hosts;
+    int connections = 0;
+};
+
 class ReadstrTests : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase()
+    {
+        Fetcher::setResolverForTests(noLookups);
+        // No test goes through the developer's own proxy settings, which the
+        // system's configuration would hand Qt; a test that wants a proxy
+        // installs its own factory.
+        QNetworkProxyFactory::setUseSystemConfiguration(false);
+        QNetworkProxy::setApplicationProxy(QNetworkProxy::NoProxy);
+    }
+
     void themeFallsBack()
     {
         QTemporaryDir dir;
@@ -7069,7 +7177,15 @@ private slots:
                                  "2002:c0a8:0101::1", "2002:7f00:1::", "2002:0a00:0001:1234::5", "198.18.0.1",
                                  "198.19.255.255", "240.0.0.1", "250.1.2.3", "255.255.255.255",
                                  "::ffff:198.18.0.1", "64:ff9b::100.64.0.1", "2001::1",
-                                 "2001:0:4136:e378:8000:63bf:3fff:fdd2", "64:ff9b:1::a00:1", "64:ff9b:1:ffff::1"})
+                                 "2001:0:4136:e378:8000:63bf:3fff:fdd2", "64:ff9b:1::a00:1", "64:ff9b:1:ffff::1",
+                                 // IETF protocol assignments, with DS-Lite's B4 (often the
+                                 // home router) and AFTR, and the documentation ranges.
+                                 "192.0.0.1", "192.0.0.2", "192.0.0.255", "192.0.2.1", "198.51.100.7",
+                                 "203.0.113.255", "2001:db8::1", "2001:db8:ffff::1",
+                                 // The same through mapped, SIIT, NAT64 and 6to4 forms, and SIIT
+                                 // around local addresses.
+                                 "::ffff:192.0.0.2", "::ffff:203.0.113.7", "::ffff:0:c000:2", "64:ff9b::192.0.0.1",
+                                 "2002:c000:0002::1", "::ffff:0:a00:1", "::ffff:0:7f00:1", "::ffff:0:0:0"})
             QVERIFY2(Fetcher::isLocalHost(host), host);
         // Home router names stay public here, as on main, so Sync with Nostr
         // and a bunker relay still reach them; only images refuse them.
@@ -7085,7 +7201,9 @@ private slots:
         for (const char *host : {"1.1.1.1", "198.17.255.255", "198.20.0.0", "223.255.255.255", "::ffff:1.1.1.1",
                                  "::1.1.1.1", "64:ff9b::1.1.1.1", "64:ff9b::808:808", "2002:0101:0101::1",
                                  "64:ff9c::a00:1", "2606:4700:4700::1111", "2001:db9::1", "2001:1::1",
-                                 "64:ff9b:2::1", "example.com", "lan.example.com", "home.example.com", "arpa.lan.example"})
+                                 "64:ff9b:2::1", "example.com", "lan.example.com", "home.example.com", "arpa.lan.example",
+                                 "191.255.255.255", "192.0.1.0", "192.0.3.0", "198.51.99.255", "198.51.101.0",
+                                 "203.0.112.255", "203.0.114.0", "2001:db7:ffff::1", "::ffff:0:101:101"})
             QVERIFY2(!Fetcher::isLocalHost(host), host);
         // As URLs give them, which is how they arrive.
         QVERIFY(Fetcher::isLocalHost(QUrl("http://[::]:8080/").host()));
@@ -10180,6 +10298,513 @@ private slots:
             QVERIFY2(strictFailed.first().at(1).toString().contains("local network"),
                      qPrintable(strictFailed.first().at(1).toString()));
         }
+    }
+
+    // Under publicHostsOnly a name is looked up first, and refused when any
+    // of its addresses is local, before anything is sent.
+    void publicHostsOnlyRefusesNamesThatResolveLocally()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        FakeHttpServer server;
+        server.serve("/a.png", png(10, 10), "image/png");
+        QList<QHostAddress> answer;
+        // 127.0.0.7 stands for a public address, which no test may look up
+        // or reach; nothing listens there.
+        const QHostAddress outside("127.0.0.7");
+        FakeResolver resolver([&answer](const QString &) { return answer; }, {outside});
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 5000;
+        fetcher.setLimits(limits);
+        // The server's own port, so only the lookup stands in the way.
+        const QUrl url(QString("http://images.example.invalid:%1/a.png").arg(server.serverPort()));
+        const QString refused("refused a name that resolves to this machine or the local network");
+        const QStringList local{"127.0.0.1", "10.0.0.1", "192.168.1.1", "169.254.1.1", "100.64.0.1",
+                                "0.0.0.0", "224.0.0.1", "::1", "::", "fc00::1", "fe80::1", "ff02::1",
+                                "::ffff:127.0.0.1", "::ffff:10.0.0.1", "::127.0.0.1", "64:ff9b::7f00:1",
+                                "64:ff9b:1::1", "2002:c0a8:101::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+                                "192.0.0.1", "192.0.0.2", "192.0.2.1", "198.51.100.1", "203.0.113.1",
+                                "2001:db8::1", "::ffff:192.0.0.2", "::ffff:0:c000:2", "::ffff:0:a00:1",
+                                "64:ff9b::c000:2", "2002:c000:2::1"};
+        for (const QString &address : local) {
+            answer = {QHostAddress(address)};
+            const FetchResult result = fetcher.get({url, {}, {}});
+            QVERIFY2(result.error == refused, qPrintable(address + ": " + result.error));
+        }
+        QCOMPARE(resolver.asked.size(), local.size());
+        QCOMPARE(resolver.asked.first(), QString("images.example.invalid"));
+        // One local address among public ones is enough, in either order.
+        answer = {outside, QHostAddress("192.168.1.1")};
+        QCOMPARE(fetcher.get({url, {}, {}}).error, refused);
+        answer = {QHostAddress("::1"), outside};
+        QCOMPARE(fetcher.get({url, {}, {}}).error, refused);
+        // The stand-in alone is not refused: the fetch goes there and finds
+        // nothing listening.
+        answer = {outside};
+        const FetchResult unrefused = fetcher.get({url, {}, {}});
+        QVERIFY2(!unrefused.ok() && unrefused.error != refused, qPrintable(unrefused.error));
+        QVERIFY(server.requests.isEmpty());
+
+        // A name that does not resolve fails cleanly.
+        answer = {};
+        QCOMPARE(fetcher.get({url, {}, {}}).error, QString("could not look up images.example.invalid: not found"));
+
+        // Thumbnails and an article's images get the same, from their defaults.
+        answer = {QHostAddress("192.168.1.1")};
+        Thumbnails videos;
+        Thumbnails images("images", Backend::imageLimits());
+        for (Thumbnails *thumbnails : {&videos, &images}) {
+            QSignalSpy failed(thumbnails, &Thumbnails::failed);
+            QVERIFY(!fetchThumbnail(*thumbnails, QUrl("http://images.example.invalid/a.png")).isValid());
+            QCOMPARE(failed.size(), 1);
+            QCOMPARE(failed.first().at(1).toString(), refused);
+        }
+        QVERIFY(server.requests.isEmpty());
+
+        // Feeds, relays and sync look nothing up of their own: Qt does.
+        resolver.asked.clear();
+        Fetcher feeds;
+        QVERIFY(feeds.get({server.url("/a.png"), {}, {}}).ok());
+        QVERIFY(resolver.asked.isEmpty());
+    }
+
+    // The request goes to the address that was checked, named by the Host
+    // header, and each redirect is looked up, checked and pinned anew.
+    void publicHostsOnlyPinsTheCheckedAddress()
+    {
+        FakeHttpServer server;
+        server.serve("/a.png", "png");
+        server.redirect("/relative", "/a.png");
+        server.redirect("/lan", QString("http://lan.example.invalid:%1/a.png").arg(server.serverPort()).toUtf8());
+        server.redirect("/again", QString("http://rebind.example.invalid:%1/a.png").arg(server.serverPort()).toUtf8());
+        server.redirect("/loop", "/loop");
+        server.redirect("/307", "/a.png", 307);
+        server.redirect("/308", "/a.png", 308);
+        server.serve("/img.png", png(10, 10), "image/png");
+        // A redirect whose own body is a page: an image fetch must still
+        // follow it rather than stop at its type.
+        server.route("/page", [](const FakeHttpServer::Request &) {
+            return FakeHttpServer::Response{302, {{"Location", "/img.png"}, {"Content-Type", "text/html"}},
+                                            "<html>moved</html>"};
+        });
+        // Another public name, at an address of its own: 127.0.0.2.
+        FakeHttpServer cdn;
+        cdn.close();
+        QVERIFY(cdn.listen(QHostAddress("127.0.0.2")));
+        cdn.serve("/a.png", "cdn");
+        server.redirect("/cdn", QString("http://cdn.example.invalid:%1/a.png").arg(cdn.serverPort()).toUtf8());
+        // 127.0.0.1 and 127.0.0.2 stand for public addresses here, so the
+        // names can reach the test's servers; a rebinding name answers the
+        // first once, then a local address.
+        QHash<QString, int> answers;
+        FakeResolver resolver(
+            [&answers](const QString &host) -> QList<QHostAddress> {
+                const int count = answers[host]++;
+                if (host == "images.example.invalid" || (host == "rebind.example.invalid" && count == 0))
+                    return {QHostAddress(QHostAddress::LocalHost)};
+                if (host == "cdn.example.invalid")
+                    return {QHostAddress("127.0.0.2")};
+                return {QHostAddress("10.0.0.1")};
+            },
+            {QHostAddress(QHostAddress::LocalHost), QHostAddress("127.0.0.2")});
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 5000;
+        fetcher.setLimits(limits);
+        const auto at = [&server](const char *host, const char *path) {
+            return QUrl(QString("http://%1:%2%3").arg(host).arg(server.serverPort()).arg(path));
+        };
+        const QByteArray host = "images.example.invalid:" + QByteArray::number(server.serverPort());
+
+        FetchResult result = fetcher.get({at("images.example.invalid", "/a.png"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.body, QByteArray("png"));
+        QCOMPARE(result.finalUrl, at("images.example.invalid", "/a.png"));
+        QCOMPARE(server.requests.size(), 1);
+        QCOMPARE(server.requests.last().headers.value("host"), host);
+
+        // A relative redirect stays on the name, and is looked up again;
+        // the validators reach only the first URL.
+        server.requests.clear();
+        resolver.asked.clear();
+        result = fetcher.get({at("images.example.invalid", "/relative"), "\"v1\"", {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.url, at("images.example.invalid", "/relative"));
+        QCOMPARE(result.finalUrl, at("images.example.invalid", "/a.png"));
+        QVERIFY(result.etag.isEmpty());
+        QCOMPARE(server.requests.size(), 2);
+        QCOMPARE(server.requests.at(0).headers.value("if-none-match"), QByteArray("\"v1\""));
+        QVERIFY(!server.requests.at(1).headers.contains("if-none-match"));
+        QCOMPARE(server.requests.at(1).headers.value("host"), host);
+        QCOMPARE(resolver.asked.size(), 2);
+
+        // A redirect to a name that resolves locally is refused at the hop.
+        server.requests.clear();
+        result = fetcher.get({at("images.example.invalid", "/lan"), {}, {}});
+        QCOMPARE(result.error, QString("refused a redirect to a name that resolves to this machine or the local network"));
+        QCOMPARE(server.requests.size(), 1);
+        QCOMPARE(server.requests.first().path, QByteArray("/lan"));
+
+        // Rebinding: the first answer is checked and used, and is the only
+        // one the request ever goes by, since Qt is handed the address and
+        // looks nothing up. A later lookup of the same name, for the next
+        // hop, gets the local address, which is refused there.
+        server.requests.clear();
+        resolver.asked.clear();
+        result = fetcher.get({at("rebind.example.invalid", "/again"), {}, {}});
+        QCOMPARE(result.error, QString("refused a redirect to a name that resolves to this machine or the local network"));
+        QCOMPARE(resolver.asked, QStringList({"rebind.example.invalid", "rebind.example.invalid"}));
+        QCOMPARE(server.requests.size(), 1);
+        QCOMPARE(server.requests.first().headers.value("host"),
+                 "rebind.example.invalid:" + QByteArray::number(server.serverPort()));
+
+        // 307 and 308 are followed here too.
+        for (const char *path : {"/307", "/308"}) {
+            server.requests.clear();
+            result = fetcher.get({at("images.example.invalid", path), {}, {}});
+            QVERIFY2(result.ok(), qPrintable(QString(path) + ": " + result.error));
+            QCOMPARE(result.body, QByteArray("png"));
+            QCOMPARE(result.finalUrl, at("images.example.invalid", "/a.png"));
+            QCOMPARE(server.requests.size(), 2);
+            QCOMPARE(server.requests.at(1).headers.value("host"), host);
+        }
+
+        // A redirect to another public name is looked up as that name and
+        // goes to that name's own address, which it names in Host.
+        server.requests.clear();
+        resolver.asked.clear();
+        result = fetcher.get({at("images.example.invalid", "/cdn"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.body, QByteArray("cdn"));
+        QCOMPARE(result.finalUrl, QUrl(QString("http://cdn.example.invalid:%1/a.png").arg(cdn.serverPort())));
+        QCOMPARE(resolver.asked, QStringList({"images.example.invalid", "cdn.example.invalid"}));
+        QCOMPARE(server.requests.size(), 1);
+        QCOMPARE(cdn.requests.size(), 1);
+        QCOMPARE(cdn.requests.first().headers.value("host"),
+                 "cdn.example.invalid:" + QByteArray::number(cdn.serverPort()));
+
+        // An image fetch follows a pinned redirect whatever the redirect's
+        // own type, judging only the final response's.
+        Fetcher images;
+        Fetcher::Limits imageLimits = limits;
+        imageLimits.images = true;
+        images.setLimits(imageLimits);
+        server.requests.clear();
+        result = images.get({at("images.example.invalid", "/page"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.body, png(10, 10));
+        QCOMPARE(result.contentType, QString("image/png"));
+        QCOMPARE(server.requests.size(), 2);
+        QCOMPARE(server.requests.at(1).path, QByteArray("/img.png"));
+
+        // The redirect cap holds for redirects followed here.
+        server.requests.clear();
+        result = fetcher.get({at("images.example.invalid", "/loop"), {}, {}});
+        QCOMPARE(result.error, QString("more than 5 redirects"));
+        QCOMPARE(server.requests.size(), 6);
+    }
+
+    // An https request pinned to an address verifies the certificate, and
+    // sends SNI, for the name it was asked for, never for the address.
+    void publicHostsOnlyVerifiesTheNameOverHttps()
+    {
+        if (!QSslSocket::supportsSsl())
+            QSKIP("no TLS backend");
+        FakeTlsServer server;
+        QVERIFY(server.isListening());
+        const QSslConfiguration original = QSslConfiguration::defaultConfiguration();
+        const auto restore = qScopeGuard([&original] { QSslConfiguration::setDefaultConfiguration(original); });
+        QSslConfiguration trusting = original;
+        trusting.addCaCertificate(QSslCertificate(QByteArray(testCertificate)));
+        QSslConfiguration::setDefaultConfiguration(trusting);
+        FakeResolver resolver([](const QString &) { return QList<QHostAddress>{QHostAddress(QHostAddress::LocalHost)}; },
+                              {QHostAddress(QHostAddress::LocalHost)});
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 5000;
+        fetcher.setLimits(limits);
+        const auto at = [&server](const char *host, const char *path) {
+            return QUrl(QString("https://%1:%2%3").arg(host).arg(server.serverPort()).arg(path));
+        };
+
+        FetchResult result = fetcher.get({at("images.example.invalid", "/a"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.body, QByteArray("ok"));
+        QCOMPARE(server.hosts, QList<QByteArray>{"images.example.invalid:" + QByteArray::number(server.serverPort())});
+
+        // Another name at the same address is refused by the certificate,
+        // even with a verified connection to that address still open.
+        result = fetcher.get({at("other.example.invalid", "/a"), {}, {}});
+        QVERIFY(!result.ok());
+        QVERIFY2(result.error.contains("host name did not match"), qPrintable(result.error));
+        QCOMPARE(server.hosts.size(), 1);
+
+        // The first name's connection is still there, and still reused. The
+        // server may have counted a connection for the refused name, since
+        // its side of the handshake can finish before the client checks the
+        // name, so only that this request opened none is asserted; that the
+        // refused one never sent a request is what proves the pool is keyed
+        // by the name.
+        const int connections = server.connections;
+        QVERIFY(fetcher.get({at("images.example.invalid", "/b"), {}, {}}).ok());
+        QCOMPARE(server.hosts.size(), 2);
+        QCOMPARE(server.connections, connections);
+        QCOMPARE(fetcher.get({at("images.example.invalid", "/down"), {}, {}}).error,
+                 QString("refused a redirect from https to http"));
+    }
+
+    // A pinned request moves on to the name's next checked address only when
+    // one cannot be connected to: IPv4 first, at most four, and never once a
+    // server has answered, even with an error.
+    void publicHostsOnlyTriesTheOtherCheckedAddresses()
+    {
+        FakeHttpServer server;
+        server.serve("/a.png", "png");
+        // The same port on 127.0.0.2, as another address of the same name.
+        FakeHttpServer second;
+        second.close();
+        QVERIFY(second.listen(QHostAddress("127.0.0.2"), server.serverPort()));
+        second.serve("/a.png", "second");
+        // Nothing listens at these, which stand for public addresses that
+        // cannot be reached.
+        const QList<QHostAddress> dead{QHostAddress("127.0.0.9"), QHostAddress("127.0.0.10"),
+                                       QHostAddress("127.0.0.11"), QHostAddress("127.0.0.12")};
+        QList<QHostAddress> answer;
+        FakeResolver resolver([&answer](const QString &) { return answer; },
+                              dead + QList<QHostAddress>{QHostAddress(QHostAddress::LocalHost), QHostAddress("127.0.0.2"),
+                                                         QHostAddress(QHostAddress::LocalHostIPv6)});
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 5000;
+        fetcher.setLimits(limits);
+        const auto at = [&server](const char *path) {
+            return QUrl(QString("http://images.example.invalid:%1%2").arg(server.serverPort()).arg(path));
+        };
+
+        answer = {dead.at(0), QHostAddress(QHostAddress::LocalHost)};
+        FetchResult result = fetcher.get({at("/a.png"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.body, QByteArray("png"));
+        QCOMPARE(server.requests.size(), 1);
+        QCOMPARE(server.requests.first().headers.value("host"),
+                 "images.example.invalid:" + QByteArray::number(server.serverPort()));
+        QCOMPARE(resolver.asked.size(), 1);
+
+        // Every address unreachable: one error, once.
+        server.requests.clear();
+        answer = {dead.at(0), dead.at(1)};
+        int calls = 0;
+        fetcher.fetch({at("/a.png"), {}, {}}, [&calls, &result](const FetchResult &r) {
+            ++calls;
+            result = r;
+        });
+        QTRY_COMPARE(calls, 1);
+        QTest::qWait(50);
+        QCOMPARE(calls, 1);
+        QVERIFY(!result.ok());
+        QVERIFY2(result.error.contains("refused", Qt::CaseInsensitive), qPrintable(result.error));
+        QVERIFY(server.requests.isEmpty());
+
+        // At most four are tried: the fifth, which would answer, is not.
+        answer = dead + QList<QHostAddress>{QHostAddress(QHostAddress::LocalHost)};
+        QVERIFY(!fetcher.get({at("/a.png"), {}, {}}).ok());
+        QVERIFY(server.requests.isEmpty());
+
+        // An answer, even an error, ends it: the next address is not asked.
+        answer = {QHostAddress(QHostAddress::LocalHost), QHostAddress("127.0.0.2")};
+        QCOMPARE(fetcher.get({at("/missing"), {}, {}}).error, QString("HTTP 404"));
+        QCOMPARE(server.requests.size(), 1);
+        QVERIFY(second.requests.isEmpty());
+
+        // IPv4 comes first, and IPv6 is still tried when it fails, where
+        // this machine has IPv6.
+        FakeHttpServer v6;
+        v6.close();
+        if (v6.listen(QHostAddress::LocalHostIPv6, server.serverPort())) {
+            v6.serve("/a.png", "v6");
+            server.requests.clear();
+            answer = {QHostAddress(QHostAddress::LocalHostIPv6), QHostAddress(QHostAddress::LocalHost)};
+            QCOMPARE(fetcher.get({at("/a.png"), {}, {}}).body, QByteArray("png"));
+            QVERIFY(v6.requests.isEmpty());
+            answer = {QHostAddress(QHostAddress::LocalHostIPv6), dead.at(0)};
+            QCOMPARE(fetcher.get({at("/a.png"), {}, {}}).body, QByteArray("v6"));
+            QCOMPARE(v6.requests.size(), 1);
+        }
+    }
+
+    // An answer taken once the deadline has passed, though before its timer
+    // has run, starts no request.
+    void publicHostsOnlySendsNothingPastTheDeadline()
+    {
+        QTcpServer listener;
+        QVERIFY(listener.listen(QHostAddress::LocalHost));
+        QSignalSpy connections(&listener, &QTcpServer::newConnection);
+        Fetcher::setResolverForTests(
+            [](const QString &, const Fetcher::Answer &answer) {
+                // Past the 50 ms deadline before the event loop runs again.
+                QThread::msleep(80);
+                answer({QHostAddress(QHostAddress::LocalHost)}, {});
+            },
+            {QHostAddress(QHostAddress::LocalHost)});
+        const auto restore = qScopeGuard([] { Fetcher::setResolverForTests(noLookups); });
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 50;
+        fetcher.setLimits(limits);
+        const QUrl url(QString("http://images.example.invalid:%1/a.png").arg(listener.serverPort()));
+        QCOMPARE(fetcher.get({url, {}, {}}).error, QString("timed out after 0.05 s"));
+        QTest::qWait(100);
+        QCOMPARE(connections.size(), 0);
+        QVERIFY(!listener.hasPendingConnections());
+    }
+
+    // Picking the proxy can block (a PAC file), and that time comes out of
+    // the budget: a request whose budget it used up is not sent.
+    void publicHostsOnlyCountsTheTimeToPickAProxy()
+    {
+        QTcpServer listener;
+        QVERIFY(listener.listen(QHostAddress::LocalHost));
+        QSignalSpy connections(&listener, &QTcpServer::newConnection);
+        class Slow : public QNetworkProxyFactory {
+        public:
+            QList<QNetworkProxy> queryProxy(const QNetworkProxyQuery &) override
+            {
+                QThread::msleep(80);
+                return {QNetworkProxy(QNetworkProxy::NoProxy)};
+            }
+        };
+        QNetworkProxyFactory::setApplicationProxyFactory(new Slow);
+        const auto restore = qScopeGuard([] { QNetworkProxyFactory::setApplicationProxyFactory(nullptr); });
+        FakeResolver resolver([](const QString &) { return QList<QHostAddress>{QHostAddress(QHostAddress::LocalHost)}; },
+                              {QHostAddress(QHostAddress::LocalHost)});
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 50;
+        fetcher.setLimits(limits);
+        const QUrl url(QString("http://images.example.invalid:%1/a.png").arg(listener.serverPort()));
+        QCOMPARE(fetcher.get({url, {}, {}}).error, QString("timed out after 0.05 s"));
+        QTest::qWait(100);
+        QCOMPARE(connections.size(), 0);
+        QVERIFY(!listener.hasPendingConnections());
+    }
+
+    // A pinned request goes through the proxy picked for its name, not the
+    // one picked for the address it is pinned to, and asks that proxy for
+    // the address.
+    void publicHostsOnlyPicksTheProxyByName()
+    {
+        FakeHttpServer server;
+        server.serve("/a.png", "direct");
+        FakeHttpServer proxy;
+        const QByteArray pinned = "http://127.0.0.1:" + QByteArray::number(server.serverPort()) + "/a.png";
+        proxy.route(pinned, [](const FakeHttpServer::Request &) {
+            return FakeHttpServer::Response{200, {{"Content-Type", "image/png"}}, "proxied", false, 0, false, 200};
+        });
+        // A rule for the name alone, as no_proxy or a PAC file would have:
+        // its address goes direct.
+        class ByName : public QNetworkProxyFactory {
+        public:
+            explicit ByName(quint16 port) : m_port(port) {}
+            QList<QNetworkProxy> queryProxy(const QNetworkProxyQuery &query) override
+            {
+                if (query.peerHostName() == QLatin1String("images.example.invalid"))
+                    return {QNetworkProxy(QNetworkProxy::HttpProxy, QStringLiteral("127.0.0.1"), m_port)};
+                return {QNetworkProxy(QNetworkProxy::NoProxy)};
+            }
+
+        private:
+            quint16 m_port;
+        };
+        QNetworkProxyFactory::setApplicationProxyFactory(new ByName(proxy.serverPort()));
+        const auto restore = qScopeGuard([] { QNetworkProxyFactory::setApplicationProxyFactory(nullptr); });
+        FakeResolver resolver([](const QString &) { return QList<QHostAddress>{QHostAddress(QHostAddress::LocalHost)}; },
+                              {QHostAddress(QHostAddress::LocalHost)});
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 5000;
+        fetcher.setLimits(limits);
+        const auto at = [&server](const char *scheme, const char *host) {
+            return QUrl(QString("%1://%2:%3/a.png").arg(scheme, host).arg(server.serverPort()));
+        };
+
+        FetchResult result = fetcher.get({at("http", "images.example.invalid"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.body, QByteArray("proxied"));
+        QCOMPARE(proxy.requests.size(), 1);
+        QCOMPARE(proxy.requests.first().path, pinned);
+        QCOMPARE(proxy.requests.first().headers.value("host"),
+                 "images.example.invalid:" + QByteArray::number(server.serverPort()));
+        QVERIFY(server.requests.isEmpty());
+
+        // A name the factory sends direct goes direct.
+        result = fetcher.get({at("http", "direct.example.invalid"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.body, QByteArray("direct"));
+        QCOMPARE(server.requests.size(), 1);
+        QCOMPARE(proxy.requests.size(), 1);
+
+        // Over https the proxy is asked to tunnel to the address.
+        if (QSslSocket::supportsSsl()) {
+            QVERIFY(!fetcher.get({at("https", "images.example.invalid"), {}, {}}).ok());
+            // Qt asks again once when the proxy refuses, so there may be two.
+            QVERIFY(proxy.requests.size() > 1);
+            for (qsizetype i = 1; i < proxy.requests.size(); ++i) {
+                QCOMPARE(proxy.requests.at(i).method, QByteArray("CONNECT"));
+                QCOMPARE(proxy.requests.at(i).path, "127.0.0.1:" + QByteArray::number(server.serverPort()));
+            }
+            proxy.requests.remove(1, proxy.requests.size() - 1);
+            QCOMPARE(server.requests.size(), 1);
+        }
+
+        // Two names at once at the same pinned URL, routed differently:
+        // Qt could not tell their requests apart, so the later one fails
+        // rather than go the first one's way.
+        const QList<FetchResult> both =
+            fetcher.fetchAll({{at("http", "images.example.invalid"), {}, {}}, {at("http", "direct.example.invalid"), {}, {}}});
+        QVERIFY2(both.at(0).ok(), qPrintable(both.at(0).error));
+        QCOMPARE(both.at(0).body, QByteArray("proxied"));
+        QVERIFY2(both.at(1).error.startsWith("could not pick the proxy for direct.example.invalid"),
+                 qPrintable(both.at(1).error));
+        QCOMPARE(server.requests.size(), 1);
+    }
+
+    // What a pinned redirect's own body cost is counted with the rest.
+    void publicHostsOnlyCountsRedirectBodies()
+    {
+        FakeHttpServer server;
+        server.serve("/a.png", "png");
+        server.route("/moved", [](const FakeHttpServer::Request &) {
+            return FakeHttpServer::Response{302, {{"Location", "/a.png"}}, QByteArray(100, 'm')};
+        });
+        server.route("/away", [](const FakeHttpServer::Request &) {
+            return FakeHttpServer::Response{302, {{"Location", "ftp://images.example.invalid/a.png"}},
+                                            QByteArray(50, 'm')};
+        });
+        FakeResolver resolver([](const QString &) { return QList<QHostAddress>{QHostAddress(QHostAddress::LocalHost)}; },
+                              {QHostAddress(QHostAddress::LocalHost)});
+        Fetcher fetcher;
+        Fetcher::Limits limits;
+        limits.publicHostsOnly = true;
+        limits.timeoutMs = 5000;
+        fetcher.setLimits(limits);
+        const auto at = [&server](const char *path) {
+            return QUrl(QString("http://images.example.invalid:%1%2").arg(server.serverPort()).arg(path));
+        };
+        FetchResult result = fetcher.get({at("/moved"), {}, {}});
+        QVERIFY2(result.ok(), qPrintable(result.error));
+        QCOMPARE(result.received, qint64(100 + 3));
+        result = fetcher.get({at("/away"), {}, {}});
+        QCOMPARE(result.error, QString("refused a redirect to a non-http(s) URL"));
+        QCOMPARE(result.received, qint64(50));
     }
 
     void thumbnailsSniffTheFormatBeforeAnyReader()

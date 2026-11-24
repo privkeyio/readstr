@@ -8,3 +8,7 @@ include(../src/sources.pri)
 HEADERS += fakehttpserver.h fakerelay.h
 SOURCES += readstr_tests.cpp
 DISTFILES += nip44.vectors.json
+
+# The hooks that only tests may use, such as Fetcher::setResolverForTests.
+# The app build (readstr.pro) never defines this.
+DEFINES += READSTR_TESTS
