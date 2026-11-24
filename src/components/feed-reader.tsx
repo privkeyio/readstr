@@ -52,6 +52,7 @@ import {
   readSyncAllowed,
   READ_SYNC_PUBLISH_DELAY_MS,
   READ_SYNC_RETRY_MIN_MS,
+  type ReadListAppliedServer,
   type ReadListServer,
   withdrawReadStatus,
 } from '@/lib/read-sync'
@@ -618,6 +619,21 @@ export function FeedReader() {
     readSyncRetryDelayRef.current = READ_SYNC_RETRY_MIN_MS
   }, [user?.npub])
 
+  const advanceReadListAppliedMutation = api.feed.advanceReadListAppliedCreatedAt.useMutation()
+  const advanceReadListApplied = advanceReadListAppliedMutation.mutateAsync
+  // What the pull, publishes and withdrawals record on the server.
+  const readListAppliedServer = useCallback((): ReadListAppliedServer => ({
+    // Never from the cache: another browser may have recorded a newer list.
+    // Keyed by account because fetch joins a request still in flight for the
+    // same key, which after an account switch would be the last account's.
+    getAppliedCreatedAt: async () => {
+      const account = readSyncDepsRef.current.npub ?? ''
+      const options = { staleTime: 0, cacheTime: 0 }
+      return (await utils.feed.getReadListAppliedCreatedAt.fetch({ account }, options)).createdAt
+    },
+    advanceAppliedCreatedAt: (createdAt) => advanceReadListApplied({ createdAt }),
+  }), [utils, advanceReadListApplied])
+
   const publishReadSyncNow = useCallback(() => {
     if (readSyncTimerRef.current) clearTimeout(readSyncTimerRef.current)
     readSyncTimerRef.current = null
@@ -628,8 +644,9 @@ export function FeedReader() {
       // cacheTime 0: the list can be megabytes and is only needed once.
       fetchLocal: async () => (await utils.feed.getReadGuidsForSync.fetch(undefined, { cacheTime: 0 })).guids,
       signEvent: (event) => readSyncDepsRef.current.signEventOrThrow(event),
+      ...readListAppliedServer(),
     })
-  }, [utils])
+  }, [utils, readListAppliedServer])
 
   // Pull again before publishing when the session's last pull failed, so a
   // publish never replaces a list this device has not applied. The pull
@@ -1360,6 +1377,7 @@ export function FeedReader() {
     void pullReadStatus({
       ...readSyncAuth(),
       ...readSyncServer(),
+      ...readListAppliedServer(),
       isCancelled: () => readSyncUnmountedRef.current || readSyncSessionRef.current !== session,
       session,
     }).then((pulled) => {
@@ -1429,6 +1447,7 @@ export function FeedReader() {
       npub: () => readSyncDepsRef.current.npub,
       session: readSyncSessionRef.current,
       signEvent: (event) => readSyncDepsRef.current.signEventOrThrow(event),
+      ...readListAppliedServer(),
     })
   }
 

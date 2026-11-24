@@ -9,6 +9,7 @@ import {
   MAX_READ_ITEMS,
   READ_SYNC_KEY,
   readStatusListSchema,
+  readStatusWatermarkTag,
   setReadSyncEnabled,
   type ReadStatusFetchResult,
 } from './nostr-sync'
@@ -32,7 +33,9 @@ import {
 } from './read-sync'
 
 const NPUB = 'npub1test'
-const WATERMARK = APPLIED_CREATEDAT_PREFIX + READ_STATUS_D_TAG
+const WATERMARK = APPLIED_CREATEDAT_PREFIX + readStatusWatermarkTag(NPUB)
+// The unkeyed watermark older builds kept, shared by every account here.
+const LEGACY_WATERMARK = APPLIED_CREATEDAT_PREFIX + READ_STATUS_D_TAG
 
 function fakeStorage() {
   const data = new Map<string, string>()
@@ -204,6 +207,18 @@ const ok = (createdAt = 200) =>
   })
 const signEvent = vi.fn(async (event: UnsignedEvent) => event as Event)
 
+// The applied created_at the server keeps for the account, raised only.
+function fakeApplied(initial: number | null = null) {
+  const state = {
+    value: initial,
+    getAppliedCreatedAt: vi.fn(async () => state.value),
+    advanceAppliedCreatedAt: vi.fn(async (createdAt: number) => {
+      if (state.value == null || createdAt > state.value) state.value = createdAt
+    }),
+  }
+  return state
+}
+
 function pulledSession(remote: string[] | null = null) {
   return { ...newReadSyncSession(NPUB), pulled: true, remote }
 }
@@ -218,6 +233,7 @@ describe('pullReadStatus', () => {
     onApplied: vi.fn(),
     getUncovered: vi.fn(async () => ({ feedIds: [] as string[], more: false })),
     markApplied: vi.fn(async () => {}),
+    ...fakeApplied(),
   })
 
   it('does nothing when the setting is off or the user cannot sign', async () => {
@@ -355,7 +371,7 @@ describe('pullReadStatus', () => {
   // records [], and the older pulled list must not replace it.
   async function withdrawMidPull(session: ReturnType<typeof newReadSyncSession>) {
     setReadSyncEnabled(false)
-    await withdrawReadStatus({ canSign: () => true, npub: () => NPUB, session, signEvent, publish: ok(300) })
+    await withdrawReadStatus({ canSign: () => true, npub: () => NPUB, session, signEvent, publish: ok(300), ...fakeApplied() })
     setReadSyncEnabled(true)
   }
 
@@ -424,7 +440,7 @@ describe('pullReadStatus', () => {
 })
 
 describe('publishReadStatusIfChanged', () => {
-  const opts = (session = pulledSession()) => ({ canSign: () => true, npub: () => NPUB, session, signEvent })
+  const opts = (session = pulledSession()) => ({ canSign: () => true, npub: () => NPUB, session, signEvent, ...fakeApplied() })
 
   it('does nothing when the setting is off, the user cannot sign or the account changed', async () => {
     const fetchLocal = vi.fn(async () => ['a'])
@@ -659,6 +675,7 @@ function fakeServer(subscribed: string[], appliedAlready: string[] = []) {
       for (const feedId of feedIds) if (server.subscribed.includes(feedId)) applied.add(feedId)
     }),
     onApplied: vi.fn(),
+    ...fakeApplied(),
   }
   return server
 }
@@ -833,7 +850,7 @@ describe('coverNewFeedsWithReadList', () => {
 })
 
 describe('withdrawReadStatus', () => {
-  const opts = (session = pulledSession(['a'])) => ({ canSign: () => true, npub: () => NPUB, session, signEvent })
+  const opts = (session = pulledSession(['a'])) => ({ canSign: () => true, npub: () => NPUB, session, signEvent, ...fakeApplied() })
 
   it('publishes an empty list once the setting is off', async () => {
     const session = pulledSession(['a'])
@@ -894,5 +911,194 @@ describe('withdrawReadStatus', () => {
     setReadSyncEnabled(false)
     await withdrawReadStatus({ ...opts(session), publish })
     expect(publish).toHaveBeenLastCalledWith([], signEvent, 401)
+  })
+})
+
+describe('the applied created_at kept on the server', () => {
+  const event = (itemGuids: string[], createdAt: number, complete = true) =>
+    vi.fn(async (): Promise<ReadStatusFetchResult> => ({ success: true, found: true, data: { itemGuids }, createdAt, fresh: true, complete }))
+  const auth = { canSign: () => true, npub: () => NPUB }
+
+  it('does not apply in a new browser an event another browser applied, but still covers new feeds with it', async () => {
+    setReadSyncEnabled(true)
+    for (const recorded of [100, 150]) {
+      const server = { ...fakeServer(['old', 'new'], ['old']), ...fakeApplied(recorded) }
+      const session = newReadSyncSession(NPUB)
+      storage.data.delete(WATERMARK)
+      await expect(pullReadStatus({ ...auth, ...server, session, fetchRemote: event(['a'], 100) })).resolves.toBe(true)
+      expect(server.markRead).not.toHaveBeenCalled()
+      expect(server.onApplied).not.toHaveBeenCalled()
+      expect(server.advanceAppliedCreatedAt).not.toHaveBeenCalled()
+      expect(session).toMatchObject({ pulled: true, remote: ['a'] })
+      expect(storage.data.get(WATERMARK)).toBe('100')
+
+      await expect(coverNewFeedsWithReadList({ ...auth, ...server, session })).resolves.toBeNull()
+      expect(server.markRead).toHaveBeenCalledWith(['a'], ['new'])
+      expect([...server.applied].sort()).toEqual(['new', 'old'])
+    }
+  })
+
+  it('applies a newer event and records it on the server', async () => {
+    setReadSyncEnabled(true)
+    for (const recorded of [null, 99]) {
+      const applied = fakeApplied(recorded)
+      const server = { ...fakeServer([]), ...applied }
+      storage.data.delete(WATERMARK)
+      await expect(pullReadStatus({ ...auth, ...server, session: newReadSyncSession(NPUB), fetchRemote: event(['a'], 100) })).resolves.toBe(true)
+      expect(server.markRead).toHaveBeenCalledWith(['a'])
+      expect(applied.advanceAppliedCreatedAt).toHaveBeenCalledWith(100)
+      expect(applied.value).toBe(100)
+      expect(storage.data.get(WATERMARK)).toBe('100')
+    }
+  })
+
+  it('skips the server for an event this browser already applied', async () => {
+    setReadSyncEnabled(true)
+    storage.data.set(WATERMARK, '100')
+    const server = { ...fakeServer([]), ...fakeApplied() }
+    await pullReadStatus({ ...auth, ...server, session: newReadSyncSession(NPUB), fetchRemote: event(['a'], 100) })
+    expect(server.getAppliedCreatedAt).not.toHaveBeenCalled()
+    expect(server.markRead).not.toHaveBeenCalled()
+  })
+
+  it('does not apply when the server cannot say, and keeps publishing locked so the pull is retried', async () => {
+    setReadSyncEnabled(true)
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const server = { ...fakeServer([]), ...fakeApplied() }
+    server.getAppliedCreatedAt.mockRejectedValueOnce(new Error('429'))
+    const session = newReadSyncSession(NPUB)
+    await expect(pullReadStatus({ ...auth, ...server, session, fetchRemote: event(['a'], 100) })).resolves.toBe(false)
+    expect(server.markRead).not.toHaveBeenCalled()
+    expect(storage.data.has(WATERMARK)).toBe(false)
+    expect(session).toMatchObject({ pulled: false, remote: ['a'] })
+
+    // The retry applies it.
+    await expect(pullReadStatus({ ...auth, ...server, session, fetchRemote: event(['a'], 100) })).resolves.toBe(true)
+    expect(server.markRead).toHaveBeenCalledWith(['a'])
+  })
+
+  it('still finishes the pull when recording the applied event fails', async () => {
+    setReadSyncEnabled(true)
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const applied = fakeApplied()
+    const server = { ...fakeServer([]), ...applied }
+    server.advanceAppliedCreatedAt.mockRejectedValueOnce(new Error('429'))
+    await expect(pullReadStatus({ ...auth, ...server, session: newReadSyncSession(NPUB), fetchRemote: event(['a'], 100) })).resolves.toBe(true)
+    expect(server.markRead).toHaveBeenCalledWith(['a'])
+    expect(storage.data.get(WATERMARK)).toBe('100')
+    expect(applied.value).toBeNull()
+
+    // A later session in this browser records it without applying it again.
+    await expect(pullReadStatus({ ...auth, ...server, session: newReadSyncSession(NPUB), fetchRemote: event(['a'], 100) })).resolves.toBe(true)
+    expect(server.markRead).toHaveBeenCalledOnce()
+    expect(applied.advanceAppliedCreatedAt).toHaveBeenCalledTimes(2)
+    expect(applied.advanceAppliedCreatedAt).toHaveBeenLastCalledWith(100)
+    expect(applied.value).toBe(100)
+  })
+
+  it('neither applies nor records an event dated far in the future', async () => {
+    setReadSyncEnabled(true)
+    const future = Math.floor(Date.now() / 1000) + 3600
+    const server = { ...fakeServer([]), ...fakeApplied() }
+    const session = newReadSyncSession(NPUB)
+    await expect(pullReadStatus({ ...auth, ...server, session, fetchRemote: event(['a'], future) })).resolves.toBe(true)
+    expect(server.markRead).not.toHaveBeenCalled()
+    expect(server.getAppliedCreatedAt).not.toHaveBeenCalled()
+    expect(server.advanceAppliedCreatedAt).not.toHaveBeenCalled()
+    expect(storage.data.has(WATERMARK)).toBe(false)
+    expect(session).toMatchObject({ pulled: true, remote: ['a'] })
+
+    // A publish after it goes later still, and is not recorded either.
+    const publish = ok(future + 1)
+    await publishReadStatusIfChanged({ ...auth, ...server, session, signEvent, publish, fetchLocal: async () => ['b'] })
+    expect(publish).toHaveBeenCalledOnce()
+    expect(server.advanceAppliedCreatedAt).not.toHaveBeenCalled()
+  })
+
+  it('records publishes and withdrawals, only for the account still signed in', async () => {
+    setReadSyncEnabled(true)
+    const server = fakeApplied(100)
+    const session = pulledSession()
+    await publishReadStatusIfChanged({ ...auth, ...server, session, signEvent, publish: ok(200), fetchLocal: async () => ['a'] })
+    expect(server.value).toBe(200)
+
+    setReadSyncEnabled(false)
+    await withdrawReadStatus({ ...auth, ...server, session, signEvent, publish: ok(300) })
+    expect(server.value).toBe(300)
+
+    setReadSyncEnabled(true)
+    let npub = NPUB
+    const publish = vi.fn(async (_guids: string[], sign: (event: UnsignedEvent) => Promise<Event>) => {
+      await sign({} as UnsignedEvent)
+      npub = 'npub1other'
+      return { success: true, createdAt: 400 }
+    })
+    await publishReadStatusIfChanged({ ...auth, ...server, npub: () => npub, session, signEvent, publish, fetchLocal: async () => ['b'] })
+    expect(publish).toHaveBeenCalledOnce()
+    expect(server.advanceAppliedCreatedAt).toHaveBeenCalledTimes(2)
+    expect(server.value).toBe(300)
+  })
+
+  it('never lowers what the server holds when an older publish is recorded late', async () => {
+    setReadSyncEnabled(true)
+    const server = fakeApplied(500)
+    await publishReadStatusIfChanged({ ...auth, ...server, session: pulledSession(), signEvent, publish: ok(200), fetchLocal: async () => ['a'] })
+    expect(server.advanceAppliedCreatedAt).toHaveBeenCalledWith(200)
+    expect(server.value).toBe(500)
+  })
+
+  it("applies an account's list that another account's watermark here would have hidden, before recording publishes", async () => {
+    setReadSyncEnabled(true)
+    // Account A applied an event at 500 in this browser, under its own key and,
+    // in an older build, under the shared one.
+    storage.data.set(APPLIED_CREATEDAT_PREFIX + readStatusWatermarkTag('npub1a'), '500')
+    storage.data.set(LEGACY_WATERMARK, '500')
+    const applied = fakeApplied()
+    const server = { ...fakeServer([]), ...applied }
+    const session = newReadSyncSession(NPUB)
+    await expect(pullReadStatus({ ...auth, ...server, session, fetchRemote: event(['b-desktop'], 400) })).resolves.toBe(true)
+    expect(server.markRead).toHaveBeenCalledWith(['b-desktop'])
+    expect(applied.value).toBe(400)
+    expect(storage.data.get(WATERMARK)).toBe('400')
+    expect(storage.data.get(LEGACY_WATERMARK)).toBe('500')
+
+    // The publish after it is recorded only once the list it builds on is applied.
+    await publishReadStatusIfChanged({ ...auth, ...server, session, signEvent, publish: ok(401), fetchLocal: async () => ['b-web'] })
+    expect(applied.value).toBe(401)
+    expect(server.markRead).toHaveBeenCalledTimes(1)
+  })
+
+  it('neither applies nor re-records an event the server has when only the shared watermark here covers it', async () => {
+    setReadSyncEnabled(true)
+    storage.data.set(LEGACY_WATERMARK, '500')
+    const server = { ...fakeServer([]), ...fakeApplied(400) }
+    await expect(pullReadStatus({ ...auth, ...server, session: newReadSyncSession(NPUB), fetchRemote: event(['a'], 400) })).resolves.toBe(true)
+    expect(server.getAppliedCreatedAt).toHaveBeenCalledOnce()
+    expect(server.markRead).not.toHaveBeenCalled()
+    expect(server.advanceAppliedCreatedAt).not.toHaveBeenCalled()
+    expect(storage.data.get(WATERMARK)).toBe('400')
+  })
+
+  it('tells the server about an event this browser applied before the server kept a record, once per session', async () => {
+    setReadSyncEnabled(true)
+    storage.data.set(WATERMARK, '100')
+    const applied = fakeApplied()
+    const server = { ...fakeServer([]), ...applied }
+    const session = newReadSyncSession(NPUB)
+    for (let pull = 0; pull < 2; pull++) {
+      await expect(pullReadStatus({ ...auth, ...server, session, fetchRemote: event(['a'], 100) })).resolves.toBe(true)
+    }
+    expect(server.markRead).not.toHaveBeenCalled()
+    expect(server.getAppliedCreatedAt).not.toHaveBeenCalled()
+    expect(applied.advanceAppliedCreatedAt).toHaveBeenCalledOnce()
+    expect(applied.advanceAppliedCreatedAt).toHaveBeenCalledWith(100)
+    expect(applied.value).toBe(100)
+    expect(session).toMatchObject({ pulled: true, remote: ['a'] })
+
+    // A new browser of the account then leaves it alone.
+    storage.data.delete(WATERMARK)
+    const other = { ...fakeServer([]), ...applied }
+    await pullReadStatus({ ...auth, ...other, session: newReadSyncSession(NPUB), fetchRemote: event(['a'], 100) })
+    expect(other.markRead).not.toHaveBeenCalled()
   })
 })
