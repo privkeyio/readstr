@@ -86,13 +86,24 @@ Dialog {
         border.width: 1
     }
 
-    header: Label {
-        text: dialog.title
-        textFormat: Text.PlainText
-        elide: Text.ElideRight
-        padding: 24
-        bottomPadding: 0
-        font.pixelSize: 20
+    // The title sits in an Item whose implicitHeight reads the label's at
+    // once. A bare Label works out its implicit size only when first resized,
+    // and when that happens while the dialog is setting its implicitHeight
+    // (a window resize rewrapping the content) the binding loops.
+    header: Item {
+        implicitWidth: heading.implicitWidth
+        implicitHeight: heading.implicitHeight
+
+        Label {
+            id: heading
+            width: parent.width
+            text: dialog.title
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+            padding: 24
+            bottomPadding: 0
+            font.pixelSize: 20
+        }
     }
 
     onOpened: {

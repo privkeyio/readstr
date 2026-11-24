@@ -13,6 +13,19 @@ Rectangle {
     readonly property bool menuOpen: appMenu.visible || feedMenu.visible
     readonly property color errorColor: Material.color(Material.Red, Material.theme === Material.Light ? Material.Shade700 : Material.Shade300)
 
+    // Qt Quick Controls menus take their width from the background alone and
+    // elide longer labels, so each menu is as wide as its widest item, up to
+    // half the window, which leaves room for the longest translations.
+    function menuWidth(menu) {
+        let widest = 0
+        for (let i = 0; i < menu.count; ++i) {
+            const item = menu.itemAt(i)
+            if (item)
+                widest = Math.max(widest, item.implicitWidth)
+        }
+        return Math.max(220, Math.min(widest + menu.leftPadding + menu.rightPadding, pane.Window.width / 2))
+    }
+
     signal activated()
     signal addRequested()
     signal unsubscribeRequested(var feedId, string feedTitle)
@@ -62,9 +75,10 @@ Rectangle {
 
                 Menu {
                     id: appMenu
+                    objectName: "appMenu"
+                    implicitWidth: pane.menuWidth(appMenu)
                     Material.roundedScale: theme.radius
                     background: Rectangle {
-                        implicitWidth: 220
                         radius: Math.min(4, theme.radius)
                         color: Qt.tint(theme.background, Qt.alpha(theme.foreground, 0.08))
                         border.color: Qt.alpha(theme.foreground, 0.15)
@@ -267,9 +281,10 @@ Rectangle {
         property var feedId: 0
         property string feedTitle: ""
         property bool nostr: false
+        objectName: "feedMenu"
+        implicitWidth: pane.menuWidth(feedMenu)
         Material.roundedScale: theme.radius
         background: Rectangle {
-            implicitWidth: 220
             radius: Math.min(4, theme.radius)
             color: Qt.tint(theme.background, Qt.alpha(theme.foreground, 0.08))
             border.color: Qt.alpha(theme.foreground, 0.15)

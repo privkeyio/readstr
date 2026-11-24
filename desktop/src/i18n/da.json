@@ -242,5 +242,6 @@
   "The signer sent back another event than the one asked for": "Signeren sendte en anden begivenhed tilbage end den, der blev bedt om",
   "The signer signed with another key than the one for %1": "Signeren signerede med en anden nøgle end den til %1",
   "The signer's signature does not check out": "Signerens signatur holder ikke",
-  "This event is too large for a remote signer to sign": "Begivenheden er for stor til, at en fjernsigner kan signere den"
+  "This event is too large for a remote signer to sign": "Begivenheden er for stor til, at en fjernsigner kan signere den",
+  "Copy the selected text": "Kopiér den markerede tekst"
 }

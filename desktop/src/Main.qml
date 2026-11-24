@@ -47,6 +47,7 @@ ApplicationWindow {
         { keys: "Ctrl+Shift+A", action: qsTr("Mark everything in the view read") },
         { keys: "Ctrl+O", action: qsTr("Import OPML") },
         { keys: "Ctrl+Shift+E", action: qsTr("Export OPML") },
+        { keys: "Ctrl+C", action: qsTr("Copy the selected text") },
         { keys: "Delete", action: qsTr("Unsubscribe from the selected feed") },
         { keys: "?", action: qsTr("Show or hide the shortcuts") },
         { keys: "Esc", action: qsTr("Close the shortcuts") },
@@ -88,7 +89,7 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+Shift+E"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.exportOpml() }
     // The article never takes the keyboard, so its selection is copied
     // from here, without the zero-width spaces that break long words.
-    Shortcut { sequence: StandardKey.Copy; context: Qt.ApplicationShortcut; enabled: win.keysFree && reader.selectedText !== ""; onActivated: backend.copyText(reader.selectedText) }
+    Shortcut { sequences: [StandardKey.Copy]; context: Qt.ApplicationShortcut; enabled: win.keysFree && reader.selectedText !== ""; onActivated: backend.copyText(reader.selectedText) }
     Shortcut { sequence: "Delete"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: win.askUnsubscribe(backend.selectedFeedId, backend.sourceTitle) }
 
     // Right-to-left languages mirror the window; the Translator sets the

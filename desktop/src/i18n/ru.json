@@ -260,5 +260,6 @@
   "The signer sent back another event than the one asked for": "Подписант вернул не то событие, которое было запрошено",
   "The signer signed with another key than the one for %1": "Подписант подписал другим ключом, а не ключом %1",
   "The signer's signature does not check out": "Подпись подписанта не проходит проверку",
-  "This event is too large for a remote signer to sign": "Это событие слишком велико для подписи удалённым подписантом"
+  "This event is too large for a remote signer to sign": "Это событие слишком велико для подписи удалённым подписантом",
+  "Copy the selected text": "Копировать выделенный текст"
 }
