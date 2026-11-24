@@ -1,9 +1,11 @@
 #pragma once
 
 #include <QByteArray>
+#include <QHostAddress>
 #include <QList>
 #include <QNetworkAccessManager>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QUrl>
 #include <functional>
@@ -56,11 +58,30 @@ public:
         // queues the rest, with their deadlines already running, so this
         // stays at six.
         int maxConcurrent = 6;
-        // Refuses this machine and the local network (isLocalHost and
-        // isHomeNetworkName), on the first request and on every redirect,
-        // for URLs that come from someone else, such as a video's thumbnail.
-        // Feeds the user picked may live there, so it is off for them. A
-        // public name that resolves to a local address is not caught.
+        // Refuses this machine and the local network, on the first request
+        // and on every redirect, for URLs that come from someone else, such
+        // as a video's thumbnail or an article's image. Feeds, relays and
+        // sync may live there, so it is off for them, and they are fetched
+        // as before.
+        //
+        // A host is refused by its name or literal address (isLocalHost and
+        // isHomeNetworkName), and a name also by what it resolves to: every
+        // address the lookup returns must be public, or the request is
+        // refused before anything is sent. The request then goes to one of
+        // those checked addresses itself, as an IP-literal URL carrying the
+        // name in its Host header, and https verifies the certificate (and
+        // sends SNI) for the name, so a second answer to the same name
+        // (DNS rebinding) cannot move it elsewhere. On a direct connection
+        // Qt does no lookup of its own. Through a proxy the user configured
+        // (the system's, which Qt follows), the proxy is asked for the
+        // checked address, not the name, but connects on our behalf from its
+        // own network, which decides what that address reaches; the proxy is
+        // the user's choice and is not bypassed. A pinned request goes over
+        // HTTP/1.1, since Qt's HTTP/2 takes its :authority from the URL
+        // rather than the Host header, and its redirects are followed here,
+        // each hop looked up, checked and pinned the same way. It goes to
+        // that one address (IPv4 when there is one): when it cannot be
+        // reached the others are not tried.
         bool publicHostsOnly = false;
         // Refuses a port other than the scheme's own (80 for http, 443 for
         // https), on the first request and on every redirect, so a URL from
@@ -77,6 +98,7 @@ public:
     };
 
     explicit Fetcher(QObject *parent = nullptr);
+    ~Fetcher() override;
 
     void setLimits(const Limits &limits) { m_limits = limits; }
     Limits limits() const { return m_limits; }
@@ -115,11 +137,14 @@ public:
     static QByteArray imageUserAgent();
     // This machine and the local network, by name or literal address:
     // localhost, .local, .internal, a name without a dot, loopback,
-    // unspecified, private, link-local, unique-local, CGNAT, benchmarking,
-    // reserved, broadcast, and multicast addresses, and an IPv6 address that
-    // carries one of these IPv4 addresses (mapped, compatible, NAT64, 6to4),
+    // unspecified, private, link-local, unique-local, CGNAT, IETF protocol
+    // assignment (192.0.0.0/24), benchmarking, documentation, reserved,
+    // broadcast, and multicast addresses, and an IPv6 address that carries
+    // one of these IPv4 addresses (mapped, compatible, SIIT, NAT64, 6to4),
     // as well as Teredo (2001::/32) and local-use NAT64 (64:ff9b:1::/48),
-    // whose IPv4 address may be anything the network chose.
+    // whose IPv4 address may be anything the network chose. The
+    // documentation ranges name no real host, so refusing them costs no
+    // feed, relay, or image anyone can actually reach.
     static bool isLocalHost(const QString &host);
     // The names home routers hand out (.lan, .home, home.arpa). They are
     // refused only under Limits::publicHostsOnly, for URLs someone else
@@ -128,19 +153,46 @@ public:
     // relay on one.
     static bool isHomeNetworkName(const QString &host);
 
+#ifdef READSTR_TESTS
+    // Only in the test build (tests/readstr_tests.pro defines
+    // READSTR_TESTS), so the app always looks names up with QHostInfo and
+    // takes no local address for a public one.
+    //
+    // Looks a name up for publicHostsOnly: calls `answer` once with the
+    // name's addresses or an error. It must call it on the thread of the
+    // Fetcher that asked, the thread `resolver` itself is called on, since
+    // the answer checks there whether that Fetcher still exists; it may
+    // call it before returning or later.
+    using Answer = std::function<void(const QList<QHostAddress> &addresses, const QString &error)>;
+    using Resolver = std::function<void(const QString &host, const Answer &answer)>;
+    // Looks names up with `resolver` instead of the system's resolver
+    // (QHostInfo), and takes `treatedAsPublic` for public addresses, so a
+    // test can pin a name to its server on 127.0.0.1. An empty resolver
+    // restores the system's. Set on the GUI thread while no fetch is in
+    // flight.
+    static void setResolverForTests(Resolver resolver, const QList<QHostAddress> &treatedAsPublic = {});
+#endif
+
 private:
-    // Whether publicHostsOnly turns `host` away under `limits`.
-    static bool isRefusedPublicHost(const QString &host, const Limits &limits);
     struct Batch;
     // Issues requests while slots are free, a batch at a time in turn, so a
     // long refresh does not hold up the few requests of a subscription.
     void pump();
     void issue(const std::shared_ptr<Batch> &batch);
+    // `hops` is how many redirects publicHostsOnly has followed so far, and
+    // `budgetMs` what is left of limits.timeoutMs (all of it when negative).
     void fetchWithin(const FetchRequest &request, std::function<void(const FetchResult &)> done,
-                     const Limits &limits);
+                     const Limits &limits, int hops = 0, qint64 budgetMs = -1);
+    // Sends the request; under publicHostsOnly, to `pinned`, an address
+    // that `request`'s host was checked to resolve to.
+    void send(const FetchRequest &request, std::function<void(const FetchResult &)> done, const Limits &limits,
+              int hops, qint64 budgetMs, const QHostAddress &pinned);
 
     QNetworkAccessManager m_network;
     Limits m_limits;
     QList<std::shared_ptr<Batch>> m_waiting;
     int m_inFlight = 0;
+    // The ids of system lookups still running, given up when the Fetcher
+    // goes.
+    QSet<int> m_lookups;
 };
