@@ -12,6 +12,7 @@
 #include <optional>
 
 #include "feedparser.h"
+#include "keywordfilter.h"
 
 struct Feed {
     qint64 id = 0;
@@ -60,6 +61,8 @@ struct Article {
     // The feed's URL, an npub for a Nostr author, so its title can be shown
     // as Nip19::shortNpub shows it.
     QString feedUrl;
+    // A keyword filter rule highlights it.
+    bool highlighted = false;
 };
 
 // The npub the library syncs with. Empty when none is set.
@@ -171,10 +174,16 @@ public:
     bool recordFetch(qint64 id, const QString &etag, const QString &lastModified, const QString &error);
     // Adds new items and refreshes existing ones (same guid in the same feed)
     // without touching their read and starred flags. A new one is read when
-    // its guid is among the last synced read GUIDs. Returns how many are
-    // new, or -1 on failure.
-    int saveItems(qint64 feedId, const QList<ParsedItem> &items);
+    // its guid is among the last synced read GUIDs, or when a keyword filter
+    // rule marks it read, as though the user had: `markedRead` gets how many
+    // a rule marked that were not read already, and the read status is
+    // marked to publish for an account that publishes reads. The filter
+    // rules hide and highlight new and changed items too. Returns how many
+    // are new and not hidden by a rule, or -1 on failure.
+    int saveItems(qint64 feedId, const QList<ParsedItem> &items, int *markedRead = nullptr);
 
+    // Leaves out the articles a keyword filter rule hides, as counts(),
+    // feeds()' counts, and markRead() do; article() still finds them.
     QList<Article> articles(const ArticleFilter &filter);
     std::optional<Article> article(qint64 id);
     std::optional<LibraryCounts> counts();
@@ -229,6 +238,45 @@ public:
     // part way rolls the delete back with the rest.
     bool replaceSavedViews(const QList<SavedView> &views);
 
+    // The keyword filter rules, in order. They stay in this library and
+    // are never published. An entry that is not a rule this version would
+    // save, or one past KeywordFilter::maxRules, is left out and described
+    // in `dropped`; null on failure.
+    std::optional<QList<KeywordFilter::Rule>> filterRules(QStringList *dropped = nullptr);
+    // Keeps `rules` in place of the ones kept, then applyFilterRules().
+    // Refuses an invalid rule or more than maxRules. `saved` says whether
+    // the rules were kept, so a failure can be told from one to apply them.
+    bool setFilterRules(const QList<KeywordFilter::Rule> &rules, const std::function<bool()> &superseded = {},
+                        bool *saved = nullptr);
+    // Works out again which articles the kept rules hide, highlight, or
+    // mark read (which only marks articles still to come, or
+    // markReadByFilter()), unless the flags are already theirs. Items are
+    // read and evaluated with no transaction open and written in short
+    // batches, so other connections write meanwhile; an item saved since it
+    // was read keeps the flags its save gave it. Stops early, leaving the
+    // rest to whoever comes next, when `superseded` returns true (checked
+    // between batches) or when the rules were saved again meanwhile. `ran` says
+    // whether any flag may have changed.
+    bool applyFilterRules(const std::function<bool()> &superseded = {}, bool *ran = nullptr);
+    // Marks read the unread articles the rule `ruleId` marks read (a hide
+    // wins), as the user would, reading the rules and the text as they are
+    // then rather than the flags. Like applyFilterRules(), it reads and
+    // works out with no transaction open and writes in short batches, each
+    // only while the rules are the ones it started with and to articles
+    // still unread and as read; it stops when they are not, or when
+    // `stopped` returns true. Returns how many changed, or -1; `marked`
+    // says how many did either way.
+    int markReadByFilter(const QString &ruleId, const std::function<bool()> &stopped = {}, int *marked = nullptr);
+#ifdef READSTR_TESTS
+    // Only in the test build: called by applyFilterRules() between two
+    // batches, with what it checks for being superseded, on its thread.
+    static inline std::function<void(const std::function<bool()> &stopped)> filterBatchHook;
+    // Only in the test build: called by applyFilterRules() and
+    // markReadByFilter() once a batch is read and worked out, before it is
+    // written, on their thread.
+    static inline std::function<void()> filterWriteHook;
+#endif
+
     // Runs `work` in one transaction that commits when it returns true and
     // rolls back when it returns false, keeping its lastError(), or throws,
     // passing the exception on. `work` must
@@ -263,12 +311,17 @@ private:
     bool clearSyncState();
     // Puts the item `id` in the search index, or puts it there again in
     // place of what it had, with `insert` prepared by prepareIndex().
-    bool indexItem(QSqlQuery &insert, qint64 id, const QString &title, const QString &author, const QString &summary,
-                   const QString &content, const QString &address, const QString &url);
+    bool indexItem(QSqlQuery &insert, qint64 id, const QString &title, const QString &author, const QString &body);
     bool prepareIndex(QSqlQuery &insert);
     bool backfillSearchIndex();
+    // The rules as saved, compiled once for as long as they stay the same.
+    const KeywordFilter::Rules *compiledFilterRules();
+    // The filter rules as kept, one JSON text each, in order.
+    QStringList filterSource(bool *ok);
 
     QString m_connection;
     QSqlDatabase m_db;
     QString m_error;
+    QStringList m_filterSource;
+    KeywordFilter::Rules m_filterRules;
 };

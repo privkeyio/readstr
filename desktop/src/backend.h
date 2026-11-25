@@ -140,6 +140,15 @@ class Backend : public QObject {
     Q_PROPERTY(QVariant publishedAt READ publishedAt NOTIFY publishChanged)
     Q_PROPERTY(QString publishError READ publishError NOTIFY publishChanged)
 
+    // The keyword filter rules, in order, each a map of id, enabled,
+    // target, type, pattern, caseSensitive, and action, named as in the web
+    // app; and why some kept in the library could not be used and are left
+    // out, empty when none was. They never leave this machine.
+    Q_PROPERTY(QVariantList filterRules READ filterRules NOTIFY filtersChanged)
+    Q_PROPERTY(QString filterError READ filterError NOTIFY filtersChanged)
+    Q_PROPERTY(int maxFilterRules READ maxFilterRules CONSTANT)
+    Q_PROPERTY(int maxFilterPatternLength READ maxFilterPatternLength CONSTANT)
+
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool statusError READ statusError NOTIFY statusChanged)
 
@@ -211,6 +220,11 @@ public:
     bool publishing() const { return m_publishing; }
     QVariant publishedAt() const;
     QString publishError() const { return m_publishError; }
+
+    QVariantList filterRules() const;
+    QString filterError() const { return m_filterError; }
+    static int maxFilterRules() { return KeywordFilter::maxRules; }
+    static int maxFilterPatternLength() { return KeywordFilter::maxPatternLength; }
 
     QString status() const { return m_status; }
     bool statusError() const { return m_statusError; }
@@ -287,6 +301,22 @@ public:
     // separators, frame markers), as plain text without zero-width spaces;
     // ones the feed had itself go too.
     static QString copyableText(const QString &text);
+    // What is wrong with a rule's pattern for the match type `type`, for
+    // the rules editor to show, or empty when it can be used.
+    Q_INVOKABLE QString filterProblem(const QString &type, const QString &pattern) const;
+    // Adds `rule` (a map as filterRules has them, its id aside) at the end,
+    // for `index` -1, or puts it in place of the rule at `index`. False,
+    // changing nothing, when filterProblem() finds fault with it or the
+    // list is full. Each change is saved at once, and the lists and counts
+    // follow once the library has applied it; none marks an article read
+    // that is already there, which markFilterMatchesRead() does when asked.
+    Q_INVOKABLE bool saveFilterRule(int index, const QVariantMap &rule);
+    Q_INVOKABLE void setFilterRuleEnabled(int index, bool enabled);
+    Q_INVOKABLE void moveFilterRule(int index, int step);
+    Q_INVOKABLE void removeFilterRule(int index);
+    // Marks read the unread articles already in the library that the
+    // mark-read rule `ruleId` matches, as the user would.
+    Q_INVOKABLE void markFilterMatchesRead(const QString &ruleId);
     // Refreshes now and then every autoRefreshMinutes, give or take 10%,
     // for as long as the window is open.
     Q_INVOKABLE void startAutoRefresh();
@@ -352,6 +382,7 @@ signals:
     void signingChanged();
     void remoteSignerChanged();
     void publishChanged();
+    void filtersChanged();
     void statusChanged();
 
 private:
@@ -388,6 +419,9 @@ private:
     void showFlags(qint64 id, bool read, bool starred);
 
     void setStatus(const QString &message, bool error = false);
+    void loadFilterRules();
+    // Saves m_filterRules, then shows the library as they leave it.
+    void saveFilterRules();
     void reloadLibrary();
     void reloadCounts();
     void loadArticles();
@@ -561,6 +595,8 @@ private:
     int m_refreshTotal = 0;
     int m_refreshFailed = 0;
     int m_refreshAdded = 0;
+    // New articles of this refresh a keyword filter rule marked read.
+    int m_refreshMarked = 0;
     QString m_firstFailure;
     // Ids are never reused, so a failed save for one of these is always a
     // refresh racing its unsubscribe, which is no news to anyone. A failed
@@ -669,6 +705,16 @@ private:
 
     bool m_adding = false;
     QString m_addError;
+
+    QList<KeywordFilter::Rule> m_filterRules;
+    QString m_filterError;
+    // Counts the saves of the rules, read on the worker to skip or stop one
+    // a newer save makes pointless.
+    std::shared_ptr<std::atomic<quint64>> m_filterGeneration = std::make_shared<std::atomic<quint64>>(0);
+    // Set as the window closes, so a pass over the library stops at its
+    // next batch instead of holding the window open; the next start
+    // finishes it.
+    std::shared_ptr<std::atomic<bool>> m_quitting = std::make_shared<std::atomic<bool>>(false);
 
     QString m_status;
     bool m_statusError = false;

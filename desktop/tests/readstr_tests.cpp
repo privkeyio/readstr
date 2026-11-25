@@ -25,6 +25,7 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QScopeGuard>
+#include <QSemaphore>
 #include <QSignalSpy>
 #include <QSslKey>
 #include <QSslServer>
@@ -59,6 +60,7 @@
 #include "feedparser.h"
 #include "fetcher.h"
 #include "keystore.h"
+#include "keywordfilter.h"
 #include "filepicker.h"
 #include "library.h"
 #include "localnetwork.h"
@@ -834,12 +836,12 @@ private slots:
         {
             Store store;
             QVERIFY2(store.open(path), qPrintable(store.lastError()));
-            QCOMPARE(store.schemaVersion(), 7);
+            QCOMPARE(store.schemaVersion(), 9);
             QVERIFY(store.addFeed("https://a.example.com/feed", "A"));
         }
         Store again;
         QVERIFY2(again.open(path), qPrintable(again.lastError()));
-        QCOMPARE(again.schemaVersion(), 7);
+        QCOMPARE(again.schemaVersion(), 9);
         QCOMPARE(again.feeds().size(), 1);
 
         QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "raw");
@@ -920,7 +922,8 @@ private slots:
             QVERIFY(raw.open());
             QSqlQuery query(raw);
             for (const char *statement :
-                 {"DROP TRIGGER items_fts_delete", "DROP TABLE items_fts",
+                 {"DROP TRIGGER items_fts_delete", "DROP TABLE items_fts", "DROP TABLE filter_rules",
+                  "DROP TABLE filter_state", "ALTER TABLE items DROP COLUMN filter_flags",
                   "INSERT INTO items (feed_id, guid, title, content, created_at, address)"
                   " VALUES (1, 'nostr', 'Long form', 'See [the page](https://hidden.example.com/needle) on *bees*', 2,"
                   " '30023:abc:d')",
@@ -933,7 +936,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 7);
+        QCOMPARE(store.schemaVersion(), 9);
         QCOMPARE(searchTitles(store, "engine"), QStringList{"Kept title"});
         QCOMPARE(searchTitles(store, "lovelace"), QStringList{"Kept title"});
         QCOMPARE(searchTitles(store, "summary"), QStringList{"Kept title"});
@@ -1661,7 +1664,7 @@ private slots:
             for (int i = 0; i < 8; ++i)
                 threads << QThread::create([&failures, path] {
                     Store store;
-                    if (!store.open(path) || store.schemaVersion() != 7) {
+                    if (!store.open(path) || store.schemaVersion() != 9) {
                         qWarning("%s", qPrintable(store.lastError()));
                         ++failures;
                     }
@@ -1716,7 +1719,7 @@ private slots:
 
         Store writer;
         QVERIFY2(writer.open(path), qPrintable(writer.lastError()));
-        QCOMPARE(writer.schemaVersion(), 7);
+        QCOMPARE(writer.schemaVersion(), 9);
         QCOMPARE(writer.articles({0, false, false, 0}).size(), workers * perRound);
 
         // A reader in the middle of a transaction neither blocks a writer
@@ -3025,6 +3028,1425 @@ private slots:
             }
             QVERIFY2(sawMarkAll, qPrintable(markAll));
         }
+    }
+
+    // Keyword filters
+
+    // The cases of the web app's keyword-filter.test.ts, with order as the
+    // rules' place in the list and a highlight in the theme's accent.
+    void keywordFilterEvaluatesRulesAsTheWebApp()
+    {
+        using namespace KeywordFilter;
+        const auto evaluate = [](const QList<Rule> &rules, const QString &title, const QString &content = {},
+                                 const QString &author = {}) { return Rules(rules).evaluate(title, content, author); };
+
+        const Rule contains = filterRule("cat", Target::Title);
+        QVERIFY(evaluate({contains}, "category theory").hidden);
+
+        const Rule word = filterRule("cat", Target::Title, Type::Word);
+        QVERIFY(!evaluate({word}, "category theory").hidden);
+        QVERIFY(evaluate({word}, "a cat sat").hidden);
+
+        Rule sensitive = filterRule("Cat", Target::Title);
+        sensitive.caseSensitive = true;
+        QVERIFY(!evaluate({sensitive}, "a cat").hidden);
+        QVERIFY(evaluate({sensitive}, "a Cat").hidden);
+        QVERIFY(evaluate({filterRule("Cat", Target::Title)}, "a cat").hidden);
+
+        QVERIFY(evaluate({filterRule("spam", Target::Title)}, "spam", "clean", "bob").hidden);
+        const Rule author = filterRule("bob", Target::Author);
+        QVERIFY(evaluate({author}, "x", "y", "bob").hidden);
+        QVERIFY(!evaluate({author}, "bob", "y", "z").hidden);
+        QVERIFY(evaluate({filterRule("clean", Target::Any)}, "x", "clean stuff", "z").hidden);
+
+        // The first hide wins and ends the evaluation.
+        const Rule highlight = filterRule("x", Target::Title, Type::Contains, Action::Highlight);
+        const Rule hide = filterRule("x", Target::Title);
+        Outcome out = evaluate({highlight, hide}, "x");
+        QVERIFY(out.hidden);
+        QVERIFY(!out.highlight);
+        QCOMPARE(out.flags(), int(Outcome::Hidden));
+        out = evaluate({highlight, highlight}, "x");
+        QVERIFY(!out.hidden);
+        QVERIFY(out.highlight);
+        const Rule markRead = filterRule("x", Target::Title, Type::Contains, Action::MarkRead);
+        out = evaluate({markRead, highlight}, "x");
+        QVERIFY(out.markRead && out.highlight && !out.hidden);
+        QVERIFY(!evaluate({hide, markRead}, "x").markRead);
+
+        Rule disabled = hide;
+        disabled.enabled = false;
+        QVERIFY(!evaluate({disabled}, "x").hidden);
+        QVERIFY(Rules({disabled}).isEmpty());
+        QVERIFY(evaluate({}, "x").flags() == 0);
+
+        // Words by Unicode's word characters, which \b in JavaScript is not.
+        const Rule cafe = filterRule("café", Target::Title, Type::Word);
+        QVERIFY(evaluate({cafe}, "un CAFÉ noir").hidden);
+        QVERIFY(!evaluate({cafe}, "des cafés").hidden);
+        const Rule cat = filterRule("кот", Target::Title, Type::Word);
+        QVERIFY(evaluate({cat}, "Мой КОТ спит").hidden);
+        QVERIFY(!evaluate({cat}, "котик").hidden);
+        const Rule plus = filterRule("C++", Target::Title, Type::Word);
+        QVERIFY(evaluate({plus}, "I like C++ a lot").hidden);
+        QVERIFY(evaluate({plus}, "(C++)").hidden);
+        QVERIFY(!evaluate({plus}, "C++x").hidden);
+        QVERIFY(!evaluate({plus}, "xC++").hidden);
+        QVERIFY(evaluate({plus}, "C++").hidden);
+        const Rule net = filterRule(".NET", Target::Title, Type::Word);
+        QVERIFY(evaluate({net}, "Built on .NET today").hidden);
+        QVERIFY(evaluate({net}, ".net").hidden);
+        QVERIFY(!evaluate({net}, "x.NET").hidden);
+        QVERIFY(!evaluate({net}, ".NETwork").hidden);
+        const Rule uber = filterRule("über", Target::Title, Type::Word);
+        QVERIFY(evaluate({uber}, "Ein Buch ÜBER alles").hidden);
+        QVERIFY(!evaluate({uber}, "überall").hidden);
+        QVERIFY(!evaluate({uber}, "darüber").hidden);
+        const Rule tokyo = filterRule("東京", Target::Title, Type::Word);
+        QVERIFY(evaluate({tokyo}, "東京").hidden);
+        QVERIFY(evaluate({tokyo}, "in 東京, today").hidden);
+        QVERIFY(!evaluate({tokyo}, "東京都").hidden);
+        // Characters past U+FFFF count by what they are: a letter is part
+        // of a word, an emoji is not.
+        const Rule spamWord = filterRule("spam", Target::Title, Type::Word);
+        QVERIFY(evaluate({spamWord}, QString::fromUtf8("spam\xF0\x9F\x98\x80")).hidden);
+        QVERIFY(!evaluate({spamWord}, QString::fromUtf8("spam\xF0\x9D\x90\x80")).hidden);
+        QVERIFY(!evaluate({spamWord}, QString::fromUtf8("\xF0\x9D\x90\x80spam")).hidden);
+        QVERIFY(evaluate({spamWord}, "spammy spam_ spam").hidden);
+        QVERIFY(!evaluate({spamWord}, "spammy spam_ _spam").hidden);
+        // A combining mark is part of a word.
+        QVERIFY(!evaluate({filterRule("cafe", Target::Title, Type::Word)}, QString("cafe") + QChar(0x301)).hidden);
+        QVERIFY(evaluate({filterRule("cafe", Target::Title, Type::Word)}, "cafe\nnext").hidden);
+        // A pattern with regular expression characters is taken as written.
+        QVERIFY(evaluate({filterRule("a.b", Target::Title, Type::Word)}, "see a.b here").hidden);
+        QVERIFY(!evaluate({filterRule("a.b", Target::Title, Type::Word)}, "see axb here").hidden);
+        QVERIFY(evaluate({filterRule("ÉTÉ", Target::Title)}, "l'été dernier").hidden);
+        QVERIFY(evaluate({filterRule("^Breaking", Target::Title, Type::Regex)}, "breaking: news").hidden);
+        Rule regexCase = filterRule("^Breaking", Target::Title, Type::Regex);
+        regexCase.caseSensitive = true;
+        QVERIFY(!evaluate({regexCase}, "breaking: news").hidden);
+        QVERIFY(!Rules({filterRule("", Target::Title)}).needsContent());
+        QVERIFY(Rules({filterRule("x", Target::Any)}).needsContent());
+        QVERIFY(!Rules({filterRule("x", Target::Title)}).needsContent());
+
+        // Kept as JSON, as the web app keeps them; what is not a rule
+        // this version would save is refused, with the reason.
+        const Rule round = filterRule("spam", Target::Title, Type::Word, Action::Highlight);
+        const QJsonObject json = toJson(round, 3);
+        QCOMPARE(json.value("order").toInt(), 3);
+        QCOMPARE(json.value("action").toString(), QString("highlight"));
+        QVERIFY(fromJson(json) == std::optional<Rule>(round));
+        QString problem;
+        QVERIFY(!fromJson({{"pattern", ""}, {"target", "title"}, {"type", "contains"}, {"action", "hide"}}, &problem));
+        QCOMPARE(problem, QString("no pattern"));
+        QVERIFY(!fromJson({{"pattern", QString(500, 'x')}, {"target", "title"}, {"type", "contains"}, {"action", "hide"}},
+                          &problem));
+        QVERIFY(problem.contains("200"));
+        QVERIFY(!fromJson({{"pattern", "x"}, {"target", "body"}, {"type", "contains"}, {"action", "hide"}}, &problem));
+        QVERIFY(!fromJson({{"pattern", "x"}, {"target", "any"}, {"type", "contains"}, {"action", "delete"}}, &problem));
+        QVERIFY(!fromJson({{"pattern", "(?=a)"}, {"target", "any"}, {"type", "regex"}, {"action", "hide"}}, &problem));
+        QVERIFY(fromJson({{"pattern", "(a+)+"}, {"target", "any"}, {"type", "regex"}, {"action", "hide"}}));
+        const auto defaults = fromJson({{"pattern", "x"}, {"target", "any"}, {"type", "contains"}, {"action", "hide"}});
+        QVERIFY(defaults && defaults->enabled && !defaults->caseSensitive && !defaults->id.isEmpty());
+    }
+
+    // Regular expressions are matched by RE2, in time linear in the text,
+    // so the patterns that make a backtracking matcher run for ever finish
+    // at once; what RE2 cannot do (lookarounds, backreferences) is refused
+    // with the reason, as is what it cannot compile.
+    void keywordFilterRejectsOrBoundsHostileRegexes()
+    {
+        using namespace KeywordFilter;
+        for (const char *pattern : {"(?=.*.*f)", "(?!x)", "(?<=a)b", "(?<!a)b", "(a.*)(a.*)a.*\\1!", "(a)\\1",
+                                    "(?<n>a)\\k<n>"})
+            QVERIFY2(check(Type::Regex, pattern) == Problem::Unsupported, pattern);
+        QString detail;
+        QCOMPARE(check(Type::Regex, "(unclosed", &detail), Problem::Invalid);
+        QVERIFY(detail.contains("missing )"));
+        QCOMPARE(check(Type::Regex, "[z-a]"), Problem::Invalid);
+        // PCRE2's verbs and possessive or atomic repeats are no RE2 syntax.
+        for (const char *pattern : {"(*LIMIT_MATCH=100000000)a", "a(*SKIP)b", "a++", "(?>a)"})
+            QVERIFY2(check(Type::Regex, pattern) == Problem::Invalid, pattern);
+        // Too large for the memory one rule may take.
+        QCOMPARE(check(Type::Regex, "(?:\\pL|\\pN){150}c", &detail), Problem::Invalid);
+        QVERIFY(detail.contains("too large"));
+        QCOMPARE(check(Type::Regex, QString(201, 'a')), Problem::TooLong);
+        QCOMPARE(check(Type::Contains, QString(201, 'a')), Problem::TooLong);
+        QCOMPARE(check(Type::Word, QString(200, 'a')), Problem::None);
+        QCOMPARE(check(Type::Word, ""), Problem::Empty);
+        // Punctuation that would be a regular expression is a plain word.
+        QCOMPARE(check(Type::Word, "(?=a)"), Problem::None);
+        QCOMPARE(check(Type::Contains, "(*LIMIT_MATCH=1)"), Problem::None);
+
+        // The shapes a backtracking matcher takes exponential or high
+        // polynomial time on, over a long text, each under a second.
+        const QString subject = (QString(28, 'a') + "!").repeated(30000);
+        QVERIFY(subject.size() >= 870000);
+        for (const char *pattern : {"a.*a.*a.*!x", "(a|b)*c", "((a+))+$x", "(a+)+b", "(.*)*z", "(?:(a)|a)*$x",
+                                    "a*a*a*a*a*a*b", "(?:a?){30}a{30}b", "(\\w+\\s?)+$x"}) {
+            QCOMPARE(check(Type::Regex, pattern), Problem::None);
+            QElapsedTimer timer;
+            timer.start();
+            const Rules rules({filterRule(pattern, Target::Any, Type::Regex)});
+            QVERIFY2(!rules.evaluate(subject, subject, subject).hidden, pattern);
+            QVERIFY2(timer.elapsed() < 2000, qPrintable(QString("%1: %2 ms").arg(pattern).arg(timer.elapsed())));
+        }
+        QVERIFY(Rules({filterRule("(a|b)*c", Target::Title, Type::Regex)}).evaluate("ababc", {}, {}).hidden);
+        QVERIFY(Rules({filterRule("((a+))+!", Target::Title, Type::Regex)}).evaluate("aaa!", {}, {}).hidden);
+
+        // Many word rules over many articles stay quick.
+        QList<Rule> wordRules;
+        for (int i = 0; i < 70; ++i)
+            wordRules << filterRule(QString("neverword%1").arg(i), Target::Any, Type::Word, Action::Highlight);
+        const Rules manyWords(wordRules);
+        const QString paragraph = QString("lorem ipsum dolor sit amet ").repeated(80);
+        QElapsedTimer wordTimer;
+        wordTimer.start();
+        for (int i = 0; i < 2000; ++i)
+            QVERIFY(!manyWords.evaluate("Title number about things", paragraph, "Author").highlight);
+        // About 0.3 s here; the slack is for shared and sanitizer builds.
+        QVERIFY2(wordTimer.elapsed() < 10000, qPrintable(QString::number(wordTimer.elapsed())));
+
+        // A long alternation of words, as a list of names to hide, works and
+        // stays quick over a long text.
+        QStringList words;
+        for (int i = 0; words.join('|').size() < 180; ++i)
+            words << QString("w%1x").arg(i);
+        const QString alternation = "\\b(?:" + words.join('|') + ")\\b";
+        QVERIFY(alternation.size() <= maxPatternLength);
+        QCOMPARE(check(Type::Regex, alternation), Problem::None);
+        const Rules many({filterRule(alternation, Target::Content, Type::Regex)});
+        QElapsedTimer timer;
+        timer.start();
+        QVERIFY(!many.evaluate({}, QString(200 * 1000, 'w'), {}).hidden);
+        QVERIFY(many.evaluate({}, "and w3x too", {}).hidden);
+        QVERIFY(timer.elapsed() < 2000);
+
+        // Only the first 64 KiB of a field is read by a regular expression,
+        // cut where a character starts; plain text and words read it all.
+        const QString longText = QString(maxRegexSubject + 10, ' ') + "needle";
+        QVERIFY(!Rules({filterRule("needle", Target::Content, Type::Regex)}).evaluate({}, longText, {}).hidden);
+        QVERIFY(Rules({filterRule("needle", Target::Content)}).evaluate({}, longText, {}).hidden);
+        QVERIFY(Rules({filterRule("needle", Target::Content, Type::Word)}).evaluate({}, longText, {}).hidden);
+        const QString wide = QString(maxRegexSubject, QChar(0xE9));
+        QVERIFY(Rules({filterRule("^é+$", Target::Content, Type::Regex)}).evaluate({}, wide, {}).hidden);
+        // A pattern that reached the list without the check never matches.
+        QVERIFY(!Rules({filterRule("(?=a)", Target::Title, Type::Regex)}).evaluate("aaa", {}, {}).hidden);
+    }
+
+    // "Any" reads each field on its own, so a long text never pushes the
+    // author or the title out of what a regular expression reads.
+    void keywordFilterReadsEachFieldOnItsOwn()
+    {
+        using namespace KeywordFilter;
+        const QString longText = QString(maxRegexSubject * 2, 'x');
+        for (const Type type : {Type::Contains, Type::Word, Type::Regex}) {
+            const Rules rules({filterRule("bob", Target::Any, type)});
+            QVERIFY(rules.evaluate("t", longText, "bob").hidden);
+            QVERIFY(rules.evaluate("bob", longText, "a").hidden);
+            QVERIFY(!rules.evaluate("t", longText, "a").hidden);
+        }
+        // ^ holds at the start of each field.
+        QVERIFY(Rules({filterRule("^bob$", Target::Any, Type::Regex)}).evaluate("t", "c", "bob").hidden);
+        // The text is made only when a rule reaches it.
+        int made = 0;
+        const auto content = [&made] {
+            ++made;
+            return QString("spam");
+        };
+        QVERIFY(Rules({filterRule("t", Target::Title)}).evaluateLazily("t", content, {}).hidden);
+        QCOMPARE(made, 0);
+        // Two rules read it, the first only highlighting, and it is made once.
+        const Outcome both = Rules({filterRule("x", Target::Title, Type::Contains, Action::Highlight),
+                                    filterRule("spam", Target::Content, Type::Contains, Action::Highlight),
+                                    filterRule("spam", Target::Any)})
+                                 .evaluateLazily("t", content, {});
+        QVERIFY(both.hidden);
+        QCOMPARE(made, 1);
+    }
+
+    // A lone UTF-16 surrogate, as a Nostr event's "\ud83d" escape gives,
+    // reads as U+FFFD, as SQLite keeps it: no rule is bypassed by one, and
+    // an article reads the same when it arrives and when it is read back.
+    void keywordFilterReadsLoneSurrogatesAsReplacementCharacters()
+    {
+        using namespace KeywordFilter;
+        const QString lone = QString("buy spam now ") + QChar(0xD83D) + " end";
+        QCOMPARE(wellFormed(lone), QString("buy spam now ") + QChar(QChar::ReplacementCharacter) + " end");
+        const QString pair = QString::fromUtf8("ok \xF0\x9F\x98\x80 fine");
+        QCOMPARE(wellFormed(pair), pair);
+        QCOMPARE(wellFormed(QString(QChar(0xDC00)) + "x" + QChar(0xD800)),
+                 QString(QChar(QChar::ReplacementCharacter)) + "x" + QChar(QChar::ReplacementCharacter));
+        QVERIFY(Rules({filterRule("spam", Target::Title, Type::Word)}).evaluate(lone, {}, {}).hidden);
+        QVERIFY(Rules({filterRule("spam\\s+now", Target::Title, Type::Regex)}).evaluate(lone, {}, {}).hidden);
+        QVERIFY(Rules({filterRule("now � end", Target::Title)}).evaluate(lone, {}, {}).hidden);
+
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        QVERIFY(store.setFilterRules({filterRule("spam", Target::Title, Type::Word),
+                                      filterRule("spam\\s+now", Target::Content, Type::Regex),
+                                      filterRule("now", Target::Author, Type::Word, Action::Highlight)}));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        ParsedItem title, content, author;
+        title.guid = "title";
+        title.title = lone;
+        content.guid = "content";
+        content.title = "Fine";
+        content.summary = lone;
+        author.guid = "author";
+        author.title = "Plain";
+        author.author = lone;
+        QCOMPARE(store.saveItems(feed, {title, content, author}), 1);
+        const QString flags = "SELECT filter_flags FROM items WHERE guid = '%1'";
+        QCOMPARE(rawCount(path, flags.arg("title")), 1);
+        QCOMPARE(rawCount(path, flags.arg("content")), 1);
+        QCOMPARE(rawCount(path, flags.arg("author")), 2);
+        // A rule that matches none of them: the pass over the library
+        // reads them back from SQLite and gives them the same flags.
+        QVERIFY(store.setFilterRules({filterRule("spam", Target::Title, Type::Word),
+                                      filterRule("spam\\s+now", Target::Content, Type::Regex),
+                                      filterRule("now", Target::Author, Type::Word, Action::Highlight),
+                                      filterRule("zzz", Target::Any, Type::Regex)}));
+        QCOMPARE(rawCount(path, flags.arg("title")), 1);
+        QCOMPARE(rawCount(path, flags.arg("content")), 1);
+        QCOMPARE(rawCount(path, flags.arg("author")), 2);
+    }
+
+    // A rule change reads and works out the library outside any write
+    // transaction and writes it in short batches, so other connections
+    // write meanwhile; an item saved during the pass keeps the flags its
+    // save gave it; a change that alters no flag makes no pass; and a pass
+    // a newer change supersedes stops and is finished later.
+    void storeAppliesFilterRulesInShortBatches()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        QList<ParsedItem> items;
+        for (int i = 0; i < 2600; ++i) {
+            ParsedItem item;
+            item.guid = QString::number(i);
+            item.title = QString("spam %1").arg(i);
+            item.content = "<p>body</p>";
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 2600);
+
+        using namespace KeywordFilter;
+        Store other;
+        QVERIFY(other.open(path));
+        ParsedItem changed = items.at(0);
+        changed.title = "clean now";
+        changed.content = "<p>fine</p>";
+        int calls = 0;
+        bool otherWrote = true;
+        const auto meanwhile = [&] {
+            ++calls;
+            // The other connection waits for no write lock: it would fail
+            // here after the 5 s busy timeout if the pass held one.
+            QElapsedTimer timer;
+            timer.start();
+            otherWrote = otherWrote && other.setStarred(2, calls % 2) && timer.elapsed() < 1000;
+            // Saved while the first batch is worked out, with the new rules.
+            if (calls == 2)
+                otherWrote = otherWrote && other.saveItems(feed, {changed}) == 0;
+            return false;
+        };
+        const QList<Rule> rules{filterRule("spam", Target::Title), filterRule("body", Target::Content)};
+        QVERIFY2(store.setFilterRules(rules, meanwhile), qPrintable(store.lastError()));
+        QVERIFY(otherWrote);
+        // Before and after each of the six batches.
+        QCOMPARE(calls, 12);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE filter_flags = 1"), 2599);
+        QCOMPARE(rawCount(path, "SELECT filter_flags FROM items WHERE guid = '0'"), 0);
+        QCOMPARE(store.counts()->total, 1);
+
+        // Turning one off counts; editing one that is off, or reordering
+        // nothing, does not.
+        QList<Rule> off = rules;
+        off[0].enabled = false;
+        calls = 0;
+        QVERIFY(store.setFilterRules(off, meanwhile));
+        QCOMPARE(calls, 12);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE filter_flags = 1"), 2599);
+        off[0].pattern = "other";
+        off[1].id = KeywordFilter::newId();
+        calls = 0;
+        QVERIFY(store.setFilterRules(off, meanwhile));
+        QCOMPARE(calls, 0);
+        off << filterRule("again", Target::Title);
+        off.last().enabled = false;
+        QVERIFY(store.setFilterRules(off, meanwhile));
+        QCOMPARE(calls, 0);
+
+        // Superseded after its first batch, a pass stops; the flags belong
+        // to no rules until a pass is done, and the next one finishes it.
+        const auto stop = [&calls] { return ++calls > 2; };
+        calls = 0;
+        QVERIFY(store.setFilterRules({filterRule("zzz", Target::Title)}, stop));
+        QCOMPARE(calls, 3);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM filter_state WHERE applied IS NULL"), 1);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE filter_flags = 1"), 2100);
+        bool ran = false;
+        QVERIFY(store.applyFilterRules({}, &ran));
+        QVERIFY(ran);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE filter_flags <> 0"), 0);
+        QVERIFY(store.applyFilterRules({}, &ran));
+        QVERIFY(!ran);
+
+        // Rules saved by someone else meanwhile end the pass; theirs apply.
+        calls = 0;
+        bool otherSaved = false;
+        const auto replaced = [&] {
+            if (++calls == 2)
+                otherSaved = other.setFilterRules({filterRule("spam 1", Target::Title)});
+            return false;
+        };
+        QVERIFY(store.setFilterRules({filterRule("spam", Target::Title)}, replaced));
+        QVERIFY(otherSaved);
+        QCOMPARE(calls, 2);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE filter_flags = 1"),
+                 rawCount(path, "SELECT COUNT(*) FROM items WHERE title LIKE 'spam 1%'"));
+    }
+
+    // A pass that another save came after writes nothing more, even when
+    // the rules saved last are the very ones it started with, and leaves
+    // the library to be applied again.
+    void storeStopsAFilterPassAnySaveCameAfter()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        QList<ParsedItem> items;
+        for (int i = 0; i < 501; ++i) {
+            ParsedItem item;
+            item.guid = QString::number(i);
+            item.title = "spam";
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 501);
+        using namespace KeywordFilter;
+        const QList<Rule> spam{filterRule("spam", Target::Title)};
+        Store other;
+        QVERIFY(other.open(path));
+        // After the first batch: other rules, applied in full, and then the
+        // first ones again, whose pass is stopped at once.
+        bool fired = false, otherSaved = false;
+        Store::filterBatchHook = [&](const std::function<bool()> &) {
+            if (std::exchange(fired, true))
+                return;
+            otherSaved = other.setFilterRules({}) && other.setFilterRules(spam, [] { return true; });
+        };
+        const auto unhook = qScopeGuard([] { Store::filterBatchHook = nullptr; });
+        QVERIFY2(store.setFilterRules(spam), qPrintable(store.lastError()));
+        QVERIFY(fired);
+        QVERIFY(otherSaved);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE filter_flags <> 0"), 0);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM filter_state WHERE applied IS NULL"), 1);
+        QCOMPARE(rawCount(path, "SELECT saves FROM filter_state"), 3);
+        bool ran = false;
+        QVERIFY(store.applyFilterRules({}, &ran));
+        QVERIFY(ran);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE filter_flags = 1"), 501);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM filter_state WHERE applied IS NULL"), 0);
+    }
+
+    // The rules read a Markdown article as the reader shows it, and the
+    // library keeps the text the rules read, a lone surrogate replaced.
+    void storeFiltersTheTextTheReaderShows()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        using namespace KeywordFilter;
+        QVERIFY(store.setFilterRules({filterRule("Weekly roundup", Target::Content)}));
+        ParsedItem markdown;
+        markdown.guid = "md";
+        markdown.title = "Notes";
+        markdown.address = "30023:abc:notes";
+        markdown.revision = 1;
+        markdown.content = "# Heading\n\n**Weekly** roundup";
+        ParsedItem plain;
+        plain.guid = "plain";
+        plain.title = "Other";
+        plain.content = "<p>nothing here</p>";
+        QCOMPARE(store.saveItems(feed, {markdown, plain}), 1);
+        QCOMPARE(rawCount(path, "SELECT filter_flags FROM items WHERE guid = 'md'"), 1);
+        // And again when the rules change.
+        QVERIFY(store.setFilterRules({filterRule("Weekly roundup", Target::Content, Type::Word, Action::Highlight)}));
+        QCOMPARE(rawCount(path, "SELECT filter_flags FROM items WHERE guid = 'md'"), 2);
+        QCOMPARE(rawCount(path, "SELECT filter_flags FROM items WHERE guid = 'plain'"), 0);
+        // The search still finds its words.
+        ArticleFilter search;
+        search.query = "roundup";
+        QCOMPARE(store.articles(search).size(), 1);
+
+        ParsedItem lone;
+        lone.guid = "lone";
+        lone.title = QString("x") + QChar(0xD800) + "a";
+        lone.author = QString(QChar(0xDC00)) + "b";
+        const Rule replaced = filterRule(QString("x") + QChar(QChar::ReplacementCharacter) + "a", Target::Title);
+        QVERIFY(store.setFilterRules({replaced}));
+        QCOMPARE(store.saveItems(feed, {lone}), 0);
+        int same = -1;
+        QCOMPARE(rawExec(path,
+                         QString("SELECT COUNT(*) FROM items WHERE guid = 'lone' AND title = 'x%1a' AND author = '%1b'")
+                             .arg(QChar(QChar::ReplacementCharacter)),
+                         &same),
+                 QString());
+        QCOMPARE(same, 1);
+        QCOMPARE(rawCount(path, "SELECT filter_flags FROM items WHERE guid = 'lone'"), 1);
+        // A pass over the library reads it the same.
+        QVERIFY(store.setFilterRules({filterRule("a", Target::Title, Type::Contains, Action::Highlight)}));
+        QVERIFY(store.setFilterRules({replaced}));
+        QCOMPARE(rawCount(path, "SELECT filter_flags FROM items WHERE guid = 'lone'"), 1);
+        // Sent again as it was, it is the same text.
+        QCOMPARE(store.saveItems(feed, {lone}), 0);
+        QCOMPARE(rawCount(path, "SELECT filter_flags FROM items WHERE guid = 'lone'"), 1);
+    }
+
+    // Marking read what a rule matches reads the rules and the text as they
+    // are, not flags a pass may not have reached yet, and does nothing for
+    // a rule that is gone.
+    void storeMarksReadByFilterFromTheCurrentRules()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        QList<ParsedItem> items;
+        for (const char *title : {"Weekly news", "Weekly spam", "Other"}) {
+            ParsedItem item;
+            item.guid = title;
+            item.title = title;
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 3);
+        // Kept without a pass, and with flags of older rules: "Weekly spam"
+        // marked read and shown, "Weekly news" neither.
+        using namespace KeywordFilter;
+        const Rule weekly = filterRule("weekly", Target::Title, Type::Word, Action::MarkRead);
+        const QList<Rule> rules{filterRule("spam", Target::Title), weekly};
+        for (qsizetype i = 0; i < rules.size(); ++i)
+            QCOMPARE(rawExec(path, QString("INSERT INTO filter_rules (position, rule) VALUES (%1, '%2')")
+                                       .arg(i)
+                                       .arg(QString::fromUtf8(QJsonDocument(toJson(rules.at(i), int(i)))
+                                                                  .toJson(QJsonDocument::Compact)))),
+                     QString());
+        QCOMPARE(rawExec(path, "UPDATE items SET filter_flags = 4 WHERE guid = 'Weekly spam'"), QString());
+        QCOMPARE(store.markReadByFilter(weekly.id), 1);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1 AND guid = 'Weekly news'"), 1);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1"), 1);
+        // Gone by the time it runs, it marks nothing.
+        QCOMPARE(rawExec(path, "UPDATE items SET is_read = 0"), QString());
+        QCOMPARE(rawExec(path, "DELETE FROM filter_rules WHERE position = 1"), QString());
+        QCOMPARE(store.markReadByFilter(weekly.id), 0);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1"), 0);
+    }
+
+    // Marking read goes in batches, each written only while the rules are
+    // the ones it started with, to articles still unread, shown, and as read
+    // (a NULL read the same as an empty string, as saveItems() reads it).
+    void storeMarksReadByFilterInBatches()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        QList<ParsedItem> items;
+        for (int i = 0; i < 1200; ++i) {
+            ParsedItem item;
+            item.guid = QString::number(i);
+            item.title = (i % 100 ? "weekly " : "weekly spam ") + QString::number(i);
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 1200);
+        using namespace KeywordFilter;
+        const Rule spam = filterRule("spam", Target::Title);
+        const Rule weekly = filterRule("weekly", Target::Title, Type::Word, Action::MarkRead);
+        QVERIFY(store.setFilterRules({spam, weekly}));
+        int batches = 0;
+        Store::filterWriteHook = [&batches] { ++batches; };
+        const auto unhook = qScopeGuard([] { Store::filterWriteHook = nullptr; });
+        QCOMPARE(store.markReadByFilter(weekly.id), 1188);
+        QCOMPARE(batches, 3);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1 AND read_at IS NOT NULL"), 1188);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1 AND title LIKE '%spam%'"), 0);
+        // Stopped, it marks nothing more.
+        QCOMPARE(rawExec(path, "UPDATE items SET is_read = 0, read_at = NULL, author = NULL"), QString());
+        QCOMPARE(store.markReadByFilter(weekly.id, [] { return true; }), 0);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1"), 0);
+
+        // Between reading the first batch and writing it, one article's
+        // author goes from NULL to empty, one's title changes so that it is
+        // hidden, and one is read; before the second, the rule goes.
+        Store other;
+        QVERIFY(other.open(path));
+        batches = 0;
+        QString error;
+        bool removed = false, removing = false;
+        Store::filterWriteHook = [&] {
+            // The other store's pass calls it too.
+            if (removing)
+                return;
+            if (++batches == 1) {
+                for (const char *sql : {"UPDATE items SET author = '' WHERE guid = '1'",
+                                        "UPDATE items SET title = 'weekly spam 2' WHERE guid = '2'",
+                                        "UPDATE items SET is_read = 1 WHERE guid = '3'"})
+                    error += rawExec(path, sql);
+            } else {
+                removing = true;
+                removed = other.setFilterRules({spam});
+                removing = false;
+            }
+        };
+        int marked = -1;
+        QCOMPARE(store.markReadByFilter(weekly.id, {}, &marked), 493);
+        QCOMPARE(marked, 493);
+        QCOMPARE(error, QString());
+        QVERIFY(removed);
+        QCOMPARE(batches, 2);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1"), 494);
+        QCOMPARE(rawCount(path, "SELECT is_read FROM items WHERE guid = '1'"), 1);
+        QCOMPARE(rawCount(path, "SELECT is_read FROM items WHERE guid = '2'"), 0);
+        QCOMPARE(rawCount(path, "SELECT read_at IS NULL FROM items WHERE guid = '3'"), 1);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1 AND CAST(guid AS INTEGER) >= 500"), 0);
+        // Gone, it marks nothing at all.
+        Store::filterWriteHook = nullptr;
+        QCOMPARE(store.markReadByFilter(weekly.id), 0);
+    }
+
+    // A pass writes the flags of an item whose text a save made NULL from
+    // empty, as saveItems() takes that for no change and keeps the flags it
+    // had, but not those of one whose text did change.
+    void storeRefiltersAnItemWhoseTextWentFromNullToEmpty()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        QList<ParsedItem> items;
+        for (const char *guid : {"a", "b"}) {
+            ParsedItem item;
+            item.guid = guid;
+            item.title = QString("spam ") + guid;
+            item.summary = "words";
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 2);
+        QCOMPARE(rawExec(path, "UPDATE items SET author = NULL, content = NULL, url = NULL"), QString());
+        // Saved, with the pass left for later.
+        using namespace KeywordFilter;
+        QVERIFY(store.setFilterRules({filterRule("spam", Target::Any)}, [] { return true; }));
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM filter_state WHERE applied IS NULL"), 1);
+        QString error;
+        Store::filterWriteHook = [&] {
+            for (const char *sql : {"UPDATE items SET author = '', content = '', url = '' WHERE guid = 'a'",
+                                    "UPDATE items SET author = '', summary = 'words!' WHERE guid = 'b'"})
+                error += rawExec(path, sql);
+        };
+        const auto unhook = qScopeGuard([] { Store::filterWriteHook = nullptr; });
+        QVERIFY2(store.applyFilterRules(), qPrintable(store.lastError()));
+        QCOMPARE(error, QString());
+        QCOMPARE(rawCount(path, "SELECT filter_flags FROM items WHERE guid = 'a'"), 1);
+        QCOMPARE(rawCount(path, "SELECT filter_flags FROM items WHERE guid = 'b'"), 0);
+    }
+
+    // A Nostr long-form article with no summary of its own takes the start
+    // of its text as the reader shows it, so a rule meets no link address
+    // the reader hides; one stored with the start of its Markdown as written
+    // reads the same when the rules change. A summary of its own still counts.
+    void storeFiltersALongFormArticleByTheSummaryItShows()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        using namespace KeywordFilter;
+        QVERIFY(store.setFilterRules({filterRule("needle", Target::Content)}));
+        const QString markdown = "Read [the story](https://a.invalid/needle).";
+        QList<NostrEvent> events;
+        for (const QJsonObject &json :
+             {signedEvent(30023, markdown, {{"d", "link"}}, 1700000000),
+              signedEvent(30023, "Nothing here.", {{"d", "own"}, {"summary", "A needle, said the author"}}, 1700000100)})
+            events << *NostrEvent::fromJson(json);
+        const QList<ParsedItem> items = NostrSource::longForm(events, "Ada");
+        QCOMPARE(items.size(), 2);
+        QCOMPARE(items.at(1).summary, QString("Read the story."));
+        QCOMPARE(items.at(0).summary, QString("A needle, said the author"));
+        QCOMPARE(store.saveItems(feed, items), 1);
+        const QString link = "SELECT filter_flags FROM items WHERE address LIKE '%:link'";
+        const QString own = "SELECT filter_flags FROM items WHERE address LIKE '%:own'";
+        QCOMPARE(rawCount(path, link), 0);
+        QCOMPARE(rawCount(path, own), 1);
+        QCOMPARE(rawExec(path, QString("UPDATE items SET summary = '%1' WHERE address LIKE '%:link'")
+                                   .arg(FeedParser::summarize(FeedParser::cleanText(markdown)))),
+                 QString());
+        QVERIFY(store.setFilterRules({filterRule("needle", Target::Content, Type::Contains, Action::Highlight)}));
+        QCOMPARE(rawCount(path, own), 2);
+        QVERIFY(store.setFilterRules({filterRule("needle", Target::Content)}));
+        QCOMPARE(rawCount(path, link), 0);
+        QCOMPARE(rawCount(path, own), 1);
+    }
+
+    // A pass that fails after some batches were written still shows them.
+    void backendReloadsAfterAFilterPassFailsPartWay()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString path = Paths::databaseFile();
+        {
+            Store store;
+            QVERIFY(store.open());
+            const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+            QList<ParsedItem> items;
+            for (int i = 0; i < 600; ++i) {
+                ParsedItem item;
+                item.guid = QString::number(i);
+                item.title = "spam";
+                items << item;
+            }
+            QCOMPARE(store.saveItems(feed, items), 600);
+            // Saved, with the pass left to the next start.
+            QVERIFY(store.setFilterRules({filterRule("spam", KeywordFilter::Target::Title)}, [] { return true; }));
+        }
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM filter_state WHERE applied IS NULL"), 1);
+        // After the first batch, the next one cannot be written.
+        std::atomic<bool> fired{false};
+        Store::filterBatchHook = [&fired, path](const std::function<bool()> &) {
+            if (fired.exchange(true))
+                return;
+            {
+                QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "filterBatchHook");
+                raw.setDatabaseName(path);
+                if (raw.open())
+                    QSqlQuery(raw).exec("ALTER TABLE filter_state RENAME TO filter_state_gone");
+                raw.close();
+            }
+            QSqlDatabase::removeDatabase("filterBatchHook");
+        };
+        const auto unhook = qScopeGuard([] { Store::filterBatchHook = nullptr; });
+        Backend backend;
+        QTRY_VERIFY(backend.status().startsWith("Cannot apply the filter rules"));
+        QVERIFY(fired);
+        QVERIFY(backend.statusError());
+        QTRY_COMPARE(backend.sources()->row(backend.sources()->rowOf(SourceModel::Kind::All)).count, 100);
+    }
+
+    // Hidden articles are in no list, count, search, or mark read; a
+    // highlight reaches the list; the article text is matched as the
+    // reader shows it, without its markup or link addresses.
+    void storeAppliesFilterRulesToListsCountsAndSearch()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY2(store.open(dir.path() + "/readstr.db"), qPrintable(store.lastError()));
+        using namespace KeywordFilter;
+        QVERIFY(store.setFilterRules({filterRule("spam", Target::Title),
+                                      filterRule("news", Target::Any, Type::Word, Action::Highlight),
+                                      filterRule("p", Target::Content, Type::Word),
+                                      filterRule("tracker.invalid", Target::Content)}));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        QList<ParsedItem> items;
+        for (const auto &[guid, title, content] :
+             QList<std::tuple<const char *, const char *, const char *>>{
+                 {"1", "Spam offer", "<p>Buy now</p>"},
+                 {"2", "Clean post", "<p>hello</p> world"},
+                 {"3", "Daily", "The news today"},
+                 {"4", "Linked", "<a href=\"https://tracker.invalid/x\">read more</a>"}}) {
+            ParsedItem item;
+            item.guid = guid;
+            item.title = title;
+            item.content = content;
+            items << item;
+        }
+        // The hidden one is no news.
+        QCOMPARE(store.saveItems(feed, items), 3);
+        const auto titles = [&store](ArticleFilter filter = {}) {
+            filter.limit = 0;
+            QStringList list;
+            for (const Article &article : store.articles(filter))
+                list << article.title + (article.highlighted ? "*" : "");
+            list.sort();
+            return list;
+        };
+        QCOMPARE(titles(), (QStringList{"Clean post", "Daily*", "Linked"}));
+        ArticleFilter unread;
+        unread.unreadOnly = true;
+        QCOMPARE(titles(unread).size(), 3);
+        auto counts = store.counts();
+        QVERIFY(counts);
+        QCOMPARE(counts->total, 3);
+        QCOMPARE(counts->unread, 3);
+        QCOMPARE(store.feeds().first().unread, 3);
+        QCOMPARE(store.feeds().first().total, 3);
+        QCOMPARE(searchTitles(store, "offer"), QStringList());
+        QCOMPARE(searchTitles(store, "buy"), QStringList());
+        QCOMPARE(searchTitles(store, "hello"), QStringList{"Clean post"});
+        // The open article does not keep a hidden one in the list either.
+        ArticleFilter also;
+        also.alsoId = 1;
+        also.unreadOnly = true;
+        QCOMPARE(titles(also).size(), 3);
+
+        // Starred, and marked read with the view: never a hidden article.
+        QVERIFY(store.setStarred(1, true));
+        QCOMPARE(store.counts()->starred, 0);
+        QCOMPARE(store.markRead({}, counts->lastId), 3);
+        QVERIFY(!store.article(1)->read);
+
+        // New rules apply to what is already there, in one go.
+        QVERIFY(store.setFilterRules({filterRule("Daily", Target::Title)}));
+        QCOMPARE(titles(), (QStringList{"Clean post", "Linked", "Spam offer"}));
+        QVERIFY(store.setFilterRules({filterRule("read more", Target::Content)}));
+        QCOMPARE(titles(), (QStringList{"Clean post", "Daily", "Spam offer"}));
+        QCOMPARE(store.counts()->unread, 1);
+        QCOMPARE(store.counts()->starred, 1);
+        QVERIFY(store.setFilterRules({}));
+        QCOMPARE(titles().size(), 4);
+        QCOMPARE(rawCount(dir.path() + "/readstr.db", "SELECT COUNT(*) FROM items WHERE filter_flags <> 0"), 0);
+    }
+
+    // A mark-read rule marks an article read when it arrives, as a mark of
+    // the user's would be, published first; an article already there only
+    // when asked, and never one a hide before it wins over.
+    void storeMarksNewArticlesReadByFilterRules()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QVERIFY(store.setPublishReads(syncPubkey(), true));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        const auto item = [](const char *guid, const char *title) {
+            ParsedItem parsed;
+            parsed.guid = guid;
+            parsed.title = title;
+            return parsed;
+        };
+        QCOMPARE(store.saveItems(feed, {item("old", "Weekly old"), item("other", "Other")}), 2);
+        QCOMPARE(store.syncAccount().publishPending, 0);
+
+        using namespace KeywordFilter;
+        const Rule weekly = filterRule("weekly", Target::Title, Type::Word, Action::MarkRead);
+        QVERIFY(store.setFilterRules({filterRule("hidden", Target::Title), weekly}));
+        // Saving the rules marks nothing that is already there.
+        QVERIFY(!store.article(1)->read);
+        QCOMPARE(store.syncAccount().publishPending, 0);
+
+        int marked = -1;
+        QCOMPARE(store.saveItems(feed, {item("new", "Weekly digest"), item("hidden", "Weekly hidden"),
+                                        item("plain", "Plain")},
+                                 &marked),
+                 2);
+        QCOMPARE(marked, 1);
+        const auto read = [&store](const char *guid) {
+            for (const Article &article : store.articles({0, false, false, 0}))
+                if (article.guid == guid)
+                    return article.read;
+            return false;
+        };
+        QVERIFY(read("new"));
+        QVERIFY(!read("plain"));
+        QVERIFY(!read("old"));
+        QCOMPARE(rawCount(path, "SELECT is_read FROM items WHERE guid = 'hidden'"), 0);
+        QVERIFY(store.syncAccount().publishPending & publishBit(Sync::readStatusKind));
+        QStringList guids;
+        QVERIFY(store.eachReadGuid([&guids](const QString &guid) {
+            guids << guid;
+            return true;
+        }));
+        QCOMPARE(guids, QStringList{"new"});
+
+        // Sent again, it is no new article: a user's unread mark holds.
+        QVERIFY(store.markPublishPending(syncPubkey(), publishBit(Sync::readStatusKind), false));
+        for (const Article &article : store.articles({0, false, false, 0}))
+            if (article.guid == "new")
+                QVERIFY(store.setRead(article.id, false));
+        QCOMPARE(store.saveItems(feed, {item("new", "Weekly digest")}, &marked), 0);
+        QCOMPARE(marked, 0);
+        QVERIFY(!read("new"));
+        QCOMPARE(store.syncAccount().publishPending, 0);
+
+        // Asked, the rule marks what it matches of the library.
+        const QString id = store.filterRules()->at(1).id;
+        QCOMPARE(store.markReadByFilter(id), 2);
+        QVERIFY(read("new"));
+        QVERIFY(read("old"));
+        QVERIFY(!read("other"));
+        QCOMPARE(rawCount(path, "SELECT is_read FROM items WHERE guid = 'hidden'"), 0);
+        QCOMPARE(store.markReadByFilter(id), 0);
+        QCOMPARE(store.markReadByFilter("no such rule"), 0);
+        QCOMPARE(store.markReadByFilter(store.filterRules()->at(0).id), 0);
+
+        // Without an account that publishes reads, nothing is marked to.
+        QVERIFY(store.setPublishReads(syncPubkey(), false));
+        QCOMPARE(store.saveItems(feed, {item("later", "Weekly later")}, &marked), 1);
+        QCOMPARE(marked, 1);
+        QCOMPARE(store.syncAccount().publishPending, 0);
+
+        // One the synced read list has read already is not marked again:
+        // no count, no read time, nothing to publish.
+        QVERIFY(store.setPublishReads(syncPubkey(), true));
+        QCOMPARE(rawExec(path, "INSERT INTO sync_read (guid) VALUES ('synced')"), QString());
+        QCOMPARE(store.saveItems(feed, {item("synced", "Weekly synced")}, &marked), 1);
+        QCOMPARE(marked, 0);
+        QCOMPARE(rawCount(path, "SELECT is_read FROM items WHERE guid = 'synced'"), 1);
+        QCOMPARE(rawCount(path, "SELECT read_at IS NULL FROM items WHERE guid = 'synced'"), 1);
+        QCOMPARE(store.syncAccount().publishPending, 0);
+    }
+
+    // The rules outlive the library connection, in order; entries that
+    // cannot be used are left out and said, and a bad rule is never saved.
+    void storeKeepsFilterRulesAndDropsCorruptOnes()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString path = Paths::databaseFile();
+        using namespace KeywordFilter;
+        QList<Rule> rules{filterRule("b", Target::Title), filterRule("a", Target::Author, Type::Word, Action::Highlight)};
+        rules[1].enabled = false;
+        rules[1].caseSensitive = true;
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.setFilterRules(rules));
+        }
+        {
+            Store store;
+            QVERIFY(store.open());
+            QStringList dropped;
+            QVERIFY(store.filterRules(&dropped) == std::optional(rules));
+            QVERIFY(dropped.isEmpty());
+            QVERIFY(!store.setFilterRules({filterRule("(?=a)", Target::Title, Type::Regex)}));
+            QVERIFY(!store.setFilterRules({filterRule("", Target::Title)}));
+            QVERIFY(!store.setFilterRules(QList<Rule>(maxRules + 1, filterRule("x", Target::Title))));
+            QVERIFY(store.filterRules() == std::optional(rules));
+        }
+        QCOMPARE(rawExec(path, "DELETE FROM filter_rules"), QString());
+        const auto json = [](const QJsonObject &object) {
+            return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
+        };
+        const QString valid =
+            json({{"id", "v"}, {"pattern", "ok"}, {"target", "title"}, {"type", "contains"}, {"action", "hide"}});
+        QStringList rows{"not json",
+                         "[1]",
+                         json({{"pattern", ""}}),
+                         json({{"pattern", QString(500, 'x')}, {"target", "title"}, {"type", "contains"}, {"action", "hide"}}),
+                         json({{"pattern", "x"}, {"target", "bogus"}, {"type", "contains"}, {"action", "hide"}}),
+                         json({{"pattern", "(?<!a)b"}, {"target", "any"}, {"type", "regex"}, {"action", "hide"}}),
+                         json({{"pattern", "x"}, {"target", "title"}, {"type", "contains"}, {"action", "hide"},
+                               {"enabled", "false"}}),
+                         json({{"pattern", "x"}, {"target", "title"}, {"type", "contains"}, {"action", "hide"},
+                               {"caseSensitive", 1}}),
+                         valid,
+                         valid};
+        for (int i = 0; i < 210; ++i)
+            rows << json({{"pattern", "p"}, {"target", "any"}, {"type", "contains"}, {"action", "highlight"}});
+        for (qsizetype i = 0; i < rows.size(); ++i)
+            QCOMPARE(rawExec(path, QString("INSERT INTO filter_rules (position, rule) VALUES (%1, '%2')")
+                                       .arg(i)
+                                       .arg(QString(rows.at(i)).replace("'", "''"))),
+                     QString());
+        Store store;
+        QVERIFY(store.open());
+        QStringList dropped;
+        const auto kept = store.filterRules(&dropped);
+        QVERIFY(kept);
+        QCOMPARE(kept->size(), maxRules);
+        QCOMPARE(kept->at(0).pattern, QString("ok"));
+        // The same id twice gets a new one.
+        QCOMPARE(kept->at(0).id, QString("v"));
+        QVERIFY(kept->at(1).id != "v");
+        QCOMPARE(dropped.size(), 8 + 12);
+        QVERIFY2(dropped.join('|').contains("rule 1: not a JSON object"), qPrintable(dropped.join('|')));
+        QVERIFY(dropped.join('|').contains("unknown target"));
+        // An option that is not a boolean is not read as true or false.
+        QVERIFY(dropped.join('|').contains("rule 7: \"enabled\" is not true or false"));
+        QVERIFY(dropped.join('|').contains("rule 8: \"caseSensitive\" is not true or false"));
+        QVERIFY(dropped.join('|').contains("more than 200 rules"));
+        // A refresh still saves, with the rules that can be used.
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        ParsedItem item;
+        item.guid = "g";
+        item.title = "ok then";
+        QCOMPARE(store.saveItems(feed, {item}), 0);
+        QVERIFY(store.articles({}).isEmpty());
+
+        // The window says so, and works with the rules that remain.
+        Backend backend;
+        QCOMPARE(backend.filterRules().size(), maxRules);
+        QVERIFY(backend.filterError().contains("unknown target"));
+        QVERIFY(backend.statusError());
+        QVERIFY(backend.status().startsWith("Some filter rules cannot be used"));
+        // Saving drops the ones left out for good.
+        backend.removeFilterRule(maxRules - 1);
+        QTRY_VERIFY(backend.filterError().isEmpty());
+        Store again;
+        QVERIFY(again.open());
+        QStringList none;
+        QCOMPARE(again.filterRules(&none)->size(), maxRules - 1);
+        QVERIFY(none.isEmpty());
+    }
+
+    // A mark-read rule marks a refresh's new articles read, and they go out
+    // in the read status like the user's own reads; no rule is in any event.
+    void backendPublishesArticlesAFilterMarksRead()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        relay.keepPublished = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount(true);
+        FakeHttpServer server;
+        server.serve("/feed.xml", "<rss version=\"2.0\"><channel><title>T</title>"
+                                  "<item><guid>weekly-1</guid><title>Weekly roundup</title></item>"
+                                  "<item><guid>plain-1</guid><title>Plain</title></item>"
+                                  "<item><guid>gone-1</guid><title>zqprivaterule here</title></item>"
+                                  "</channel></rss>");
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.setPublishReads(syncPubkey(), true));
+            QVERIFY(store.addFeed(server.url("/feed.xml").toString(), "Feed"));
+        }
+        FakeKeyStore keys;
+        keys.keys.insert(syncNpub(), QByteArray(32, '\1'));
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setPublishDelays(50, 50);
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "weekly"}, {"target", "title"}, {"type", "word"},
+                                            {"action", "mark-read"}}));
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "zqprivaterule"}, {"target", "any"}, {"type", "contains"},
+                                            {"action", "hide"}}));
+        QVERIFY(!backend.saveFilterRule(-1, {{"pattern", "(?=a)"}, {"target", "any"}, {"type", "regex"},
+                                             {"action", "hide"}}));
+        QVERIFY(!backend.saveFilterRule(5, {{"pattern", "x"}, {"target", "any"}, {"type", "contains"},
+                                            {"action", "hide"}}));
+        QCOMPARE(backend.filterRules().size(), 2);
+
+        QSignalSpy finished(&backend, &Backend::refreshFinished);
+        backend.refreshAll();
+        QVERIFY(finished.wait(20000));
+        QCOMPARE(backend.articles()->count(), 2);
+        const int unreadRow = backend.sources()->rowOf(SourceModel::Kind::Unread);
+        QCOMPARE(backend.sources()->row(unreadRow).count, 1);
+        QCOMPARE(backend.sources()->row(backend.sources()->rowOf(SourceModel::Kind::All)).count, 1);
+        backend.selectSource(unreadRow);
+        QCOMPARE(backend.articles()->count(), 1);
+        QCOMPARE(backend.articles()->at(0).title, QString("Plain"));
+
+        const auto readStatus = [&relay]() -> QJsonArray {
+            for (const QJsonObject &event : relay.published)
+                if (event.value("kind").toInt() == Sync::readStatusKind)
+                    return QJsonDocument::fromJson(event.value("content").toString().toUtf8())
+                        .object()
+                        .value("itemGuids")
+                        .toArray();
+            return {};
+        };
+        QTRY_COMPARE_WITH_TIMEOUT(readStatus(), QJsonArray{"weekly-1"}, 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.publishing(), 10000);
+        backend.publishNow();
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.publishing(), 10000);
+        QVERIFY(relay.published.size() >= 2);
+        for (const QJsonObject &event : relay.published) {
+            const QByteArray text = QJsonDocument(event).toJson(QJsonDocument::Compact);
+            QVERIFY2(!text.contains("zqprivaterule") && !text.contains("mark-read") && !text.contains("weekly\""),
+                     text.constData());
+        }
+    }
+
+    // The ⋮ menu opens the rules editor, which adds, edits, turns off,
+    // reorders, and deletes rules from the keyboard and the mouse, refuses
+    // a hostile pattern with the reason, and asks before a new mark-read
+    // rule marks the library; the window's letters stay quiet meanwhile.
+    void filtersDialogEditsTheRules()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        {
+            Store store;
+            QVERIFY(store.open());
+            const qint64 feed = store.addFeed("https://blog.invalid/feed", "Blog");
+            QList<ParsedItem> items;
+            for (const char *title : {"Weekly news", "Other things", "Spam offer"}) {
+                ParsedItem item;
+                item.guid = title;
+                item.title = title;
+                items << item;
+            }
+            QCOMPARE(store.saveItems(feed, items), 3);
+        }
+        write(dir.path() + "/language", "en");
+        QTest::failOnWarning(QRegularExpression("Binding loop|qrc:/"));
+        LoadedWindow loaded(dir.path() + "/language");
+        QVERIFY(loaded.window);
+        QVERIFY(QTest::qWaitForWindowExposed(loaded.window));
+        Backend &backend = *loaded.backend;
+        QCOMPARE(backend.articles()->count(), 3);
+
+        QObject *menu = loaded.window->findChild<QObject *>("appMenu");
+        QVERIFY(menu);
+        QVERIFY(QMetaObject::invokeMethod(menu, "open"));
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QQuickItem *filtersItem = nullptr;
+        for (int i = 0; i < menu->property("count").toInt() && !filtersItem; ++i) {
+            QQuickItem *item = nullptr;
+            QVERIFY(QMetaObject::invokeMethod(menu, "itemAt", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, i)));
+            if (item && item->property("text").toString() == "Filters…")
+                filtersItem = item;
+        }
+        QVERIFY(filtersItem);
+        QVERIFY(QMetaObject::invokeMethod(filtersItem, "triggered"));
+        QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+        QObject *dialog = loaded.window->findChild<QObject *>("filtersDialog");
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        auto *pattern = loaded.window->findChild<QQuickItem *>("filterPattern");
+        QVERIFY(pattern);
+        QTRY_VERIFY(pattern->hasActiveFocus());
+        // The rows' controls are only in the item tree, as delegates are.
+        const auto find = [&loaded](const QString &name) -> QObject * {
+            if (QObject *object = loaded.window->findChild<QObject *>(name))
+                return object;
+            QList<QQuickItem *> items{loaded.window->contentItem()};
+            while (!items.isEmpty()) {
+                QQuickItem *item = items.takeLast();
+                if (item->objectName() == name && item->isVisible())
+                    return item;
+                items << item->childItems();
+            }
+            return nullptr;
+        };
+        const auto click = [&find](const QString &name) {
+            QObject *button = find(name);
+            QVERIFY(button);
+            QVERIFY(QMetaObject::invokeMethod(button, "clicked"));
+        };
+        const auto patterns = [&backend] {
+            QStringList list;
+            for (const QVariant &rule : backend.filterRules())
+                list << rule.toMap().value("pattern").toString() + (rule.toMap().value("enabled").toBool() ? "" : "-");
+            return list;
+        };
+
+        // Typed and entered: the letters go to the field, not to the window
+        // (S would star, N go to the next unread article).
+        QVERIFY(!loaded.window->property("keysFree").toBool());
+        QTest::keyClick(loaded.window, Qt::Key_N);
+        QTest::keyClick(loaded.window, Qt::Key_Backspace);
+        for (const char key : QByteArray("spam"))
+            QTest::keyClick(loaded.window, key);
+        QCOMPARE(pattern->property("text").toString(), QString("spam"));
+        QTest::keyClick(loaded.window, Qt::Key_Return);
+        QCOMPARE(patterns(), QStringList{"spam"});
+        QCOMPARE(pattern->property("text").toString(), QString());
+        QCOMPARE(backend.articleId(), 0);
+        QTRY_COMPARE(backend.articles()->count(), 2);
+        QTRY_COMPARE(backend.sources()->row(backend.sources()->rowOf(SourceModel::Kind::Unread)).count, 2);
+
+        // A highlight, through the form's boxes.
+        pattern->setProperty("text", "other");
+        find("filterAction")->setProperty("currentIndex", 1);
+        click("filterSave");
+        QCOMPARE(patterns(), (QStringList{"spam", "other"}));
+        const auto highlighted = [&backend] {
+            QStringList titles;
+            ArticleModel *model = backend.articles();
+            for (int row = 0; row < model->count(); ++row)
+                if (model->data(model->index(row), ArticleModel::HighlightedRole).toBool())
+                    titles << model->at(row).title;
+            return titles;
+        };
+        QTRY_COMPARE(highlighted(), QStringList{"Other things"});
+        // Delegates are in the item tree, not under the window as QObjects.
+        const auto highlightShown = [&loaded] {
+            int shown = 0;
+            QList<QQuickItem *> items{loaded.window->contentItem()};
+            while (!items.isEmpty()) {
+                QQuickItem *item = items.takeLast();
+                shown += item->objectName() == "highlight" && item->isVisible();
+                items << item->childItems();
+            }
+            return shown;
+        };
+        QTRY_COMPARE(highlightShown(), 1);
+
+        // A pattern RE2 cannot match is refused, with why. Case sensitive
+        // says that a pattern can ignore case on its own.
+        QObject *caseHint = find("filterCaseHint");
+        QVERIFY(caseHint);
+        QVERIFY(!caseHint->property("visible").toBool());
+        find("filterType")->setProperty("currentIndex", 2);
+        QTRY_VERIFY(caseHint->property("visible").toBool());
+        pattern->setProperty("text", "(?=x)");
+        QObject *problem = find("filterProblem");
+        QVERIFY(problem);
+        QTRY_VERIFY(problem->property("visible").toBool());
+        QVERIFY(problem->property("text").toString().contains("lookarounds or backreferences"));
+        click("filterSave");
+        QCOMPARE(patterns().size(), 2);
+        pattern->setProperty("text", "(unclosed");
+        QTRY_VERIFY(problem->property("text").toString().startsWith("This is not a valid regular expression"));
+        click("filterSave");
+        QCOMPARE(patterns().size(), 2);
+
+        // Reordered, edited, turned off, and deleted.
+        QTRY_VERIFY(find("filterDown0"));
+        click("filterDown0");
+        QCOMPARE(patterns(), (QStringList{"other", "spam"}));
+        QTRY_VERIFY(find("filterUp1"));
+        click("filterUp1");
+        QCOMPARE(patterns(), (QStringList{"spam", "other"}));
+        click("filterEdit1");
+        QCOMPARE(pattern->property("text").toString(), QString("other"));
+        QCOMPARE(find("filterAction")->property("currentIndex").toInt(), 1);
+        QCOMPARE(find("filterType")->property("currentIndex").toInt(), 0);
+        QVERIFY(pattern->hasActiveFocus());
+        pattern->setProperty("text", "things");
+        click("filterSave");
+        QCOMPARE(patterns(), (QStringList{"spam", "things"}));
+        QCOMPARE(backend.filterRules().at(1).toMap().value("action").toString(), QString("highlight"));
+        QObject *enabled = find("filterEnabled0");
+        QVERIFY(enabled);
+        QVERIFY(QMetaObject::invokeMethod(enabled, "toggle"));
+        QVERIFY(QMetaObject::invokeMethod(enabled, "toggled"));
+        QCOMPARE(patterns(), (QStringList{"spam-", "things"}));
+        QTRY_COMPARE(backend.articles()->count(), 3);
+        // The form keeps to the rule it edits wherever the list puts it,
+        // and stops editing one that is gone.
+        click("filterEdit1");
+        QCOMPARE(pattern->property("text").toString(), QString("things"));
+        backend.moveFilterRule(1, -1);
+        QCOMPARE(patterns(), (QStringList{"things", "spam-"}));
+        QCOMPARE(dialog->property("editing").toInt(), 0);
+        click("filterDelete1");
+        QCOMPARE(patterns(), QStringList{"things"});
+        QCOMPARE(dialog->property("editing").toInt(), 0);
+        pattern->setProperty("text", "things");
+        click("filterSave");
+        QCOMPARE(patterns(), QStringList{"things"});
+        QCOMPARE(dialog->property("editing").toInt(), -1);
+        click("filterEdit0");
+        QCOMPARE(dialog->property("editing").toInt(), 0);
+        backend.removeFilterRule(0);
+        QCOMPARE(dialog->property("editing").toInt(), -1);
+        QCOMPARE(pattern->property("text").toString(), QString());
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "spam"}, {"target", "any"}, {"type", "contains"},
+                                           {"action", "hide"}, {"enabled", false}}));
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "things"}, {"target", "any"}, {"type", "contains"},
+                                           {"action", "highlight"}}));
+        QCOMPARE(patterns(), (QStringList{"spam-", "things"}));
+        QTRY_VERIFY(find("filterDelete0"));
+        click("filterDelete0");
+        QCOMPARE(patterns(), QStringList{"things"});
+
+        // A mark-read rule asks whether to mark what is there already.
+        find("filterType")->setProperty("currentIndex", 1);
+        find("filterAction")->setProperty("currentIndex", 2);
+        pattern->setProperty("text", "weekly");
+        click("filterSave");
+        QCOMPARE(patterns(), (QStringList{"things", "weekly"}));
+        QObject *apply = find("filterApplyDialog");
+        QVERIFY(apply);
+        QTRY_VERIFY(apply->property("opened").toBool());
+        QVERIFY(!loaded.window->property("keysFree").toBool());
+        click("filterApplyYes");
+        QTRY_VERIFY(!apply->property("visible").toBool());
+        QTRY_COMPARE(backend.sources()->row(backend.sources()->rowOf(SourceModel::Kind::Unread)).count, 2);
+        QTRY_VERIFY(backend.status().startsWith("Marked 1 article read"));
+        QVERIFY(dialog->property("visible").toBool());
+
+        // Esc closes it.
+        QTRY_VERIFY(pattern->hasActiveFocus());
+        QTest::keyClick(loaded.window, Qt::Key_Escape);
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+
+        // The rules are there after a restart.
+        Store store;
+        QVERIFY(store.open());
+        QTRY_COMPARE(store.filterRules()->size(), 2);
+        QCOMPARE(store.filterRules()->at(1).action, KeywordFilter::Action::MarkRead);
+    }
+
+    // A library from before filters opens with none, every article shown.
+    // Closing the window stops a filter pass under way, and one still
+    // queued saves its rules without making the pass, so closing never
+    // waits for the whole library; the next start finishes the pass.
+    void backendClosesWithoutWaitingForAFilterPass()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString path = Paths::databaseFile();
+        {
+            Store store;
+            QVERIFY(store.open());
+            const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+            const QString paragraph = "<p>" + QString("lorem ipsum <b>dolor</b> sit amet ").repeated(40) + "</p>";
+            QList<ParsedItem> items;
+            for (int i = 0; i < 20000; ++i) {
+                ParsedItem item;
+                item.guid = QString::number(i);
+                item.title = "T";
+                item.content = paragraph + (i % 2 ? "needle" : "hay");
+                items << item;
+            }
+            QCOMPARE(store.saveItems(feed, items), 20000);
+        }
+        // Rules that match nothing but take a while over 20000 articles, kept
+        // as applied already, so that the pass below takes several seconds.
+        QList<KeywordFilter::Rule> slow;
+        for (int i = 0; i < 150; ++i)
+            slow << filterRule(QString("\\pL+%1q").arg(i), KeywordFilter::Target::Content,
+                               KeywordFilter::Type::Regex, KeywordFilter::Action::Highlight);
+        for (qsizetype i = 0; i < slow.size(); ++i)
+            QCOMPARE(rawExec(path, QString("INSERT INTO filter_rules (position, rule) VALUES (%1, '%2')")
+                                       .arg(i)
+                                       .arg(QString::fromUtf8(QJsonDocument(KeywordFilter::toJson(slow.at(i), int(i)))
+                                                                  .toJson(QJsonDocument::Compact))
+                                                .replace("'", "''"))),
+                     QString());
+        QCOMPARE(rawExec(path, QString("UPDATE filter_state SET applied = '%1'")
+                                   .arg(KeywordFilter::flagsKey(slow).replace("'", "''"))),
+                 QString());
+        const QString applied = "SELECT COUNT(*) FROM filter_state WHERE applied IS NULL";
+        const QVariantMap needle{{"pattern", "needle"}, {"target", "content"}, {"type", "contains"}, {"action", "hide"}};
+        QElapsedTimer timer;
+        {
+            // A pass under way.
+            auto backend = std::make_unique<Backend>();
+            QTRY_COMPARE(backend->filterRules().size(), 150);
+            // Held at the end of its first batch until closing stops it.
+            QSemaphore reached;
+            std::atomic<bool> held{false};
+            Store::filterBatchHook = [&reached, &held](const std::function<bool()> &stopped) {
+                if (held.exchange(true))
+                    return;
+                reached.release();
+                const QDeadlineTimer deadline(60000);
+                while (!stopped() && !deadline.hasExpired())
+                    QThread::msleep(1);
+            };
+            const auto unhook = qScopeGuard([] { Store::filterBatchHook = nullptr; });
+            // Even when a check fails, the worker stops and is joined before
+            // the hook and what it holds go.
+            const auto join = qScopeGuard([&backend] { backend.reset(); });
+            QVERIFY(backend->saveFilterRule(-1, needle));
+            QVERIFY(reached.tryAcquire(1, 60000));
+            QCOMPARE(rawCount(path, applied), 1);
+            timer.start();
+            backend.reset();
+            QVERIFY2(timer.elapsed() < 2000, qPrintable(QString::number(timer.elapsed())));
+            QCOMPARE(rawCount(path, applied), 1);
+            QVERIFY(rawCount(path, "SELECT COUNT(*) FROM items WHERE filter_flags = 1") < 10000);
+        }
+        {
+            // The start finishing that pass, and a save queued behind it.
+            auto backend = std::make_unique<Backend>();
+            QVERIFY(backend->saveFilterRule(150, {{"pattern", "hay"}, {"target", "content"}, {"type", "contains"},
+                                                {"action", "hide"}}));
+            timer.restart();
+            backend.reset();
+            QVERIFY2(timer.elapsed() < 2000, qPrintable(QString::number(timer.elapsed())));
+            Store store;
+            QVERIFY(store.open());
+            QCOMPARE(store.filterRules()->size(), 151);
+            QCOMPARE(store.filterRules()->at(150).pattern, QString("hay"));
+            QCOMPARE(rawCount(path, applied), 1);
+        }
+        // The next start finishes it, with the rules saved last.
+        Backend backend;
+        QTRY_COMPARE_WITH_TIMEOUT(rawCount(path, applied), 0, 60000);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE filter_flags = 1"), 10000);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE filter_flags = 1 AND content LIKE '%hay'"), 10000);
+        QTRY_COMPARE(backend.sources()->row(backend.sources()->rowOf(SourceModel::Kind::All)).count, 10000);
+    }
+
+    void filterMigrationKeepsExistingArticles()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        {
+            Store store;
+            QVERIFY(store.open(path));
+            const qint64 feed = store.addFeed("https://a.example.com/feed", "A");
+            ParsedItem item;
+            item.guid = "g";
+            item.title = "Kept";
+            QCOMPARE(store.saveItems(feed, {item}), 1);
+        }
+        for (const char *statement :
+             {"DROP TABLE filter_rules", "DROP TABLE filter_state", "ALTER TABLE items DROP COLUMN filter_flags",
+              "PRAGMA user_version = 7"})
+            QCOMPARE(rawExec(path, statement), QString());
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        QCOMPARE(store.schemaVersion(), 9);
+        QVERIFY(store.filterRules() && store.filterRules()->isEmpty());
+        // No rules hide anything, so there is no pass to make.
+        bool ran = true;
+        QVERIFY(store.applyFilterRules({}, &ran));
+        QVERIFY(!ran);
+        QCOMPARE(store.articles({}).size(), 1);
+        QCOMPARE(store.counts()->unread, 1);
+
+        // One from before the saves were counted keeps what was applied.
+        QVERIFY(store.setFilterRules({filterRule("x", KeywordFilter::Target::Title)}));
+        for (const char *statement : {"ALTER TABLE filter_state DROP COLUMN saves", "PRAGMA user_version = 8"})
+            QCOMPARE(rawExec(path, statement), QString());
+        Store again;
+        QVERIFY2(again.open(path), qPrintable(again.lastError()));
+        QCOMPARE(again.schemaVersion(), 9);
+        QCOMPARE(rawCount(path, "SELECT saves FROM filter_state WHERE applied IS NOT NULL"), 0);
+        QVERIFY(again.applyFilterRules({}, &ran));
+        QVERIFY(!ran);
+    }
+
+    void cliListsFilterRules()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        {
+            Store store;
+            QVERIFY(store.open());
+            KeywordFilter::Rule rule = filterRule("spam\x1b[2J", KeywordFilter::Target::Title);
+            rule.caseSensitive = true;
+            QVERIFY(store.setFilterRules({rule, filterRule("x", KeywordFilter::Target::Any, KeywordFilter::Type::Regex,
+                                                           KeywordFilter::Action::MarkRead)}));
+        }
+        QString out, err;
+        QCOMPARE(run({"filters"}, out, err), 0);
+        QCOMPARE(out, QString("1  on   hide  title contains (case sensitive)  spam [2J\n2  on   mark-read  any regex  x\n"));
+        out.clear();
+        QCOMPARE(run({"filters", "--json"}, out, err), 0);
+        const QJsonArray array = QJsonDocument::fromJson(out.toUtf8()).array();
+        QCOMPARE(array.size(), 2);
+        QCOMPARE(array.at(1).toObject().value("action").toString(), QString("mark-read"));
+        QCOMPARE(array.at(1).toObject().value("order").toInt(), 1);
+        QCOMPARE(run({"filters", "extra"}, out, err), 1);
     }
 
     // NIP-44 v2
@@ -8217,7 +9639,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 7);
+        QCOMPARE(store.schemaVersion(), 9);
         QCOMPARE(store.articles({}).first().title, QString("Old"));
         QVERIFY(store.articles({}).first().starred);
         const SyncAccount none = store.syncAccount();
@@ -9639,7 +11061,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 7);
+        QCOMPARE(store.schemaVersion(), 9);
         QList<Article> articles = store.articles({});
         QCOMPARE(articles.size(), 1);
         QCOMPARE(articles.first().title, QString("Old"));
@@ -9702,7 +11124,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 7);
+        QCOMPARE(store.schemaVersion(), 9);
         const QList<Feed> feeds = store.feeds();
         QCOMPARE(feeds.size(), 2);
         for (const Feed &feed : feeds) {
@@ -10012,7 +11434,7 @@ private slots:
         {
             Store store;
             QVERIFY2(store.open(path), qPrintable(store.lastError()));
-            QCOMPARE(store.schemaVersion(), 7);
+            QCOMPARE(store.schemaVersion(), 9);
             const QList<Feed> feeds = store.feeds();
             QCOMPARE(feeds.size(), 1);
             QCOMPARE(feeds.first().title, QString("Ada"));
@@ -13795,6 +15217,20 @@ private:
         draft.tags = {{"d", Sync::subscriptionsTag}};
         draft.content = "{}";
         return draft;
+    }
+
+    // A rule as the editor makes one, enabled and case insensitive.
+    static KeywordFilter::Rule filterRule(const QString &pattern, KeywordFilter::Target target,
+                                          KeywordFilter::Type type = KeywordFilter::Type::Contains,
+                                          KeywordFilter::Action action = KeywordFilter::Action::Hide)
+    {
+        KeywordFilter::Rule rule;
+        rule.id = KeywordFilter::newId();
+        rule.pattern = pattern;
+        rule.target = target;
+        rule.type = type;
+        rule.action = action;
+        return rule;
     }
 
     // Syncs the library under READSTR_HOME with the test key's npub, with

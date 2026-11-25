@@ -6,6 +6,7 @@
 #include <QTextDocument>
 #include <algorithm>
 
+#include "feedparser.h"
 #include "nip19.h"
 #include "sanitizer.h"
 
@@ -65,6 +66,14 @@ int delimiterColumns(QStringView rest) {
 namespace Markdown {
 InertDocument::InertDocument(QObject *parent) : QTextDocument(parent) {
     setDocumentLayout(new InertLayout(this));
+    // With no QGuiApplication (a headless refresh rendering an article for
+    // the filter rules) the default font has no size, and Qt warns at every
+    // heading it scales from it.
+    QFont font = defaultFont();
+    if (font.pointSizeF() <= 0 && font.pixelSize() <= 0) {
+        font.setPointSize(12);
+        setDefaultFont(font);
+    }
 }
 
 QVariant InertDocument::loadResource(int, const QUrl &) { return {}; }
@@ -195,5 +204,11 @@ QString toRichText(const QString &markdown, const Sanitizer::Images &images) {
     const QString html = Sanitizer::toRichText(document.toHtml(), QUrl(), options).trimmed();
     // The sanitizer ends in the same ellipsis when it cut the HTML short.
     return cut && !html.endsWith(ellipsis) ? html + ellipsis : html;
+}
+
+QString plainText(const QString &markdown) {
+    QString text = FeedParser::plainText(toRichText(markdown), FeedParser::InlineTags::Join);
+    text.remove(QChar(0x200B));
+    return text;
 }
 }

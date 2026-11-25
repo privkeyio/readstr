@@ -38,7 +38,7 @@ jobs:
         run: |
           pacman -Sy --noconfirm --needed archlinux-keyring
           pacman -Su --noconfirm --needed base-devel qt6-base qt6-declarative qt6-svg qt6-wayland \
-            qt6-websockets libsecp256k1 openssl qrencode
+            qt6-websockets libsecp256k1 openssl qrencode re2
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

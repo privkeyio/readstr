@@ -5,6 +5,11 @@ QT += network sql dbus qml quick websockets
 # NIP-44; OpenSSL's libcrypto for NIP-44's ChaCha20, HMAC-SHA256, and HKDF;
 # libqrencode for the QR code of a nostrconnect:// link.
 LIBS += -lsecp256k1 -lcrypto -lqrencode
+# RE2 matches the keyword filters' regular expressions in linear time; it
+# is linked through pkg-config, which also brings the Abseil libraries it
+# needs.
+CONFIG += link_pkgconfig
+PKGCONFIG += re2
 
 VERSION = 0.1.0
 DEFINES += READSTR_VERSION=\\\"$$VERSION\\\"
@@ -20,6 +25,7 @@ HEADERS += \
     $$PWD/fetcher.h \
     $$PWD/filepicker.h \
     $$PWD/keystore.h \
+    $$PWD/keywordfilter.h \
     $$PWD/library.h \
     $$PWD/nip19.h \
     $$PWD/nip44.h \
@@ -53,6 +59,7 @@ SOURCES += \
     $$PWD/feedparser.cpp \
     $$PWD/fetcher.cpp \
     $$PWD/keystore.cpp \
+    $$PWD/keywordfilter.cpp \
     $$PWD/library.cpp \
     $$PWD/nip19.cpp \
     $$PWD/nip44.cpp \

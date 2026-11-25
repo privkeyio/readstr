@@ -144,11 +144,35 @@ Backend::Backend(FilePicker *picker, QObject *parent)
     m_storeOpen = m_store.open();
     if (!m_storeOpen)
         setStatus(tr("Cannot open the library: %1").arg(m_store.lastError()), true);
+    loadFilterRules();
     reloadLibrary();
     reloadSyncAccount();
+    // Finishes a pass over the library that the last session cut short, so
+    // the lists show what the rules make of every article. Not one of the
+    // user's writes: one left at closing is finished by the next session.
+    if (m_storeOpen)
+        onWorker<WriteResult>(
+            [quitting = m_quitting](Store &store) {
+                WriteResult result;
+                bool ran = false;
+                if (!store.applyFilterRules([quitting] { return quitting->load(); }, &ran))
+                    result.error = store.lastError();
+                result.changed = ran;
+                return result;
+            },
+            [this](const WriteResult &result) {
+                // Batches committed before an error still changed flags.
+                if (result.changed > 0)
+                    reloadLibrary();
+                if (!result.error.isEmpty())
+                    setStatus(tr("Cannot apply the filter rules: %1").arg(result.error), true);
+            });
 }
 
 Backend::~Backend() {
+    // First, so a filter pass under way, or one still queued, stops before
+    // the wait for the worker below.
+    m_quitting->store(true);
     // Replies still in flight are dropped with the fetcher; their callbacks
     // see m_closing and do nothing. A job already running on the worker
     // finishes, and the ones queued behind it never start.
@@ -887,6 +911,8 @@ void Backend::subscribeFinished(const Library::Subscription &subscription) {
     if (subscription.created) {
         setStatus(tr("Subscribed to %1 (%n articles)", nullptr, subscription.added).arg(title));
         schedulePublish(Sync::subscriptionsKind);
+        if (subscription.markedRead > 0)
+            schedulePublish(Sync::readStatusKind);
     } else {
         setStatus(tr("Already subscribed to %1").arg(title));
     }
@@ -973,6 +999,7 @@ void Backend::refresh(const QList<Feed> &targets) {
     m_refreshTotal = int(targets.size());
     m_refreshFailed = 0;
     m_refreshAdded = 0;
+    m_refreshMarked = 0;
     m_firstFailure.clear();
     emit refreshChanged();
 
@@ -1040,6 +1067,7 @@ void Backend::refreshApplied(const Feed &feed, const Library::Refresh &outcome) 
     } else {
         m_refreshAdded += outcome.added;
     }
+    m_refreshMarked += outcome.markedRead;
     emit refreshChanged();
     if (m_refreshDone < m_refreshTotal)
         return;
@@ -1056,6 +1084,9 @@ void Backend::refreshApplied(const Feed &feed, const Library::Refresh &outcome) 
         setStatus(tr("%n new articles", nullptr, m_refreshAdded));
     else
         setStatus(tr("No new articles"));
+    // The library marked them to publish as it saved them.
+    if (m_refreshMarked > 0)
+        schedulePublish(Sync::readStatusKind);
     if (!m_autoRefresh.isActive())
         scheduleAutoRefresh();
     emit refreshFinished();
@@ -2461,4 +2492,159 @@ void Backend::exportTo(const QUrl &url) {
         return;
     }
     setStatus(tr("Exported %n feeds to %1", nullptr, m_feedCount).arg(path));
+}
+
+void Backend::loadFilterRules() {
+    m_filterRules.clear();
+    m_filterError.clear();
+    if (m_storeOpen) {
+        QStringList dropped;
+        if (const auto rules = m_store.filterRules(&dropped))
+            m_filterRules = *rules;
+        else
+            m_filterError = m_store.lastError();
+        if (m_filterError.isEmpty())
+            m_filterError = dropped.join(QLatin1String("; "));
+    }
+    if (!m_filterError.isEmpty())
+        setStatus(tr("Some filter rules cannot be used and are left out: %1").arg(m_filterError), true);
+    emit filtersChanged();
+}
+
+QVariantList Backend::filterRules() const {
+    QVariantList list;
+    for (const KeywordFilter::Rule &rule : m_filterRules)
+        list << KeywordFilter::toJson(rule, int(list.size())).toVariantMap();
+    return list;
+}
+
+QString Backend::filterProblem(const QString &type, const QString &pattern) const {
+    const auto matchType = KeywordFilter::typeFrom(type);
+    if (!matchType)
+        return tr("Pick how the pattern is matched");
+    QString detail;
+    switch (KeywordFilter::check(*matchType, pattern, &detail)) {
+    case KeywordFilter::Problem::None: return {};
+    case KeywordFilter::Problem::Empty: return tr("Enter a word, a phrase, or a pattern");
+    case KeywordFilter::Problem::TooLong:
+        return tr("A pattern can be at most %1 characters long").arg(KeywordFilter::maxPatternLength);
+    case KeywordFilter::Problem::Invalid: return tr("This is not a valid regular expression: %1").arg(detail);
+    case KeywordFilter::Problem::Unsupported:
+        return tr("Regular expressions here cannot use lookarounds or backreferences");
+    }
+    return {};
+}
+
+bool Backend::saveFilterRule(int index, const QVariantMap &map) {
+    const bool adding = index < 0;
+    if ((!adding && index >= m_filterRules.size()) || (adding && m_filterRules.size() >= KeywordFilter::maxRules))
+        return false;
+    QJsonObject object = QJsonObject::fromVariantMap(map);
+    object.insert(QStringLiteral("id"), adding ? KeywordFilter::newId() : m_filterRules.at(index).id);
+    const auto rule = KeywordFilter::fromJson(object);
+    if (!rule)
+        return false;
+    if (adding)
+        m_filterRules << *rule;
+    else if (m_filterRules.at(index) == *rule)
+        return true;
+    else
+        m_filterRules[index] = *rule;
+    saveFilterRules();
+    return true;
+}
+
+void Backend::setFilterRuleEnabled(int index, bool enabled) {
+    if (index < 0 || index >= m_filterRules.size() || m_filterRules.at(index).enabled == enabled)
+        return;
+    m_filterRules[index].enabled = enabled;
+    saveFilterRules();
+}
+
+void Backend::moveFilterRule(int index, int step) {
+    const qint64 target = qint64(index) + step;
+    if (index < 0 || index >= m_filterRules.size() || target < 0 || target >= m_filterRules.size() || step == 0)
+        return;
+    m_filterRules.move(index, int(target));
+    saveFilterRules();
+}
+
+void Backend::removeFilterRule(int index) {
+    if (index < 0 || index >= m_filterRules.size())
+        return;
+    m_filterRules.removeAt(index);
+    saveFilterRules();
+}
+
+void Backend::saveFilterRules() {
+    emit filtersChanged();
+    if (!m_storeOpen)
+        return;
+    const QString failure = tr("Cannot save the filter rules: %1");
+    // Quick edits queue several saves on the worker. Each saves the whole
+    // list, so only the latest needs to run: an older one still waiting is
+    // skipped, and one under way stops between its batches.
+    // At closing, the rules are still saved, and the pass stops at once.
+    const quint64 generation = ++*m_filterGeneration;
+    const auto superseded = [latest = m_filterGeneration, generation] { return *latest != generation; };
+    const auto stop = [superseded, quitting = m_quitting] { return superseded() || quitting->load(); };
+    // Saved, but not applied to every article.
+    const auto applyFailed = std::make_shared<bool>(false);
+    writeOnWorker(
+        [rules = m_filterRules, superseded, stop, applyFailed](Store &store) {
+            if (superseded())
+                return 0;
+            bool saved = false;
+            const bool ok = store.setFilterRules(rules, stop, &saved);
+            *applyFailed = saved && !ok;
+            return ok ? 1 : -1;
+        },
+        failure,
+        [this, failure, superseded, applyFailed](const WriteResult &result) {
+            // The latest save says how the library is left.
+            if (superseded())
+                return;
+            if (*applyFailed) {
+                // The next change, or the next start, applies them.
+                setStatus(tr("Cannot apply the filter rules: %1").arg(result.error), true);
+            } else if (!result.error.isEmpty()) {
+                // The rules shown are the ones the library keeps.
+                loadFilterRules();
+                setStatus(failure.arg(result.error), true);
+            } else if (!m_filterError.isEmpty()) {
+                // The ones left out are gone with this save.
+                m_filterError.clear();
+                emit filtersChanged();
+            }
+            reloadLibrary();
+        });
+}
+
+void Backend::markFilterMatchesRead(const QString &ruleId) {
+    if (!m_storeOpen)
+        return;
+    const QString failure = tr("Cannot mark the matching articles read: %1");
+    writeOnWorker(
+        [ruleId, readsPending = readsPublishedFor(), quitting = m_quitting](Store &store) {
+            // Some batches may be written before one fails.
+            int marked = 0;
+            const int result = store.markReadByFilter(ruleId, [quitting] { return quitting->load(); }, &marked);
+            if (marked > 0)
+                markPending(store, readsPending, Sync::readStatusKind);
+            return result;
+        },
+        failure,
+        [this, failure](const WriteResult &result) {
+            if (!result.error.isEmpty()) {
+                setStatus(failure.arg(result.error), true);
+                reloadCounts();
+                loadArticles();
+                return;
+            }
+            setStatus(tr("Marked %n articles read", nullptr, result.changed));
+            if (result.changed > 0)
+                schedulePublish(Sync::readStatusKind);
+            reloadCounts();
+            loadArticles();
+        });
 }

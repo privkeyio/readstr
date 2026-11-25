@@ -27,6 +27,8 @@ struct Subscription {
     bool created = false;
     int added = 0;
     QString error;
+    // How many of the new articles a keyword filter rule marked read.
+    int markedRead = 0;
 };
 // Saves the feed a discovery found, with its articles, or finds the existing
 // subscription. A new feed that cannot be saved whole is removed again, since
@@ -73,6 +75,8 @@ struct Refresh {
     // The feed's title after the refresh.
     QString title;
     QString error;
+    // How many of the new articles a keyword filter rule marked read.
+    int markedRead = 0;
 };
 // Applies one fetch of `feed`: keeps the validators of a 304, parses and
 // saves a new body, or records why it failed on the feed.

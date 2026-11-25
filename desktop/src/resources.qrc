@@ -8,6 +8,7 @@
         <file alias="UnsubscribeDialog.qml">UnsubscribeDialog.qml</file>
         <file alias="SyncDialog.qml">SyncDialog.qml</file>
         <file alias="SettingsDialog.qml">SettingsDialog.qml</file>
+        <file alias="FiltersDialog.qml">FiltersDialog.qml</file>
         <file alias="ShortcutsOverlay.qml">ShortcutsOverlay.qml</file>
         <file alias="i18n/en.json">i18n/en.json</file>
         <file alias="i18n/da.json">i18n/da.json</file>

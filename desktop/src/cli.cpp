@@ -35,6 +35,7 @@ void usage(QTextStream &stream) {
               "       readstr sync [--json]\n"
               "       readstr sync login NPUB\n"
               "       readstr sync logout\n"
+              "       readstr filters [--json]\n"
               "       readstr settings [--json]\n"
               "       readstr settings set KEY VALUE\n"
               "       readstr version [--json]\n"
@@ -617,6 +618,39 @@ int settings(const QString &command, const QStringList &arguments, QTextStream &
     return settings.error().isEmpty() ? 0 : 1;
 }
 
+// The keyword filter rules, in the order they apply, as the window edits
+// them; any the library holds that cannot be used are said on stderr.
+int filters(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
+    Options options;
+    if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
+        return 1;
+    if (!options.positional.isEmpty())
+        return fail(command, "takes no arguments", err);
+    Store store;
+    if (!openStore(command, store, err))
+        return 1;
+    QStringList dropped;
+    const auto rules = store.filterRules(&dropped);
+    if (!rules)
+        return fail(command, store.lastError(), err);
+    for (const QString &problem : std::as_const(dropped))
+        err << "readstr " << command << ": left out " << printable(problem) << "\n";
+    if (options.json) {
+        QJsonArray array;
+        for (const KeywordFilter::Rule &rule : *rules)
+            array << KeywordFilter::toJson(rule, int(array.size()));
+        printJson(array, out);
+        return 0;
+    }
+    int position = 0;
+    for (const KeywordFilter::Rule &rule : *rules) {
+        out << ++position << "  " << (rule.enabled ? "on " : "off") << "  " << KeywordFilter::actionName(rule.action)
+            << "  " << KeywordFilter::targetName(rule.target) << " " << KeywordFilter::typeName(rule.type)
+            << (rule.caseSensitive ? " (case sensitive)" : "") << "  " << printable(rule.pattern) << "\n";
+    }
+    return 0;
+}
+
 int help(const QString &, const QStringList &, QTextStream &out, QTextStream &) {
     usage(out);
     return 0;
@@ -637,6 +671,7 @@ constexpr Command commands[] = {
     {"import", importOpml},
     {"export", exportOpml},
     {"sync", sync},
+    {"filters", filters},
     {"settings", settings},
     {"version", version},
     {"--version", version},

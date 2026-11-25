@@ -125,11 +125,35 @@ Rectangle {
                 required property var published
                 required property bool read
                 required property bool starred
+                required property bool highlighted
 
                 readonly property bool selected: index === backend.articleIndex
 
                 width: ListView.view.width
                 height: content.implicitHeight + 20
+
+                // A filter rule's highlight: a faint wash of the accent, which
+                // the text reads over in a light and a dark theme alike, and
+                // a bar of it at the leading edge.
+                Rectangle {
+                    objectName: "highlight"
+                    anchors.fill: parent
+                    anchors.leftMargin: 6
+                    anchors.rightMargin: 6
+                    anchors.topMargin: 1
+                    anchors.bottomMargin: 1
+                    radius: Math.min(4, theme.radius)
+                    visible: row.highlighted
+                    color: Qt.alpha(theme.accent, 0.1)
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: 3
+                        color: theme.accent
+                    }
+                }
 
                 Rectangle {
                     anchors.fill: parent

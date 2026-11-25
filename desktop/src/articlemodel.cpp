@@ -13,7 +13,7 @@ QHash<int, QByteArray> ArticleModel::roleNames() const {
     return {{ArticleIdRole, "articleId"}, {FeedIdRole, "feedId"},   {FeedTitleRole, "feedTitle"},
             {TitleRole, "title"},         {UrlRole, "url"},         {AuthorRole, "author"},
             {SummaryRole, "summary"},     {PublishedRole, "published"}, {ReadRole, "read"},
-            {StarredRole, "starred"}};
+            {StarredRole, "starred"},     {HighlightedRole, "highlighted"}};
 }
 
 QVariant ArticleModel::data(const QModelIndex &index, int role) const {
@@ -34,6 +34,7 @@ QVariant ArticleModel::data(const QModelIndex &index, int role) const {
     case PublishedRole: return article.published.isValid() ? QVariant(article.published) : QVariant();
     case ReadRole: return article.read;
     case StarredRole: return article.starred;
+    case HighlightedRole: return article.highlighted;
     default: return {};
     }
 }
