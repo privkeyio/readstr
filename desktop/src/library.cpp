@@ -25,7 +25,7 @@ Subscription subscribe(Store &store, const Discovery::Result &found) {
         return subscription;
     }
     if (subscription.created) {
-        subscription.added = store.saveItems(subscription.id, found.feed.items);
+        subscription.added = store.saveItems(subscription.id, found.feed.items, &subscription.markedRead);
         if (subscription.added < 0 || !store.updateFeedDetails(subscription.id, found.feed)
             || !store.recordFetch(subscription.id, found.fetch.etag, found.fetch.lastModified, {})) {
             subscription.error = store.lastError();
@@ -33,6 +33,7 @@ Subscription subscribe(Store &store, const Discovery::Result &found) {
             subscription.id = 0;
             subscription.created = false;
             subscription.added = 0;
+            subscription.markedRead = 0;
         }
     }
     return subscription;
@@ -60,7 +61,7 @@ QList<NostrQuery> authorQueries(const QString &pubkey) {
 // Saves what the relays returned for an author's feed: new and newer
 // articles and videos, and the profile when one came.
 bool saveNostr(Store &store, qint64 feedId, const QString &pubkey, const NostrResult &articles,
-               const NostrResult &videos, int *added) {
+               const NostrResult &videos, int *added, int *markedRead) {
     const QList<NostrEvent> events = articles.events + videos.events;
     const auto profile = NostrSource::profile(events, pubkey);
     if (profile && !store.updateProfile(feedId, profile->feed, profile->revision, profile->eventId))
@@ -69,7 +70,7 @@ bool saveNostr(Store &store, qint64 feedId, const QString &pubkey, const NostrRe
     if (!feed)
         return false;
     const QString author = feed->title != feed->url ? feed->title : QString();
-    *added = store.saveItems(feedId, NostrSource::articles(events, author));
+    *added = store.saveItems(feedId, NostrSource::articles(events, author), markedRead);
     if (*added < 0 || !store.recordFetch(feedId, {}, {}, {}))
         return false;
     // A refresh that some relay missed, for either query, asks again from
@@ -131,12 +132,14 @@ Subscription subscribeNostr(Store &store, const Nip19::Profile &author, const No
     }
     if (subscription.created
         && (!store.setRelayHints(subscription.id, author.relays)
-            || !saveNostr(store, subscription.id, author.pubkey, articles, videos, &subscription.added))) {
+            || !saveNostr(store, subscription.id, author.pubkey, articles, videos, &subscription.added,
+                          &subscription.markedRead))) {
         subscription.error = store.lastError();
         store.removeFeed(subscription.id);
         subscription.id = 0;
         subscription.created = false;
         subscription.added = 0;
+        subscription.markedRead = 0;
     }
     return subscription;
 }
@@ -151,7 +154,7 @@ Refresh applyNostr(Store &store, const Feed &feed, const NostrResult &articles, 
         row.error = articles.error;
     } else {
         row.status = QStringLiteral("updated");
-        if (!saveNostr(store, feed.id, author->pubkey, articles, videos, &row.added))
+        if (!saveNostr(store, feed.id, author->pubkey, articles, videos, &row.added, &row.markedRead))
             row.error = store.lastError();
         if (const auto updated = store.feed(feed.id))
             row.title = updated->title;
@@ -177,7 +180,7 @@ Refresh apply(Store &store, const Feed &feed, const FetchResult &fetched) {
             row.error = store.lastError();
     } else if (const auto parsed = FeedParser::parse(fetched.body, fetched.finalUrl, &row.error)) {
         row.status = QStringLiteral("updated");
-        row.added = store.saveItems(feed.id, parsed->items);
+        row.added = store.saveItems(feed.id, parsed->items, &row.markedRead);
         if (row.added < 0 || !store.updateFeedDetails(feed.id, *parsed)
             || !store.recordFetch(feed.id, fetched.etag, fetched.lastModified, {}))
             row.error = store.lastError();

@@ -14,9 +14,10 @@ license=('MIT')
 # on their events. openssl's libcrypto encrypts NIP-44 for a remote signer
 # (NIP-46), and qrencode draws the QR code that pairs one. qt6-imageformats
 # has the WebP reader that video thumbnails may need. mpv plays Nostr videos;
-# Omarchy ships it.
+# Omarchy ships it. re2 matches the regular expressions of keyword filters in
+# linear time.
 depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'qt6-wayland' 'qt6-websockets' 'qt6-imageformats'
-         'sqlite>=3.43' 'libsecp256k1' 'openssl' 'qrencode' 'xdg-desktop-portal' 'mpv')
+         'sqlite>=3.43' 'libsecp256k1' 'openssl' 'qrencode' 're2' 'xdg-desktop-portal' 'mpv')
 makedepends=('gcc' 'make')
 options=('!debug')
 source=()

@@ -12,6 +12,7 @@
 #include <optional>
 
 #include "feedparser.h"
+#include "keywordfilter.h"
 
 struct Feed {
     qint64 id = 0;
@@ -60,6 +61,8 @@ struct Article {
     // The feed's URL, an npub for a Nostr author, so its title can be shown
     // as Nip19::shortNpub shows it.
     QString feedUrl;
+    // A keyword filter rule highlights it.
+    bool highlighted = false;
 };
 
 // The npub the library syncs with. Empty when none is set.
@@ -171,10 +174,16 @@ public:
     bool recordFetch(qint64 id, const QString &etag, const QString &lastModified, const QString &error);
     // Adds new items and refreshes existing ones (same guid in the same feed)
     // without touching their read and starred flags. A new one is read when
-    // its guid is among the last synced read GUIDs. Returns how many are
-    // new, or -1 on failure.
-    int saveItems(qint64 feedId, const QList<ParsedItem> &items);
+    // its guid is among the last synced read GUIDs, or when a keyword filter
+    // rule marks it read, as though the user had: `markedRead` gets how many
+    // a rule marked that were not read already, and the read status is
+    // marked to publish for an account that publishes reads. The filter
+    // rules hide and highlight new and changed items too. Returns how many
+    // are new and not hidden by a rule, or -1 on failure.
+    int saveItems(qint64 feedId, const QList<ParsedItem> &items, int *markedRead = nullptr);
 
+    // Leaves out the articles a keyword filter rule hides, as counts(),
+    // feeds()' counts, and markRead() do; article() still finds them.
     QList<Article> articles(const ArticleFilter &filter);
     std::optional<Article> article(qint64 id);
     std::optional<LibraryCounts> counts();
@@ -229,6 +238,30 @@ public:
     // part way rolls the delete back with the rest.
     bool replaceSavedViews(const QList<SavedView> &views);
 
+    // The keyword filter rules, in order. They stay in this library and
+    // are never published. An entry that is not a rule this version would
+    // save, or one past KeywordFilter::maxRules, is left out and described
+    // in `dropped`; null on failure.
+    std::optional<QList<KeywordFilter::Rule>> filterRules(QStringList *dropped = nullptr);
+    // Keeps `rules` in place of the ones kept, then applyFilterRules().
+    // Refuses an invalid rule or more than maxRules. `saved` says whether
+    // the rules were kept, so a failure can be told from one to apply them.
+    bool setFilterRules(const QList<KeywordFilter::Rule> &rules, const std::function<bool()> &superseded = {},
+                        bool *saved = nullptr);
+    // Works out again which articles the kept rules hide, highlight, or
+    // mark read (which only marks articles still to come, or
+    // markReadByFilter()), unless the flags are already theirs. Items are
+    // read and evaluated with no transaction open and written in short
+    // batches, so other connections write meanwhile; an item saved since it
+    // was read keeps the flags its save gave it. Stops early, leaving the
+    // rest to whoever comes next, when `superseded` returns true (checked
+    // between batches) or when other rules were saved meanwhile. `ran` says
+    // whether any flag may have changed.
+    bool applyFilterRules(const std::function<bool()> &superseded = {}, bool *ran = nullptr);
+    // Marks read the unread articles the rule `ruleId` marks read (a hide
+    // before it wins), as the user would. Returns how many changed, or -1.
+    int markReadByFilter(const QString &ruleId);
+
     // Runs `work` in one transaction that commits when it returns true and
     // rolls back when it returns false, keeping its lastError(), or throws,
     // passing the exception on. `work` must
@@ -263,12 +296,17 @@ private:
     bool clearSyncState();
     // Puts the item `id` in the search index, or puts it there again in
     // place of what it had, with `insert` prepared by prepareIndex().
-    bool indexItem(QSqlQuery &insert, qint64 id, const QString &title, const QString &author, const QString &summary,
-                   const QString &content, const QString &address, const QString &url);
+    bool indexItem(QSqlQuery &insert, qint64 id, const QString &title, const QString &author, const QString &body);
     bool prepareIndex(QSqlQuery &insert);
     bool backfillSearchIndex();
+    // The rules as saved, compiled once for as long as they stay the same.
+    const KeywordFilter::Rules *compiledFilterRules();
+    // The filter rules as kept, one JSON text each, in order.
+    QStringList filterSource(bool *ok);
 
     QString m_connection;
     QSqlDatabase m_db;
     QString m_error;
+    QStringList m_filterSource;
+    KeywordFilter::Rules m_filterRules;
 };

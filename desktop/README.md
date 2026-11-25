@@ -21,9 +21,10 @@ Everything needed comes with Omarchy (`qmake6`, `make`, a C++ compiler,
 Qt's base, declarative, SVG, and Wayland modules, SQLite 3.43 or later with
 FTS5, which Qt's SQLite driver uses for the library and its search, and `mpv`
 for videos)
-except the packages for Nostr: `sudo pacman -S qt6-websockets libsecp256k1 qrencode`
-(`openssl`, whose libcrypto does the NIP-44 encryption of a remote signer,
-is already part of Arch). The open and save dialogs are the desktop's own,
+except the packages for Nostr and filters: `sudo pacman -S qt6-websockets
+libsecp256k1 qrencode re2` (`openssl`, whose libcrypto does the NIP-44
+encryption of a remote signer, is already part of Arch; RE2 matches the
+regular expressions of keyword filters). The open and save dialogs are the desktop's own,
 through `xdg-desktop-portal` over D-Bus.
 
 ```sh
@@ -42,7 +43,7 @@ the articles of the selected source in the middle, newest first, and the
 article itself on the right. Selecting an article marks it read. Right-click
 a feed to refresh it or unsubscribe (and, for a Nostr author, to open their
 profile on njump.me or copy their npub); the `⋮` menu has refresh, mark the
-view read, OPML import and export, and Sync with Nostr.
+view read, OPML import and export, Sync with Nostr, and Filters.
 
 `Ctrl+F` searches the articles of the selected source: their titles, authors,
 summaries, and text (as the reader shows it, so markup and link addresses
@@ -83,6 +84,48 @@ candidate closest to 1600 pixels wide (or a lazy loader's `data-srcset`),
 else its `data-src`, else its `src`; it is shown as wide as it is, up to the
 reader's width. GIF and WebP show their first frame, and SVG is never
 loaded, since it can name other files and run its own requests.
+
+### Filters
+
+**Filters…** on the `⋮` menu keeps keyword rules, as the web app's filters
+do. A rule looks in an article's title, its text (the summary and the body),
+its author, or anywhere in them, for text it contains, a whole word, or a
+regular expression, with or without minding case, and then hides the
+article, highlights it in the list, or marks it read. A highlight is a tint
+and a bar of the theme's accent; the color a web app rule has is not used.
+The text is the one the reader and the search see, so markup and link
+addresses never match. "Anywhere" looks in the title, the text, and the
+author one at a time, where the web app joins them with spaces: the same,
+but for a match that would run from one into the next. A whole word is one
+no letter, digit, mark, or underscore touches on either side, in any script
+(`café` does not match `cafés`; `C++` matches in `I use C++.`). Rules apply
+in the order listed, which the arrows change: the first hide wins over
+every rule, and highlights and marks read add up.
+
+A hidden article is in no list, unread count, search, "N new articles", or
+"mark the view read". A mark-read rule marks new articles read as they
+arrive, from the window or `readstr refresh`, as though you had read them,
+so with Publish read articles on they go out in the read status with your
+own reads; when a rule starts marking articles read, the window asks whether
+to mark the matching articles already in the library read too, and only
+does if you say so. Each change applies to the whole library, in short
+steps that leave the library free for a refresh meanwhile, and not at all
+when it changes no rule in use (one turned off edited). Rules are kept in
+the library database, never in a sync event: they stay on this machine. At
+most 200 rules of at most 200 characters each; an entry that cannot be used
+(from an older or edited file) is left out and the window says so.
+
+A regular expression is matched with [RE2](https://github.com/google/re2/wiki/Syntax),
+whose time grows linearly with the text, so no pattern can hold up a
+refresh, and nested repeats such as `(a+)+` or `(a|b)*`, which the web app
+refuses, work here. RE2 has no lookarounds (`(?=`, `(?!`, `(?<=`, `(?<!`),
+backreferences (`\1`), possessive or atomic repeats, so a pattern with one
+is refused, with the reason. Otherwise it reads much like JavaScript's: `\w`,
+`\d`, and `\b` are ASCII, as there, `^` and `$` hold at the start and end of
+each field, case is folded by Unicode's simple folding, and `\p{L}` and the
+like name Unicode classes. A regular expression reads the first 64 KiB of
+each field, since the largest patterns RE2 accepts take about half a second
+for that much; contains and whole word read all of it.
 
 ## Nostr
 
@@ -326,6 +369,7 @@ those that take `--json` print one line of JSON whose shape is stable (below).
 | `readstr sync login NPUB` | Sync with an npub or nprofile from now on (public key only) |
 | `readstr sync logout` | Stop syncing and forget what was pulled for the npub |
 | `readstr sync [--json]` | Pull and merge the web app's sync events now; exits 1 if anything failed or was refused |
+| `readstr filters [--json]` | List the keyword filter rules in the order they apply (add and edit them in the window) |
 | `readstr settings [--json]` | List the settings and their values |
 | `readstr settings set KEY VALUE` | Change a setting, such as `readstr settings set loadRemoteImages true`; a running window picks it up at once |
 | `readstr version [--json]`, `readstr --version` | Print the version |
@@ -386,6 +430,12 @@ ISO 8601 (`2026-11-19T20:57:14Z`), and anything unknown is `null`.
 // refused, empty on success)
 {"npub": "npub1…", "added": 2, "skipped": 40, "unsupported": 0, "markedRead": 12,
  "pendingRead": 300, "views": 3, "syncedAt": "2026-11-19T21:30:00Z", "errors": []}
+
+// readstr filters --json (in the order they apply; "target" is "title",
+// "content", "author", or "any", "type" "contains", "word", or "regex", and
+// "action" "hide", "highlight", or "mark-read")
+[{"id": "…", "enabled": true, "order": 0, "target": "title", "type": "word",
+  "pattern": "sponsored", "caseSensitive": false, "action": "hide"}]
 
 // readstr settings --json (every setting, with its default when not set)
 {"loadRemoteImages": false}

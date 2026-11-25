@@ -27,7 +27,7 @@ ApplicationWindow {
     // Single keys must not fire while a dialog or menu has the keyboard, or
     // typing an address would star articles.
     readonly property bool dialogsClosed: !addDialog.visible && !unsubscribeDialog.visible && !syncDialog.visible
-                                          && !settingsDialog.visible && !sourcePane.menuOpen
+                                          && !settingsDialog.visible && !filtersDialog.visible && !sourcePane.menuOpen
     // Nor behind the shortcuts overlay, which only ? and Esc close.
     readonly property bool keysFree: dialogsClosed && !helpVisible
 
@@ -127,6 +127,7 @@ ApplicationWindow {
                     onHelpRequested: win.helpVisible = true
                     onSyncRequested: syncDialog.open()
                     onSettingsRequested: settingsDialog.open()
+                    onFiltersRequested: filtersDialog.open()
                 }
 
                 Rectangle { Layout.fillHeight: true; Layout.preferredWidth: 1; color: Qt.alpha(theme.foreground, 0.1) }
@@ -209,4 +210,5 @@ ApplicationWindow {
     UnsubscribeDialog { id: unsubscribeDialog }
     SyncDialog { id: syncDialog }
     SettingsDialog { id: settingsDialog }
+    FiltersDialog { id: filtersDialog }
 }

@@ -23,6 +23,8 @@ public:
         PublishedRole,
         ReadRole,
         StarredRole,
+        // A keyword filter rule highlights it.
+        HighlightedRole,
     };
 
     explicit ArticleModel(QObject *parent = nullptr);

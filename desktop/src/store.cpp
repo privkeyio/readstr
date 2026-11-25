@@ -7,6 +7,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
+#include <QSet>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QThread>
@@ -26,6 +27,7 @@
 #include "markdown.h"
 #include "paths.h"
 #include "sanitizer.h"
+#include "sync.h"
 
 namespace {
 // Each entry moves the schema up one version (PRAGMA user_version), inside a
@@ -185,7 +187,32 @@ const QList<QStringList> migrations = {
         "CREATE TRIGGER items_fts_delete AFTER DELETE ON items BEGIN"
         " DELETE FROM items_fts WHERE rowid = old.id; END",
     },
+    {
+        // Keyword filter rules, in order, each as the JSON object the web
+        // app keeps in localStorage (KeywordFilter::toJson()), so a rule is
+        // checked as it is read, as there. They stay in this file: no sync
+        // event carries them. Here rather than in settings.json, whose 64 KiB
+        // cap 200 rules of 200 characters can pass, and so that the headless
+        // refresh applies them too.
+        "CREATE TABLE filter_rules (position INTEGER PRIMARY KEY, rule TEXT NOT NULL)",
+        // What the rules make of each item (KeywordFilter::Outcome::flags()),
+        // worked out as it is saved and again for every item when the rules
+        // change, so lists and unread counts leave hidden items out in SQL
+        // rather than running every rule over the library on each reload.
+        "ALTER TABLE items ADD COLUMN filter_flags INTEGER NOT NULL DEFAULT 0",
+        // The rules every item's flags were last worked out for
+        // (KeywordFilter::flagsKey()), or NULL while a pass over the library
+        // is under way, so a change that alters no flag is not applied
+        // again, and a pass cut short is finished later. No rules hide
+        // anything at first.
+        "CREATE TABLE filter_state (id INTEGER PRIMARY KEY CHECK (id = 1), applied TEXT)",
+        "INSERT INTO filter_state (id, applied) VALUES (1, '[]')",
+    },
 };
+
+// The condition that leaves out an item a filter rule hides.
+#define NOT_HIDDEN(alias) "(" alias "filter_flags & 1) = 0"
+static_assert(KeywordFilter::Outcome::Hidden == 1, "NOT_HIDDEN tests the Hidden bit");
 
 // The migration that creates items_fts, after which migrate() indexes the
 // items already there.
@@ -266,8 +293,8 @@ std::atomic<int> connectionCounter{0};
 const char feedColumns[] =
     "SELECT f.id, f.url, f.title, f.site_url, f.description, c.name, f.etag, f.last_modified, f.last_error,"
     " f.last_fetched_at, f.relay_hints, f.complete_at,"
-    " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id AND i.is_read = 0),"
-    " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id), f.incomplete, f.created_at"
+    " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id AND i.is_read = 0 AND " NOT_HIDDEN("i.") "),"
+    " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id AND " NOT_HIDDEN("i.") "), f.incomplete, f.created_at"
     " FROM feeds f LEFT JOIN categories c ON c.id = f.category_id";
 
 Feed feedFrom(const QSqlQuery &query) {
@@ -532,11 +559,11 @@ bool Store::prepareIndex(QSqlQuery &insert) {
 }
 
 bool Store::indexItem(QSqlQuery &insert, qint64 id, const QString &title, const QString &author,
-                      const QString &summary, const QString &content, const QString &address, const QString &url) {
+                      const QString &body) {
     insert.addBindValue(id);
     insert.addBindValue(title);
     insert.addBindValue(author);
-    insert.addBindValue(searchBody(summary, content, address, url));
+    insert.addBindValue(body);
     return insert.exec() || fail(insert.lastError().text());
 }
 
@@ -549,8 +576,8 @@ bool Store::backfillSearchIndex() {
         return fail(items.lastError().text());
     while (items.next())
         if (!indexItem(insert, items.value(0).toLongLong(), items.value(1).toString(), items.value(2).toString(),
-                       items.value(3).toString(), items.value(4).toString(), items.value(5).toString(),
-                       items.value(6).toString()))
+                       searchBody(items.value(3).toString(), items.value(4).toString(), items.value(5).toString(),
+                                  items.value(6).toString())))
             return false;
     return !items.lastError().isValid() || fail(items.lastError().text());
 }
@@ -821,27 +848,36 @@ bool Store::recordFetch(qint64 id, const QString &etag, const QString &lastModif
     return query.exec() || fail(query.lastError().text());
 }
 
-int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
+int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items, int *markedRead) {
+    if (markedRead)
+        *markedRead = 0;
     if (!begin())
         return -1;
-    QSqlQuery exists(m_db), upsert(m_db), version(m_db), replace(m_db), index(m_db);
-    exists.prepare(QStringLiteral(
-        "SELECT id, title, author, summary, content, address, url FROM items WHERE feed_id = ? AND guid = ?"));
+    const KeywordFilter::Rules *rules = compiledFilterRules();
+    if (!rules) {
+        rollback();
+        return -1;
+    }
+    QSqlQuery exists(m_db), upsert(m_db), version(m_db), replace(m_db), index(m_db), synced(m_db);
+    synced.prepare(QStringLiteral("SELECT 1 FROM sync_read WHERE guid = ?"));
+    exists.prepare(QStringLiteral("SELECT id, title, author, summary, content, address, url, filter_flags FROM items"
+                                  " WHERE feed_id = ? AND guid = ?"));
     upsert.prepare(QStringLiteral(
         "INSERT INTO items (feed_id, guid, title, url, author, summary, content, published_at, created_at, address,"
-        " revision, media_url, thumbnail_url, duration, is_read) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-        " EXISTS (SELECT 1 FROM sync_read WHERE guid = ?))"
+        " revision, media_url, thumbnail_url, duration, is_read, read_at, filter_flags)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? OR EXISTS (SELECT 1 FROM sync_read WHERE guid = ?), ?, ?)"
         " ON CONFLICT(feed_id, guid) DO UPDATE SET title = excluded.title, url = excluded.url,"
         " author = excluded.author, summary = excluded.summary, content = excluded.content,"
         " published_at = COALESCE(excluded.published_at, items.published_at), media_url = excluded.media_url,"
-        " thumbnail_url = excluded.thumbnail_url, duration = excluded.duration"));
+        " thumbnail_url = excluded.thumbnail_url, duration = excluded.duration,"
+        " filter_flags = excluded.filter_flags"));
     version.prepare(QStringLiteral(
         "SELECT id, revision, guid FROM items WHERE feed_id = ? AND address = ? ORDER BY revision DESC LIMIT 1"));
     // A newer version takes the older one's row, so the article keeps its
     // place and its read and starred flags.
     replace.prepare(QStringLiteral(
         "UPDATE items SET guid = ?, title = ?, url = ?, author = ?, summary = ?, content = ?,"
-        " published_at = COALESCE(?, published_at), revision = ? WHERE id = ?"));
+        " published_at = COALESCE(?, published_at), revision = ?, filter_flags = ? WHERE id = ?"));
     auto failed = [this](QSqlQuery &query) {
         const QString message = query.lastError().text();
         rollback();
@@ -859,7 +895,10 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         return -1;
     }
     const qint64 now = QDateTime::currentSecsSinceEpoch();
-    int added = 0;
+    int added = 0, marked = 0;
+    const auto outcome = [rules](const ParsedItem &item, const QString &body) {
+        return rules->isEmpty() ? KeywordFilter::Outcome{} : rules->evaluate(item.title, body, item.author);
+    };
     for (const ParsedItem &item : items) {
         if (!item.address.isEmpty()) {
             version.addBindValue(feedId);
@@ -883,12 +922,15 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
                 replace.addBindValue(item.summary);
                 replace.addBindValue(item.content);
                 replace.addBindValue(timestamp(item.published));
+                // The new version keeps the old one's read flag, so a rule
+                // that marks read does not reach it.
+                const QString body = searchBody(item.summary, item.content, item.address, item.url);
                 replace.addBindValue(item.revision);
+                replace.addBindValue(outcome(item, body).flags());
                 replace.addBindValue(rowId);
                 if (!replace.exec())
                     return failed(replace);
-                if (!indexItem(index, rowId, item.title, item.author, item.summary, item.content, item.address,
-                               item.url))
+                if (!indexItem(index, rowId, item.title, item.author, body))
                     return indexFailed();
                 continue;
             }
@@ -906,6 +948,7 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         // can bring an image's description into the index or take it out.
         bool textChanged = true;
         QString address = item.address;
+        int flags = 0;
         if (!isNew) {
             rowId = exists.value(0).toLongLong();
             textChanged = exists.value(1).toString() != item.title || exists.value(2).toString() != item.author
@@ -914,8 +957,27 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
             // The upsert keeps the address the row has, which says how its
             // content reads.
             address = exists.value(5).toString();
+            flags = exists.value(7).toInt();
         }
         exists.finish();
+        QString body;
+        bool markRead = false;
+        if (textChanged) {
+            body = searchBody(item.summary, item.content, address, item.url);
+            const KeywordFilter::Outcome filtered = outcome(item, body);
+            flags = filtered.flags();
+            markRead = isNew && filtered.markRead;
+        }
+        // A new item the last synced reads list is read already: a rule
+        // that would mark it read changes nothing, so it is neither counted
+        // nor given a read time, and publishes nothing.
+        if (markRead) {
+            synced.addBindValue(item.guid);
+            if (!synced.exec())
+                return failed(synced);
+            markRead = !synced.next();
+            synced.finish();
+        }
         upsert.addBindValue(feedId);
         upsert.addBindValue(item.guid);
         upsert.addBindValue(item.title);
@@ -930,29 +992,49 @@ int Store::saveItems(qint64 feedId, const QList<ParsedItem> &items) {
         upsert.addBindValue(text(item.mediaUrl));
         upsert.addBindValue(text(item.thumbnailUrl));
         upsert.addBindValue(item.duration >= 0 ? QVariant(item.duration) : QVariant(QMetaType::fromType<double>()));
+        upsert.addBindValue(markRead ? 1 : 0);
         upsert.addBindValue(item.guid);
+        // Marked read here, so it is published with the user's own reads.
+        upsert.addBindValue(markRead ? QVariant(now) : QVariant(QMetaType::fromType<qint64>()));
+        upsert.addBindValue(flags);
         if (!upsert.exec())
             return failed(upsert);
         if (isNew)
             rowId = upsert.lastInsertId().toLongLong();
-        if (textChanged
-            && !indexItem(index, rowId, item.title, item.author, item.summary, item.content, address, item.url))
+        if (textChanged && !indexItem(index, rowId, item.title, item.author, body))
             return indexFailed();
-        added += isNew;
+        // Only what a list can show is news: an article a rule hides is not.
+        added += isNew && !(flags & KeywordFilter::Outcome::Hidden);
+        marked += markRead;
+    }
+    // As Backend::markPending() would for a read the user made, so the
+    // window publishes it, even after a headless refresh.
+    if (marked > 0) {
+        QSqlQuery pending(m_db);
+        pending.prepare(QStringLiteral(
+            "UPDATE sync_account SET publish_pending = publish_pending | ? WHERE publish_reads = 1"));
+        pending.addBindValue(publishBit(Sync::readStatusKind));
+        if (!pending.exec())
+            return failed(pending);
     }
     exists.finish();
     upsert.finish();
     version.finish();
     replace.finish();
     index.finish();
-    return commit() ? added : -1;
+    synced.finish();
+    if (!commit())
+        return -1;
+    if (markedRead)
+        *markedRead = marked;
+    return added;
 }
 
 namespace {
 const char articleColumns[] =
     "SELECT i.id, i.feed_id, f.title, i.guid, i.title, i.url, i.author, i.summary, %1,"
-    " i.published_at, i.is_read, i.is_starred, i.address, i.media_url, i.thumbnail_url, i.duration, f.url"
-    " FROM items i JOIN feeds f ON f.id = i.feed_id";
+    " i.published_at, i.is_read, i.is_starred, i.address, i.media_url, i.thumbnail_url, i.duration, f.url,"
+    " i.filter_flags FROM items i JOIN feeds f ON f.id = i.feed_id";
 
 Article articleFrom(const QSqlQuery &query) {
     Article article;
@@ -975,12 +1057,14 @@ Article articleFrom(const QSqlQuery &query) {
     if (!query.value(15).isNull())
         article.duration = query.value(15).toDouble();
     article.feedUrl = query.value(16).toString();
+    article.highlighted = query.value(17).toInt() & KeywordFilter::Outcome::Highlighted;
     return article;
 }
 
-// The WHERE conditions a filter adds, after "WHERE 1".
+// The WHERE conditions a filter adds, after "WHERE 1". An item a filter
+// rule hides is never in a view.
 QString filterSql(const ArticleFilter &filter, QVariantList &values) {
-    QString sql;
+    QString sql = QStringLiteral(" AND " NOT_HIDDEN("i."));
     if (filter.feedId) {
         sql += " AND i.feed_id = ?";
         values << filter.feedId;
@@ -1027,7 +1111,7 @@ QList<Article> Store::articles(const ArticleFilter &filter) {
             values << match;
         sql += " WHERE i.id IN (SELECT id FROM (SELECT i.id FROM items i" + searchJoin + " WHERE 1"
                + filterSql(rest, values) + " AND i.id <> ?" + order
-               + " LIMIT ?) UNION SELECT i.id FROM items i WHERE i.id = ?";
+               + " LIMIT ?) UNION SELECT i.id FROM items i WHERE i.id = ? AND " NOT_HIDDEN("i.");
         values << filter.alsoId << (filter.limit > 0 ? filter.limit : -1) << filter.alsoId;
         if (filter.feedId) {
             sql += " AND i.feed_id = ?";
@@ -1071,8 +1155,12 @@ std::optional<Article> Store::article(qint64 id) {
 
 std::optional<LibraryCounts> Store::counts() {
     QSqlQuery query(m_db);
-    if (!query.exec(QStringLiteral("SELECT COUNT(*), COALESCE(SUM(is_read = 0), 0),"
-                                   " (SELECT COUNT(*) FROM items WHERE is_starred = 1), COALESCE(MAX(id), 0) FROM items"))
+    // Hidden items count for none of them but the last id, which bounds
+    // marking a view read.
+    if (!query.exec(QStringLiteral("SELECT COALESCE(SUM(" NOT_HIDDEN("") "), 0),"
+                                   " COALESCE(SUM(is_read = 0 AND " NOT_HIDDEN("") "), 0),"
+                                   " (SELECT COUNT(*) FROM items WHERE is_starred = 1 AND " NOT_HIDDEN("") "),"
+                                   " COALESCE(MAX(id), 0) FROM items"))
         || !query.next()) {
         fail(query.lastError().text());
         return std::nullopt;
@@ -1367,4 +1455,300 @@ bool Store::replaceSavedViews(const QList<SavedView> &views) {
             return fail(query.lastError().text());
     }
     return true;
+}
+
+std::optional<QList<KeywordFilter::Rule>> Store::filterRules(QStringList *dropped) {
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("SELECT rule FROM filter_rules ORDER BY position"))) {
+        fail(query.lastError().text());
+        return std::nullopt;
+    }
+    QList<KeywordFilter::Rule> rules;
+    QSet<QString> ids;
+    int entry = 0;
+    const auto drop = [dropped, &entry](const QString &why) {
+        if (dropped)
+            *dropped << QStringLiteral("rule %1: %2").arg(entry).arg(why);
+    };
+    while (query.next()) {
+        ++entry;
+        if (rules.size() == KeywordFilter::maxRules) {
+            drop(QStringLiteral("more than %1 rules").arg(KeywordFilter::maxRules));
+            continue;
+        }
+        const QJsonDocument document = QJsonDocument::fromJson(query.value(0).toString().toUtf8());
+        if (!document.isObject()) {
+            drop(QStringLiteral("not a JSON object"));
+            continue;
+        }
+        QString problem;
+        auto rule = KeywordFilter::fromJson(document.object(), &problem);
+        if (!rule) {
+            drop(problem);
+            continue;
+        }
+        if (ids.contains(rule->id))
+            rule->id = KeywordFilter::newId();
+        ids.insert(rule->id);
+        rules << *rule;
+    }
+    if (query.lastError().isValid()) {
+        fail(query.lastError().text());
+        return std::nullopt;
+    }
+    return rules;
+}
+
+QStringList Store::filterSource(bool *ok) {
+    QSqlQuery query(m_db);
+    QStringList source;
+    *ok = query.exec(QStringLiteral("SELECT rule FROM filter_rules ORDER BY position"));
+    if (!*ok) {
+        fail(query.lastError().text());
+        return source;
+    }
+    while (query.next())
+        source << query.value(0).toString();
+    *ok = !query.lastError().isValid() || fail(query.lastError().text());
+    return source;
+}
+
+const KeywordFilter::Rules *Store::compiledFilterRules() {
+    bool ok = false;
+    const QStringList source = filterSource(&ok);
+    if (!ok)
+        return nullptr;
+    if (source != m_filterSource) {
+        // What cannot be read is left out here too; the window says so.
+        const auto rules = filterRules();
+        if (!rules)
+            return nullptr;
+        m_filterRules = KeywordFilter::Rules(*rules);
+        m_filterSource = source;
+    }
+    return &m_filterRules;
+}
+
+namespace {
+// Items read, worked out, and written per short transaction when the rules
+// change, so no write of the window's or of a headless refresh waits
+// longer than one batch takes.
+constexpr int refilterBatch = 500;
+
+// The columns searchBody() reads besides the title and author, or NULLs in
+// their place when no rule reads the text, so the query keeps its shape.
+QString contentColumns(bool needed) {
+    return needed ? QStringLiteral("summary, content, address, url") : QStringLiteral("NULL, NULL, NULL, NULL");
+}
+}
+
+bool Store::applyFilterRules(const std::function<bool()> &superseded, bool *ran) {
+    if (ran)
+        *ran = false;
+    const auto stopped = [&superseded] { return superseded && superseded(); };
+    bool ok = false;
+    const QStringList source = filterSource(&ok);
+    if (!ok)
+        return false;
+    const auto rules = filterRules();
+    if (!rules)
+        return false;
+    const QString key = KeywordFilter::flagsKey(*rules);
+    QSqlQuery state(m_db);
+    if (!state.exec(QStringLiteral("SELECT applied FROM filter_state WHERE id = 1")))
+        return fail(state.lastError().text());
+    if (state.next() && !state.value(0).isNull() && state.value(0).toString() == key)
+        return true;
+    state.finish();
+    if (ran)
+        *ran = true;
+    const KeywordFilter::Rules compiled(*rules);
+    // What an item's flags depend on, and so what is read, and what must be
+    // as it was read for the flags worked out from it to be written: with
+    // no rules, nothing (only items with flags are read, to clear them);
+    // without a rule that reads the text, the title and the author.
+    int compared = 2;
+    if (compiled.isEmpty())
+        compared = 0;
+    else if (compiled.needsContent())
+        compared = 6;
+    QSqlQuery read(m_db);
+    read.setForwardOnly(true);
+    read.prepare(QStringLiteral("SELECT id, filter_flags, title, author, %1 FROM items WHERE id > ?%2"
+                                " ORDER BY id LIMIT ?")
+                     .arg(contentColumns(compared == 6),
+                          compared == 0 ? QStringLiteral(" AND filter_flags <> 0") : QString()));
+    static const char *const textColumns[] = {"title", "author", "summary", "content", "address", "url"};
+    QString updateSql = QStringLiteral("UPDATE items SET filter_flags = ? WHERE id = ?");
+    for (int column = 0; column < compared; ++column)
+        updateSql += QStringLiteral(" AND %1 IS ?").arg(QLatin1String(textColumns[column]));
+    struct Change {
+        qint64 id = 0;
+        int flags = 0;
+        // The text the flags were worked out from, as read.
+        QVariantList text;
+    };
+    qint64 last = 0;
+    for (;;) {
+        if (stopped())
+            return true;
+        // Read and worked out with no transaction open, so other
+        // connections write meanwhile.
+        QList<Change> changes;
+        int rows = 0;
+        read.addBindValue(last);
+        read.addBindValue(refilterBatch);
+        if (!read.exec())
+            return fail(read.lastError().text());
+        while (read.next()) {
+            ++rows;
+            last = read.value(0).toLongLong();
+            // The text as search finds it, made only when a rule reads it.
+            const auto body = [&read] {
+                return searchBody(read.value(4).toString(), read.value(5).toString(), read.value(6).toString(),
+                                  read.value(7).toString());
+            };
+            const int flags =
+                compiled.isEmpty()
+                    ? 0
+                    : compiled.evaluateLazily(read.value(2).toString(), body, read.value(3).toString()).flags();
+            if (flags == read.value(1).toInt())
+                continue;
+            Change change{last, flags, {}};
+            for (int column = 0; column < compared; ++column)
+                change.text << read.value(2 + column);
+            changes << change;
+        }
+        if (read.lastError().isValid())
+            return fail(read.lastError().text());
+        read.finish();
+        const bool done = rows < refilterBatch;
+        if (stopped())
+            return true;
+        // A pass takes the write lock once per batch, so a writer that
+        // keeps it nearly all the time (a long refresh in another process)
+        // could outlast one busy timeout; holding nothing, the pass can
+        // wait a few in turn.
+        bool began = false;
+        for (int attempt = 0; attempt < 3 && !began; ++attempt)
+            began = begin();
+        if (!began)
+            return false;
+        const bool written = [&] {
+            // Newer rules were saved meanwhile, and whoever saved them
+            // works the flags out for them; these would only be overwritten.
+            const QStringList now = filterSource(&ok);
+            if (!ok || now != source)
+                return ok;
+            QSqlQuery update(m_db);
+            // An item whose text changed since it was read was saved since,
+            // with these rules or newer ones, and keeps the flags that save
+            // gave it.
+            update.prepare(updateSql);
+            for (const Change &change : std::as_const(changes)) {
+                update.addBindValue(change.flags);
+                update.addBindValue(change.id);
+                for (const QVariant &value : change.text)
+                    update.addBindValue(value);
+                if (!update.exec())
+                    return fail(update.lastError().text());
+            }
+            if (done) {
+                update.prepare(QStringLiteral("UPDATE filter_state SET applied = ? WHERE id = 1"));
+                update.addBindValue(key);
+                if (!update.exec())
+                    return fail(update.lastError().text());
+            }
+            return true;
+        }();
+        if (!written) {
+            rollback();
+            return false;
+        }
+        if (!commit())
+            return false;
+        if (done || filterSource(&ok) != source)
+            return ok;
+    }
+}
+
+bool Store::setFilterRules(const QList<KeywordFilter::Rule> &rules, const std::function<bool()> &superseded,
+                           bool *saved) {
+    if (saved)
+        *saved = false;
+    if (rules.size() > KeywordFilter::maxRules)
+        return fail(QStringLiteral("more than %1 filter rules").arg(KeywordFilter::maxRules));
+    for (const KeywordFilter::Rule &rule : rules)
+        if (KeywordFilter::check(rule.type, rule.pattern) != KeywordFilter::Problem::None || rule.id.isEmpty())
+            return fail(QStringLiteral("not a valid filter rule: %1").arg(rule.pattern));
+    const QString key = KeywordFilter::flagsKey(rules);
+    const bool kept = transaction([&] {
+        QSqlQuery query(m_db);
+        if (!query.exec(QStringLiteral("DELETE FROM filter_rules")))
+            return fail(query.lastError().text());
+        query.prepare(QStringLiteral("INSERT INTO filter_rules (position, rule) VALUES (?, ?)"));
+        for (qsizetype i = 0; i < rules.size(); ++i) {
+            query.addBindValue(i);
+            query.addBindValue(QString::fromUtf8(
+                QJsonDocument(KeywordFilter::toJson(rules.at(i), int(i))).toJson(QJsonDocument::Compact)));
+            if (!query.exec())
+                return fail(query.lastError().text());
+        }
+        // Until the pass below is done, the flags are those of no one list
+        // of rules; a change that leaves them as they are (a disabled rule
+        // edited, rules renamed) needs no pass at all.
+        query.prepare(QStringLiteral("UPDATE filter_state SET applied = NULL WHERE id = 1 AND applied IS NOT ?"));
+        query.addBindValue(key);
+        return query.exec() || fail(query.lastError().text());
+    });
+    if (saved)
+        *saved = kept;
+    return kept && applyFilterRules(superseded);
+}
+
+int Store::markReadByFilter(const QString &ruleId) {
+    const auto rules = filterRules();
+    if (!rules)
+        return -1;
+    const auto rule = std::find_if(rules->cbegin(), rules->cend(),
+                                   [&ruleId](const KeywordFilter::Rule &each) { return each.id == ruleId; });
+    if (rule == rules->cend() || rule->action != KeywordFilter::Action::MarkRead)
+        return 0;
+    const KeywordFilter::Rules alone({*rule});
+    int marked = -1;
+    const bool ok = transaction([&] {
+        // The flags say which items some rule marks read, and none hidden;
+        // of those, the ones this rule matches.
+        QSqlQuery query(m_db);
+        query.setForwardOnly(true);
+        // The text only for a rule that reads it.
+        if (!query.exec(QStringLiteral("SELECT id, title, author, %1 FROM items"
+                                       " WHERE is_read = 0 AND (filter_flags & 5) = 4")
+                            .arg(contentColumns(alone.needsContent()))))
+            return fail(query.lastError().text());
+        QList<qint64> ids;
+        while (query.next()) {
+            const auto body = [&query] {
+                return searchBody(query.value(3).toString(), query.value(4).toString(), query.value(5).toString(),
+                                  query.value(6).toString());
+            };
+            if (alone.evaluateLazily(query.value(1).toString(), body, query.value(2).toString()).markRead)
+                ids << query.value(0).toLongLong();
+        }
+        if (query.lastError().isValid())
+            return fail(query.lastError().text());
+        query.finish();
+        QSqlQuery update(m_db);
+        update.prepare(QStringLiteral("UPDATE items SET is_read = 1, read_at = ? WHERE id = ? AND is_read = 0"));
+        marked = 0;
+        for (const qint64 id : std::as_const(ids)) {
+            update.addBindValue(QDateTime::currentSecsSinceEpoch());
+            update.addBindValue(id);
+            if (!update.exec())
+                return fail(update.lastError().text());
+            marked += update.numRowsAffected();
+        }
+        return true;
+    });
+    return ok ? marked : -1;
 }

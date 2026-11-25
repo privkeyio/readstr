@@ -184,5 +184,13 @@
   "Settings…": "Configurações…",
   "Shows the images of the article you open. Fetching them tells their sites that you read it. When this is off, images are links, and an article's images can be loaded for it alone.": "Mostra as imagens do artigo que você abrir. Ao buscá-las, os sites delas ficam sabendo que você o leu. Quando isto está desativado, as imagens são links, e as imagens de um artigo podem ser carregadas só para ele.",
   "Cannot read the settings, so the defaults apply: %1": "Não foi possível ler as configurações, então os padrões são usados: %1",
-  "Cannot save the settings: %1": "Não foi possível salvar as configurações: %1"
+  "Cannot save the settings: %1": "Não foi possível salvar as configurações: %1",
+  "Anywhere": "Em qualquer lugar",
+  "Delete": "Excluir",
+  "Save rule": "Salvar regra",
+  "Cannot save the filter rules: %1": "Não é possível salvar as regras de filtro: %1",
+  "Enter a word, a phrase, or a pattern": "Digite uma palavra, uma frase ou um padrão",
+  "Regular expressions here cannot use lookarounds or backreferences": "As expressões regulares aqui não podem usar lookarounds nem retrorreferências",
+  "This rule marks new articles read as they arrive. Mark the articles already in the library that it matches read too?": "Esta regra marca os artigos novos como lidos conforme eles chegam. Marcar também como lidos os artigos que já estão na biblioteca e que correspondem a ela?",
+  "Rules hide, highlight, or mark read the articles whose title, text, or author match. They stay on this computer and are never synced.": "As regras ocultam, destacam ou marcam como lidos os artigos cujo título, texto ou autor correspondam. Elas ficam neste computador e nunca são sincronizadas."
 }
