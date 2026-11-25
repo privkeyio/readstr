@@ -255,12 +255,18 @@ public:
     // batches, so other connections write meanwhile; an item saved since it
     // was read keeps the flags its save gave it. Stops early, leaving the
     // rest to whoever comes next, when `superseded` returns true (checked
-    // between batches) or when other rules were saved meanwhile. `ran` says
+    // between batches) or when the rules were saved again meanwhile. `ran` says
     // whether any flag may have changed.
     bool applyFilterRules(const std::function<bool()> &superseded = {}, bool *ran = nullptr);
     // Marks read the unread articles the rule `ruleId` marks read (a hide
-    // before it wins), as the user would. Returns how many changed, or -1.
+    // wins), as the user would, reading the rules and the text as they are
+    // then rather than the flags. Returns how many changed, or -1.
     int markReadByFilter(const QString &ruleId);
+#ifdef READSTR_TESTS
+    // Only in the test build: called by applyFilterRules() between two
+    // batches, with what it checks for being superseded, on its thread.
+    static inline std::function<void(const std::function<bool()> &stopped)> filterBatchHook;
+#endif
 
     // Runs `work` in one transaction that commits when it returns true and
     // rolls back when it returns false, keeping its lastError(), or throws,

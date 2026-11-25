@@ -65,6 +65,14 @@ int delimiterColumns(QStringView rest) {
 namespace Markdown {
 InertDocument::InertDocument(QObject *parent) : QTextDocument(parent) {
     setDocumentLayout(new InertLayout(this));
+    // With no QGuiApplication (a headless refresh rendering an article for
+    // the filter rules) the default font has no size, and Qt warns at every
+    // heading it scales from it.
+    QFont font = defaultFont();
+    if (font.pointSizeF() <= 0 && font.pixelSize() <= 0) {
+        font.setPointSize(12);
+        setDefaultFont(font);
+    }
 }
 
 QVariant InertDocument::loadResource(int, const QUrl &) { return {}; }

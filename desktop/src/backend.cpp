@@ -161,10 +161,11 @@ Backend::Backend(FilePicker *picker, QObject *parent)
                 return result;
             },
             [this](const WriteResult &result) {
+                // Batches committed before an error still changed flags.
+                if (result.changed > 0)
+                    reloadLibrary();
                 if (!result.error.isEmpty())
                     setStatus(tr("Cannot apply the filter rules: %1").arg(result.error), true);
-                else if (result.changed > 0)
-                    reloadLibrary();
             });
 }
 

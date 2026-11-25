@@ -255,13 +255,20 @@ std::optional<Rule> fromJson(const QJsonObject &object, QString *problem) {
     case Problem::Invalid:
     case Problem::Unsupported: return refuse(QStringLiteral("a regular expression that cannot be used"));
     }
+    // Absent, each has its default; anything but true or false could be
+    // read as a broader rule than the one written.
+    const QJsonValue enabled = object.value("enabled"), caseSensitive = object.value("caseSensitive");
+    if (!enabled.isUndefined() && !enabled.isBool())
+        return refuse(QStringLiteral("\"enabled\" is not true or false"));
+    if (!caseSensitive.isUndefined() && !caseSensitive.isBool())
+        return refuse(QStringLiteral("\"caseSensitive\" is not true or false"));
     rule.id = object.value("id").toString();
     if (rule.id.isEmpty() || rule.id.size() > 64)
         rule.id = newId();
-    rule.enabled = object.value("enabled").toBool(true);
+    rule.enabled = enabled.toBool(true);
     rule.target = *target;
     rule.type = *type;
-    rule.caseSensitive = object.value("caseSensitive").toBool(false);
+    rule.caseSensitive = caseSensitive.toBool(false);
     rule.action = *action;
     return rule;
 }

@@ -277,6 +277,7 @@
   "Highlight": "Destacar",
   "Mark read": "Marcar como lido",
   "Case sensitive": "Distinguir maiúsculas de minúsculas",
+  "(?i) in the pattern ignores case even when Case sensitive is on": "(?i) no padrão ignora maiúsculas e minúsculas mesmo com Distinguir maiúsculas de minúsculas ativado",
   "Use this rule": "Usar esta regra",
   "Move up": "Mover para cima",
   "Move down": "Mover para baixo",

@@ -72,8 +72,9 @@ QJsonObject toJson(const Rule &rule, int order);
 // The rule `object` describes, or null with the reason in `problem` when it
 // is not one this version would save: no pattern, one past
 // maxPatternLength (cutting it would change what a regular expression
-// matches), one check() refuses, or an unknown target, type, or action
-// (guessing one could hide what the user never asked to hide).
+// matches), one check() refuses, an unknown target, type, or action
+// (guessing one could hide what the user never asked to hide), or an
+// "enabled" or "caseSensitive" that is there but not a boolean.
 std::optional<Rule> fromJson(const QJsonObject &object, QString *problem = nullptr);
 QString newId();
 // What decides the flags `rules` give an article: the enabled ones, in

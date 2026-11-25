@@ -13,13 +13,23 @@ Dialog {
     readonly property color errorColor: Material.color(Material.Red, Material.theme === Material.Light ? Material.Shade700 : Material.Shade300)
     readonly property var rules: backend.filterRules
     readonly property int rowHeight: 56
-    // The row the form edits, or -1 while it adds a rule.
-    property int editing: -1
+    // The id of the rule the form edits, or "" while it adds one, so that
+    // the form keeps to that rule however the list changes.
+    property string editingId: ""
+    // Its row, or -1.
+    readonly property int editing: indexOfRule(editingId)
     // An empty pattern is only an error once the user tried to save it.
     property bool attempted: false
     readonly property string problem: patternField.text === "" && !attempted ? ""
                                       : backend.filterProblem(typeBox.currentValue, patternField.text)
     readonly property bool full: editing < 0 && rules.length >= backend.maxFilterRules
+
+    // A rule the form edits that is gone (the list read back after a save
+    // failed) is no longer edited.
+    onRulesChanged: {
+        if (editingId !== "" && indexOfRule(editingId) < 0)
+            resetForm()
+    }
 
     readonly property var targets: [
         { value: "any", text: qsTr("Anywhere") },
@@ -38,6 +48,15 @@ Dialog {
         { value: "mark-read", text: qsTr("Mark read") }
     ]
 
+    function indexOfRule(id) {
+        if (id === "")
+            return -1
+        for (let i = 0; i < rules.length; ++i)
+            if (rules[i].id === id)
+                return i
+        return -1
+    }
+
     function nameOf(list, value) {
         for (let i = 0; i < list.length; ++i)
             if (list[i].value === value)
@@ -53,7 +72,7 @@ Dialog {
     }
 
     function resetForm() {
-        editing = -1
+        editingId = ""
         attempted = false
         patternField.text = ""
         targetBox.currentIndex = 0
@@ -64,7 +83,7 @@ Dialog {
 
     function edit(index) {
         const rule = rules[index]
-        editing = index
+        editingId = rule.id
         attempted = false
         patternField.text = rule.pattern
         targetBox.currentIndex = targetBox.indexOfValue(rule.target)
@@ -87,7 +106,11 @@ Dialog {
         attempted = true
         if (full || backend.filterProblem(typeBox.currentValue, patternField.text) !== "")
             return
-        const index = editing
+        const index = indexOfRule(editingId)
+        if (editingId !== "" && index < 0) {
+            resetForm()
+            return
+        }
         const before = index >= 0 ? rules[index] : null
         const rule = {
             enabled: before ? before.enabled : true,
@@ -118,8 +141,6 @@ Dialog {
     function remove(index) {
         if (editing === index)
             resetForm()
-        else if (editing > index)
-            editing -= 1
         backend.removeFilterRule(index)
     }
 
@@ -127,10 +148,6 @@ Dialog {
         const target = index + step
         if (target < 0 || target >= rules.length)
             return
-        if (editing === index)
-            editing = target
-        else if (editing === target)
-            editing = index
         backend.moveFilterRule(index, step)
         list.positionViewAtIndex(target, ListView.Contain)
     }
@@ -406,6 +423,18 @@ Dialog {
                 enabled: !dialog.full
                 onClicked: dialog.submit()
             }
+        }
+
+        // RE2 lets a pattern turn case folding on for itself.
+        Label {
+            objectName: "filterCaseHint"
+            Layout.fillWidth: true
+            visible: typeBox.currentValue === "regex"
+            text: qsTr("(?i) in the pattern ignores case even when Case sensitive is on")
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            font.pixelSize: 11
+            opacity: 0.7
         }
 
         Label {

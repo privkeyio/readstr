@@ -123,7 +123,9 @@ backreferences (`\1`), possessive or atomic repeats, so a pattern with one
 is refused, with the reason. Otherwise it reads much like JavaScript's: `\w`,
 `\d`, and `\b` are ASCII, as there, `^` and `$` hold at the start and end of
 each field, case is folded by Unicode's simple folding, and `\p{L}` and the
-like name Unicode classes. A regular expression reads the first 64 KiB of
+like name Unicode classes. Case sensitive only sets where a pattern starts:
+one with `(?i)` in it ignores case from there even with it on, as the
+dialog says. A regular expression reads the first 64 KiB of
 each field, since the largest patterns RE2 accepts take about half a second
 for that much; contains and whole word read all of it.
 

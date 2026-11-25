@@ -286,6 +286,7 @@
   "Highlight": "Выделить",
   "Mark read": "Отметить прочитанным",
   "Case sensitive": "С учётом регистра",
+  "(?i) in the pattern ignores case even when Case sensitive is on": "(?i) в шаблоне отключает учёт регистра, даже если включено «С учётом регистра»",
   "Use this rule": "Использовать это правило",
   "Move up": "Переместить вверх",
   "Move down": "Переместить вниз",
