@@ -30,6 +30,8 @@ ApplicationWindow {
                                           && !settingsDialog.visible && !filtersDialog.visible && !sourcePane.menuOpen
     // Nor behind the shortcuts overlay, which only ? and Esc close.
     readonly property bool keysFree: dialogsClosed && !helpVisible
+    // A text field keeps Ctrl+Z and Ctrl+Shift+Z for undoing its own typing.
+    readonly property bool editingText: activeFocusItem instanceof TextInput || activeFocusItem instanceof TextEdit
 
     // Re-evaluated on a language switch, like every other qsTr() binding.
     readonly property var shortcuts: [
@@ -46,6 +48,8 @@ ApplicationWindow {
         { keys: "Ctrl+R", action: qsTr("Refresh all feeds") },
         { keys: "Ctrl+N", action: qsTr("Add a feed") },
         { keys: "Ctrl+Shift+A", action: qsTr("Mark everything in the view read") },
+        { keys: "Ctrl+Z", action: qsTr("Undo the last change") },
+        { keys: "Ctrl+Shift+Z", action: qsTr("Redo what was undone") },
         { keys: "Ctrl+O", action: qsTr("Import OPML") },
         { keys: "Ctrl+Shift+E", action: qsTr("Export OPML") },
         { keys: "Ctrl+C", action: qsTr("Copy the selected text") },
@@ -93,6 +97,10 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+R"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.refreshAll() }
     Shortcut { sequence: "Ctrl+N"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: addDialog.open() }
     Shortcut { sequence: "Ctrl+Shift+A"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.markViewRead() }
+    Shortcut { objectName: "undoShortcut"; sequences: [StandardKey.Undo]; context: Qt.ApplicationShortcut; enabled: win.keysFree && !win.editingText; onActivated: backend.undo() }
+    // Where StandardKey.Redo is Ctrl+Shift+Z already, as on Linux, the key
+    // is bound twice here and Qt calls it ambiguous, though it is one action.
+    Shortcut { objectName: "redoShortcut"; sequences: [StandardKey.Redo, "Ctrl+Shift+Z"]; context: Qt.ApplicationShortcut; enabled: win.keysFree && !win.editingText; onActivated: backend.redo(); onActivatedAmbiguously: backend.redo() }
     Shortcut { sequence: "Ctrl+O"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.importOpml() }
     Shortcut { sequence: "Ctrl+Shift+E"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.exportOpml() }
     // The article never takes the keyboard, so its selection is copied

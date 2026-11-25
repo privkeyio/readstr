@@ -221,18 +221,27 @@ void Backend::onWorker(std::function<Result(Store &)> work, std::function<void(c
 }
 
 void Backend::writeOnWorker(std::function<int(Store &)> work, const QString &failure,
-                            std::function<void(const WriteResult &)> done) {
+                            std::function<void(const WriteResult &)> done, const std::shared_ptr<UndoState> &undo) {
     auto write = std::make_shared<UserWrite>();
     write->work = std::move(work);
     write->failure = failure;
     m_userWrites << write;
     onWorker<WriteResult>(
-        [write](Store &store) {
+        [write, undo](Store &store) {
             WriteResult result;
+            // An undo or redo queued before the write it reverses failed
+            // has nothing to reverse.
+            if (undo && undo->failed) {
+                result.skipped = true;
+                write->state = UserWrite::Saved;
+                return result;
+            }
             result.changed = write->work(store);
             if (result.changed < 0) {
                 result.error = store.lastError();
                 write->error = result.error;
+                if (undo)
+                    undo->failed = true;
             }
             write->state = result.changed < 0 ? UserWrite::Failed : UserWrite::Saved;
             return result;
@@ -642,12 +651,6 @@ void Backend::nextUnread() {
         selectArticle(row);
 }
 
-void Backend::setFlags(bool read, bool starred) {
-    if (!m_storeOpen || !m_article.id)
-        return;
-    saveFlags(m_article, read, starred, tr("Cannot change the article: %1"));
-}
-
 void Backend::applyPending(Article &article) const {
     const auto pending = m_pendingFlags.constFind(article.id);
     if (pending == m_pendingFlags.cend())
@@ -665,11 +668,19 @@ void Backend::showFlags(qint64 id, bool read, bool starred) {
     }
 }
 
-void Backend::saveFlags(const Article &before, bool read, bool starred, const QString &failure) {
+void Backend::saveFlags(const Article &before, bool read, bool starred, const QString &failure,
+                        const std::function<bool(Store &)> &writeRead, const Finished &finished,
+                        const std::shared_ptr<UndoState> &undo) {
     const qint64 id = before.id;
-    const bool readChanged = read != before.read, starredChanged = starred != before.starred;
-    if (!readChanged && !starredChanged)
+    // An undo puts back the read time too, which a write nobody can undo
+    // (opening the article) may have changed under the same flag.
+    const bool readChanged = read != before.read || writeRead,
+               starredChanged = starred != before.starred;
+    if (!readChanged && !starredChanged) {
+        if (finished)
+            finished(true);
         return;
+    }
     PendingFlags &pending = m_pendingFlags[id];
     pending.read = read;
     pending.starred = starred;
@@ -677,19 +688,22 @@ void Backend::saveFlags(const Article &before, bool read, bool starred, const QS
     showFlags(id, read, starred);
     // The worker takes writes in order, so each only needs what it changes.
     writeOnWorker(
-        [id, read, starred, readChanged, starredChanged,
+        [id, read, starred, readChanged, starredChanged, writeRead,
          readsPending = readChanged ? readsPublishedFor() : QString()](Store &store) {
-            if ((readChanged && !store.setRead(id, read)) || (starredChanged && !store.setStarred(id, starred)))
+            if ((readChanged && !(writeRead ? writeRead(store) : store.setRead(id, read)))
+                || (starredChanged && !store.setStarred(id, starred)))
                 return -1;
             markPending(store, readsPending, Sync::readStatusKind);
             return 1;
         },
         failure,
-        [this, id, failure, readChanged](const WriteResult &result) {
+        [this, id, failure, readChanged, finished](const WriteResult &result) {
             if (!result.error.isEmpty())
                 setStatus(failure.arg(result.error), true);
-            else if (readChanged)
+            else if (readChanged && !result.skipped)
                 schedulePublish(Sync::readStatusKind);
+            if (finished)
+                finished(result.error.isEmpty() && !result.skipped);
             const auto pending = m_pendingFlags.find(id);
             if (pending != m_pendingFlags.end()) {
                 if (--pending->writes > 0)
@@ -707,11 +721,225 @@ void Backend::saveFlags(const Article &before, bool read, bool starred, const QS
                 return;
             }
             reloadCounts();
-        });
+        },
+        undo);
 }
 
-void Backend::toggleRead() { setFlags(!m_article.read, m_article.starred); }
-void Backend::toggleStar() { setFlags(m_article.read, !m_article.starred); }
+void Backend::toggleRead() {
+    if (!m_storeOpen || !m_article.id)
+        return;
+    const qint64 id = m_article.id;
+    const bool read = !m_article.read;
+    // The read times before and after, which only the worker knows.
+    auto change = std::make_shared<ReadChange>(ReadChange{id, {!read, std::nullopt}, {read, std::nullopt}});
+    auto command = std::make_shared<UndoCommand>();
+    command->label = [read] { return read ? tr("marked an article read") : tr("marked an article unread"); };
+    command->apply = [this, id, read, change, state = command->state](bool undo, const Finished &finished) {
+        restoreRead(id, undo ? !read : read, change, undo, state, finished);
+    };
+    pushUndo(command);
+    saveFlags(
+        m_article, read, m_article.starred, tr("Cannot change the article: %1"),
+        [change](Store &store) {
+            if (const auto state = store.readState(change->id))
+                change->before = *state;
+            if (!store.setRead(change->id, change->after.read))
+                return false;
+            if (const auto state = store.readState(change->id))
+                change->after = *state;
+            return true;
+        },
+        dropUndoOnFailure(command), command->state);
+}
+
+void Backend::toggleStar() {
+    if (!m_storeOpen || !m_article.id)
+        return;
+    const qint64 id = m_article.id;
+    const bool starred = !m_article.starred;
+    auto command = std::make_shared<UndoCommand>();
+    command->label = [starred] { return starred ? tr("starred an article") : tr("unstarred an article"); };
+    command->apply = [this, id, starred, state = command->state](bool undo, const Finished &finished) {
+        restoreStar(id, undo ? !starred : starred, undo, state, finished);
+    };
+    pushUndo(command);
+    saveFlags(m_article, m_article.read, starred, tr("Cannot change the article: %1"), {}, dropUndoOnFailure(command),
+              command->state);
+}
+
+Article Backend::flagsOf(qint64 id, bool read, bool starred) {
+    std::optional<Article> article = m_storeOpen ? m_store.article(id) : std::nullopt;
+    if (!article) {
+        Article gone;
+        gone.id = id;
+        gone.read = !read;
+        gone.starred = !starred;
+        return gone;
+    }
+    applyPending(*article);
+    return *article;
+}
+
+void Backend::restoreRead(qint64 id, bool read, const std::shared_ptr<const ReadChange> &change, bool undo,
+                          const std::shared_ptr<UndoState> &state, const Finished &finished) {
+    const Article before = flagsOf(id, read, false);
+    saveFlags(
+        before, read, before.starred, undoFailure(undo),
+        [change, undo](Store &store) { return store.setReadState(change->id, undo ? change->before : change->after); },
+        finished, state);
+}
+
+void Backend::restoreStar(qint64 id, bool starred, bool undo, const std::shared_ptr<UndoState> &state,
+                          const Finished &finished) {
+    const Article before = flagsOf(id, false, starred);
+    saveFlags(before, before.read, starred, undoFailure(undo), {}, finished, state);
+}
+
+void Backend::restoreReads(const std::shared_ptr<const QList<ReadChange>> &changes, bool undo,
+                           const std::shared_ptr<UndoState> &state, const Finished &finished) {
+    const QString failure = undoFailure(undo);
+    writeOnWorker(
+        [changes, undo, readsPending = readsPublishedFor()](Store &store) {
+            const int restored = store.restoreReadStates(*changes, undo);
+            if (restored > 0)
+                markPending(store, readsPending, Sync::readStatusKind);
+            return restored;
+        },
+        failure,
+        [this, failure, finished](const WriteResult &result) {
+            if (!result.error.isEmpty())
+                setStatus(failure.arg(result.error), true);
+            else if (result.changed > 0)
+                schedulePublish(Sync::readStatusKind);
+            finished(result.error.isEmpty() && !result.skipped);
+            reloadCounts();
+            loadArticles();
+        },
+        state);
+}
+
+QString Backend::undoFailure(bool undo) { return undo ? tr("Cannot undo: %1") : tr("Cannot redo: %1"); }
+
+void Backend::pushUndo(const std::shared_ptr<UndoCommand> &command) {
+    ++m_pushes;
+    m_undo << command;
+    if (m_undo.size() > maxUndo)
+        m_undo.removeFirst();
+    m_redo.clear();
+    emit undoChanged();
+}
+
+void Backend::dropUndo(const std::shared_ptr<UndoCommand> &command) {
+    // Its writes still queued skip, and say nothing.
+    command->state->failed = true;
+    if (m_undo.removeOne(command) || m_redo.removeOne(command))
+        emit undoChanged();
+}
+
+Backend::Finished Backend::dropUndoOnFailure(const std::shared_ptr<UndoCommand> &command) {
+    return [this, command](bool ok) {
+        if (!ok)
+            dropUndo(command);
+    };
+}
+
+std::shared_ptr<Backend::UndoCommand> Backend::pushReadsUndo(const std::shared_ptr<const QList<ReadChange>> &changes,
+                                                             const std::shared_ptr<const qsizetype> &count) {
+    auto command = std::make_shared<UndoCommand>();
+    command->label = [count] { return tr("marked %n articles read", nullptr, int(*count)); };
+    command->apply = [this, changes, state = command->state](bool undo, const Finished &finished) {
+        restoreReads(changes, undo, state, finished);
+    };
+    pushUndo(command);
+    return command;
+}
+
+bool Backend::keepReadsUndo(const std::shared_ptr<UndoCommand> &command, qsizetype count) {
+    const bool tooLarge = count > maxReadChanges();
+    if (count == 0 || tooLarge) {
+        dropUndo(command);
+    } else {
+        command->state->bytes = count * readChangeBytes;
+        trimUndo();
+    }
+    return tooLarge;
+}
+
+void Backend::trimUndo() {
+    const auto bytesOf = [](const QList<std::shared_ptr<UndoCommand>> &commands) {
+        qsizetype bytes = 0;
+        for (const auto &command : commands)
+            bytes += command->state->bytes;
+        return bytes;
+    };
+    bool trimmed = false;
+    // One that could never fit goes alone, rather than after all the others.
+    for (QList<std::shared_ptr<UndoCommand>> *commands : {&m_undo, &m_redo})
+        trimmed = commands->removeIf([this](const auto &command) { return command->state->bytes > m_undoBytes; })
+                  || trimmed;
+    qsizetype bytes = bytesOf(m_undo) + bytesOf(m_redo);
+    // The undo history's oldest first, then the redo history's furthest.
+    for (QList<std::shared_ptr<UndoCommand>> *commands : {&m_undo, &m_redo}) {
+        for (qsizetype i = 0; i < commands->size() && bytes > m_undoBytes;) {
+            const qsizetype held = commands->at(i)->state->bytes;
+            if (held == 0) {
+                ++i;
+                continue;
+            }
+            commands->removeAt(i);
+            bytes -= held;
+            trimmed = true;
+        }
+    }
+    if (trimmed)
+        emit undoChanged();
+}
+
+void Backend::undo() { undoOrRedo(true); }
+void Backend::redo() { undoOrRedo(false); }
+
+void Backend::undoOrRedo(bool undo) {
+    // Until a restore that may fail for now is done, the history cannot
+    // move past it: were it to fail, it goes back where it was.
+    if (m_restoring) {
+        setStatus(tr("Still undoing: %1").arg(m_restoring->label()));
+        return;
+    }
+    QList<std::shared_ptr<UndoCommand>> &from = undo ? m_undo : m_redo;
+    if (from.isEmpty()) {
+        setStatus(undo ? tr("Nothing to undo") : tr("Nothing to redo"));
+        return;
+    }
+    // Moved over at once, so the next Ctrl+Z reaches the command before it
+    // even while this one's write is still on the worker, which takes the
+    // writes in order.
+    const std::shared_ptr<UndoCommand> command = from.takeLast();
+    (undo ? m_redo : m_undo) << command;
+    emit undoChanged();
+    if (undo && command->mayRetry)
+        m_restoring = command;
+    command->apply(undo, [this, command, undo, pushes = m_pushes](bool ok) {
+        if (m_restoring == command)
+            m_restoring.reset();
+        if (ok && !command->state->failed) {
+            setStatus(undo ? tr("Undid: %1").arg(command->label()) : tr("Redid: %1").arg(command->label()));
+            trimUndo();
+            return;
+        }
+        // A restore that failed for now keeps the only copy of what the
+        // unsubscribe took, to be undone again.
+        // It goes under the actions asked for since, which cleared it from
+        // the redo history, as it is still done.
+        if (std::exchange(command->state->retry, false) && !command->state->failed) {
+            m_redo.removeOne(command);
+            m_undo.insert(qMax(qsizetype(0), m_undo.size() - qsizetype(m_pushes - pushes)), command);
+            emit undoChanged();
+            trimUndo();
+            return;
+        }
+        dropUndo(command);
+    });
+}
 
 void Backend::openOriginal() {
     if (m_article.id && !m_article.url.isEmpty())
@@ -780,20 +1008,28 @@ void Backend::markViewRead() {
     const ArticleFilter filter = currentFilter();
     const qint64 upToId = m_viewLastId;
     const QString failure = tr("Cannot mark the view read: %1");
+    // The articles marked, which an undo reverses whatever came since.
+    auto changes = std::make_shared<QList<ReadChange>>();
+    auto count = std::make_shared<qsizetype>(0);
+    const auto command = pushReadsUndo(changes, count);
     writeOnWorker(
-        [filter, upToId, readsPending = readsPublishedFor()](Store &store) {
-            const int marked = store.markRead(filter, upToId);
+        [filter, upToId, changes, readsPending = readsPublishedFor()](Store &store) {
+            const int marked = store.markRead(filter, upToId, changes.get());
             if (marked > 0)
                 markPending(store, readsPending, Sync::readStatusKind);
             return marked;
         },
         failure,
-        [this, failure](const WriteResult &result) {
+        [this, failure, changes, count, command](const WriteResult &result) {
+            // The worker is done with the list until an undo.
+            *count = changes->size();
+            const bool tooLarge = keepReadsUndo(command, *count);
             if (!result.error.isEmpty()) {
                 setStatus(failure.arg(result.error), true);
                 return;
             }
-            setStatus(tr("Marked %n articles read", nullptr, result.changed));
+            setStatus(tooLarge ? tr("Marked %n articles read (too large to undo)", nullptr, result.changed)
+                               : tr("Marked %n articles read", nullptr, result.changed));
             if (result.changed > 0)
                 schedulePublish(Sync::readStatusKind);
             reloadCounts();
@@ -934,32 +1170,122 @@ bool Backend::unsubscribe(qint64 feedId) {
         setStatus(tr("Cannot unsubscribe: %1").arg(m_store.lastError()), true);
         return false;
     }
+    const QString title = Nip19::shortNpub(feed->title, feed->url);
+    // An undo puts back what the delete took, as it took it: deleting for
+    // real, rather than only once the undo can no longer come, keeps the
+    // library, the headless commands, and the subscription list published
+    // meanwhile telling the same story, and the undo subscribes again.
+    auto snapshot = std::make_shared<FeedSnapshot>();
+    auto command = std::make_shared<UndoCommand>();
+    command->label = [title] { return tr("unsubscribed from %1").arg(title); };
+    command->mayRetry = true;
+    command->apply = [this, feedId, title, snapshot, state = command->state](bool undo, const Finished &finished) {
+        if (undo)
+            restoreSubscription(feedId, snapshot, state, finished);
+        else
+            removeSubscription(feedId, title, snapshot, state, finished);
+    };
+    pushUndo(command);
+    removeSubscription(feedId, title, snapshot, command->state, [this, command](bool ok) {
+        if (!ok)
+            dropUndo(command);
+        else
+            trimUndo();
+    });
+    return true;
+}
+
+void Backend::removeSubscription(qint64 feedId, const QString &title, const std::shared_ptr<FeedSnapshot> &snapshot,
+                                 const std::shared_ptr<UndoState> &state, const Finished &finished) {
     // The feed leaves the window at once and comes back if the delete fails.
-    m_removing.insert(feedId);
+    ++m_removing[feedId];
     m_unsubscribed.insert(feedId);
     reloadLibrary();
     const QString failure = tr("Cannot unsubscribe: %1");
+    // Whether the snapshot fit the budget, told apart from the snapshot
+    // itself, which a write queued after this one may be filling already.
+    auto undoable = std::make_shared<bool>(false);
     writeOnWorker(
-        [feedId, pending = subscriptionsPublishedFor()](Store &store) {
-            if (!store.removeFeed(feedId))
+        [feedId, snapshot, state, undoable, maxBytes = m_snapshotBytes, maxItems = m_snapshotItems,
+         pending = subscriptionsPublishedFor()](Store &store) {
+            if (!store.removeFeed(feedId, snapshot.get(), maxBytes, maxItems))
                 return -1;
+            markPending(store, pending, Sync::subscriptionsKind);
+            *undoable = !snapshot->feedColumns.isEmpty();
+            state->bytes = snapshot->bytes;
+            // Too large to keep: an undo queued meanwhile has nothing to
+            // put back.
+            if (!*undoable)
+                state->failed = true;
+            return 1;
+        },
+        failure,
+        [this, feedId, title, failure, finished, undoable](const WriteResult &result) {
+            if (--m_removing[feedId] <= 0)
+                m_removing.remove(feedId);
+            if (!result.error.isEmpty() || result.skipped) {
+                // Still subscribed, so its refresh errors count again, unless
+                // another delete of it is on its way.
+                if (!m_removing.contains(feedId))
+                    m_unsubscribed.remove(feedId);
+                if (!result.error.isEmpty())
+                    setStatus(failure.arg(result.error), true);
+            } else {
+                setStatus(*undoable ? tr("Unsubscribed from %1").arg(title)
+                                    : tr("Unsubscribed from %1 (too large to undo)").arg(title));
+                schedulePublish(Sync::subscriptionsKind);
+            }
+            finished(result.error.isEmpty() && !result.skipped && *undoable);
+            reloadLibrary();
+        },
+        state);
+}
+
+void Backend::restoreSubscription(qint64 feedId, const std::shared_ptr<const FeedSnapshot> &snapshot,
+                                  const std::shared_ptr<UndoState> &state, const Finished &finished) {
+    const QString failure = undoFailure(true);
+    // Whether the restore failed for good, so the undo cannot come again.
+    auto lasting = std::make_shared<bool>(false);
+    auto skipped = std::make_shared<bool>(false);
+    // Marked to publish as subscribing marks it: the list published next
+    // has the feed again, and none of the deleted marks the unsubscribe
+    // may have published for it (Store::restoreFeed()). Not through
+    // writeOnWorker()'s own skipping, which would forget the snapshot on a
+    // failure that may pass.
+    writeOnWorker(
+        [snapshot, state, lasting, skipped, pending = subscriptionsPublishedFor()](Store &store) {
+            if (state->failed) {
+                *skipped = true;
+                return 0;
+            }
+            if (!store.restoreFeed(*snapshot, lasting.get())) {
+                if (*lasting)
+                    state->failed = true;
+                return -1;
+            }
             markPending(store, pending, Sync::subscriptionsKind);
             return 1;
         },
         failure,
-        [this, feedId, title = Nip19::shortNpub(feed->title, feed->url), failure](const WriteResult &result) {
-            m_removing.remove(feedId);
-            if (!result.error.isEmpty()) {
-                // Still subscribed, so its refresh errors count again.
-                m_unsubscribed.remove(feedId);
-                setStatus(failure.arg(result.error), true);
-            } else {
-                setStatus(tr("Unsubscribed from %1").arg(title));
-                schedulePublish(Sync::subscriptionsKind);
+        [this, feedId, failure, finished, state, lasting, skipped](const WriteResult &result) {
+            if (*skipped) {
+                finished(false);
+                return;
             }
+            if (!result.error.isEmpty()) {
+                setStatus(failure.arg(result.error), true);
+                state->retry = !*lasting;
+                finished(false);
+                return;
+            }
+            // Subscribed again, so its refresh errors count again, unless a
+            // redo is deleting it once more.
+            if (!m_removing.contains(feedId))
+                m_unsubscribed.remove(feedId);
+            schedulePublish(Sync::subscriptionsKind);
+            finished(true);
             reloadLibrary();
         });
-    return true;
 }
 
 void Backend::refreshAll() {
@@ -2544,42 +2870,66 @@ bool Backend::saveFilterRule(int index, const QVariantMap &map) {
     const auto rule = KeywordFilter::fromJson(object);
     if (!rule)
         return false;
+    const QList<KeywordFilter::Rule> before = m_filterRules;
     if (adding)
         m_filterRules << *rule;
     else if (m_filterRules.at(index) == *rule)
         return true;
     else
         m_filterRules[index] = *rule;
-    saveFilterRules();
+    if (adding)
+        changeFilterRules(before, [] { return tr("added a filter rule"); });
+    else
+        changeFilterRules(before, [] { return tr("changed a filter rule"); });
     return true;
 }
 
 void Backend::setFilterRuleEnabled(int index, bool enabled) {
     if (index < 0 || index >= m_filterRules.size() || m_filterRules.at(index).enabled == enabled)
         return;
+    const QList<KeywordFilter::Rule> before = m_filterRules;
     m_filterRules[index].enabled = enabled;
-    saveFilterRules();
+    changeFilterRules(before, [] { return tr("changed a filter rule"); });
 }
 
 void Backend::moveFilterRule(int index, int step) {
     const qint64 target = qint64(index) + step;
     if (index < 0 || index >= m_filterRules.size() || target < 0 || target >= m_filterRules.size() || step == 0)
         return;
+    const QList<KeywordFilter::Rule> before = m_filterRules;
     m_filterRules.move(index, int(target));
-    saveFilterRules();
+    changeFilterRules(before, [] { return tr("changed a filter rule"); });
 }
 
 void Backend::removeFilterRule(int index) {
     if (index < 0 || index >= m_filterRules.size())
         return;
+    const QList<KeywordFilter::Rule> before = m_filterRules;
     m_filterRules.removeAt(index);
-    saveFilterRules();
+    changeFilterRules(before, [] { return tr("removed a filter rule"); });
 }
 
-void Backend::saveFilterRules() {
+void Backend::changeFilterRules(const QList<KeywordFilter::Rule> &before, std::function<QString()> label) {
+    auto command = std::make_shared<UndoCommand>();
+    command->label = std::move(label);
+    // Through the same save as the change, so the save counter moves on and
+    // the library is filtered again.
+    command->apply = [this, before, after = m_filterRules, state = command->state](bool undo,
+                                                                                    const Finished &finished) {
+        m_filterRules = undo ? before : after;
+        saveFilterRules(finished, state);
+    };
+    pushUndo(command);
+    saveFilterRules(dropUndoOnFailure(command), command->state);
+}
+
+void Backend::saveFilterRules(const Finished &finished, const std::shared_ptr<UndoState> &undo) {
     emit filtersChanged();
-    if (!m_storeOpen)
+    if (!m_storeOpen) {
+        if (finished)
+            finished(false);
         return;
+    }
     const QString failure = tr("Cannot save the filter rules: %1");
     // Quick edits queue several saves on the worker. Each saves the whole
     // list, so only the latest needs to run: an older one still waiting is
@@ -2600,11 +2950,30 @@ void Backend::saveFilterRules() {
             return ok ? 1 : -1;
         },
         failure,
-        [this, failure, superseded, applyFailed](const WriteResult &result) {
+        [this, failure, superseded, applyFailed, finished](const WriteResult &result) {
+            // Saved, if only the rules and not their pass over the library.
+            const bool saved = (result.changed > 0 && result.error.isEmpty() && !result.skipped) || *applyFailed;
+            // Not saved, skipped or failed, with a later save to come, which
+            // saves this one's change with its own, or fails to: that one
+            // says which, so no command keeps a change the library never
+            // had.
+            if (!saved && superseded()) {
+                if (finished)
+                    m_filterSavesWaiting << finished;
+                return;
+            }
+            for (const Finished &waiting : std::exchange(m_filterSavesWaiting, {}))
+                waiting(saved);
+            if (finished)
+                finished(saved);
             // The latest save says how the library is left.
             if (superseded())
                 return;
-            if (*applyFailed) {
+            if (result.skipped) {
+                // An undo or redo of a change never saved: the rules shown
+                // are the ones the library keeps.
+                loadFilterRules();
+            } else if (*applyFailed) {
                 // The next change, or the next start, applies them.
                 setStatus(tr("Cannot apply the filter rules: %1").arg(result.error), true);
             } else if (!result.error.isEmpty()) {
@@ -2617,31 +2986,42 @@ void Backend::saveFilterRules() {
                 emit filtersChanged();
             }
             reloadLibrary();
-        });
+        },
+        undo);
 }
 
 void Backend::markFilterMatchesRead(const QString &ruleId) {
     if (!m_storeOpen)
         return;
     const QString failure = tr("Cannot mark the matching articles read: %1");
+    // The articles marked, which an undo reverses whatever came since.
+    auto changes = std::make_shared<QList<ReadChange>>();
+    auto count = std::make_shared<qsizetype>(0);
+    const auto command = pushReadsUndo(changes, count);
     writeOnWorker(
-        [ruleId, readsPending = readsPublishedFor(), quitting = m_quitting](Store &store) {
+        [ruleId, changes, readsPending = readsPublishedFor(), quitting = m_quitting](Store &store) {
             // Some batches may be written before one fails.
             int marked = 0;
-            const int result = store.markReadByFilter(ruleId, [quitting] { return quitting->load(); }, &marked);
+            const int result =
+                store.markReadByFilter(ruleId, [quitting] { return quitting->load(); }, &marked, changes.get());
             if (marked > 0)
                 markPending(store, readsPending, Sync::readStatusKind);
             return result;
         },
         failure,
-        [this, failure](const WriteResult &result) {
+        [this, failure, changes, count, command](const WriteResult &result) {
+            // The worker is done with the list until an undo; the batches
+            // written before a failure can be undone too.
+            *count = changes->size();
+            const bool tooLarge = keepReadsUndo(command, *count);
             if (!result.error.isEmpty()) {
                 setStatus(failure.arg(result.error), true);
                 reloadCounts();
                 loadArticles();
                 return;
             }
-            setStatus(tr("Marked %n articles read", nullptr, result.changed));
+            setStatus(tooLarge ? tr("Marked %n articles read (too large to undo)", nullptr, result.changed)
+                               : tr("Marked %n articles read", nullptr, result.changed));
             if (result.changed > 0)
                 schedulePublish(Sync::readStatusKind);
             reloadCounts();

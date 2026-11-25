@@ -304,5 +304,35 @@
   "Regular expressions here cannot use lookarounds or backreferences": "As expressões regulares aqui não podem usar lookarounds nem referências anteriores",
   "Cannot save the filter rules: %1": "Não é possível guardar as regras de filtro: %1",
   "Cannot apply the filter rules: %1": "Não é possível aplicar as regras de filtro: %1",
-  "Cannot mark the matching articles read: %1": "Não é possível marcar como lidos os artigos correspondentes: %1"
+  "Cannot mark the matching articles read: %1": "Não é possível marcar como lidos os artigos correspondentes: %1",
+  "Undo": "Anular",
+  "Redo": "Refazer",
+  "Undo the last change": "Anular a última alteração",
+  "Redo what was undone": "Refazer o que foi anulado",
+  "Nothing to undo": "Nada para anular",
+  "Nothing to redo": "Nada para refazer",
+  "Undid: %1": "Anulado: %1",
+  "Redid: %1": "Refeito: %1",
+  "Cannot undo: %1": "Não é possível anular: %1",
+  "Cannot redo: %1": "Não é possível refazer: %1",
+  "marked an article read": "artigo marcado como lido",
+  "marked an article unread": "artigo marcado como por ler",
+  "starred an article": "artigo marcado com estrela",
+  "unstarred an article": "estrela retirada de um artigo",
+  "marked %n articles read": {
+    "one": "%n artigo marcado como lido",
+    "many": "%n de artigos marcados como lidos",
+    "other": "%n artigos marcados como lidos"
+  },
+  "unsubscribed from %1": "subscrição de %1 cancelada",
+  "added a filter rule": "regra de filtro adicionada",
+  "changed a filter rule": "regra de filtro alterada",
+  "removed a filter rule": "regra de filtro removida",
+  "Unsubscribed from %1 (too large to undo)": "Subscrição de %1 cancelada (demasiado grande para anular)",
+  "Marked %n articles read (too large to undo)": {
+    "one": "%n artigo marcado como lido (demasiados para anular)",
+    "many": "%n de artigos marcados como lidos (demasiados para anular)",
+    "other": "%n artigos marcados como lidos (demasiados para anular)"
+  },
+  "Still undoing: %1": "Ainda a anular: %1"
 }

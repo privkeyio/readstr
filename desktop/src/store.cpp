@@ -8,8 +8,10 @@
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QSet>
+#include <QSqlDriver>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QSqlRecord>
 #include <QThread>
 #include <QTimeZone>
 #include <QUrl>
@@ -813,13 +815,190 @@ qint64 Store::addFeed(const QString &url, const QString &title, const QString &c
     return query.value(0).toLongLong();
 }
 
-bool Store::removeFeed(qint64 id) {
-    QSqlQuery query(m_db);
-    query.prepare(QStringLiteral("DELETE FROM feeds WHERE id = ?"));
-    query.addBindValue(id);
-    if (!query.exec())
-        return fail(query.lastError().text());
-    return query.numRowsAffected() == 1 || fail(QStringLiteral("no feed with id %1").arg(id));
+bool Store::removeFeed(qint64 id, FeedSnapshot *snapshot, qsizetype maxBytes, int maxItems) {
+    const auto remove = [this, id] {
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral("DELETE FROM feeds WHERE id = ?"));
+        query.addBindValue(id);
+        if (!query.exec())
+            return fail(query.lastError().text());
+        return query.numRowsAffected() == 1 || fail(QStringLiteral("no feed with id %1").arg(id));
+    };
+    if (!snapshot)
+        return remove();
+    FeedSnapshot taken;
+    taken.id = id;
+    // Past the budget, reading stops, and the feed goes with no snapshot.
+    bool tooLarge = false;
+    const bool removed = transaction([&] {
+        // Every column, whatever a later migration adds, so the restored
+        // rows lack nothing the deleted ones had.
+        const auto rows = [&](QSqlQuery &query, QStringList *columns, QList<QVariantList> *into) {
+            if (!query.exec())
+                return fail(query.lastError().text());
+            const QSqlRecord record = query.record();
+            for (int i = 0; i < record.count(); ++i)
+                *columns << record.fieldName(i);
+            while (query.next()) {
+                QVariantList row;
+                for (int i = 0; i < record.count(); ++i) {
+                    const QVariant value = query.value(i);
+                    taken.bytes += qsizetype(sizeof(QVariant));
+                    if (value.typeId() == QMetaType::QString)
+                        taken.bytes += value.toString().size() * qsizetype(sizeof(QChar));
+                    else if (value.typeId() == QMetaType::QByteArray)
+                        taken.bytes += value.toByteArray().size();
+                    row << value;
+                }
+                *into << row;
+                if (taken.bytes > maxBytes || taken.items.size() > maxItems) {
+                    tooLarge = true;
+                    return true;
+                }
+            }
+            return !query.lastError().isValid() || fail(query.lastError().text());
+        };
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral("SELECT * FROM feeds WHERE id = ?"));
+        query.addBindValue(id);
+        QList<QVariantList> feed;
+        if (!rows(query, &taken.feedColumns, &feed))
+            return false;
+        if (feed.isEmpty())
+            return fail(QStringLiteral("no feed with id %1").arg(id));
+        taken.feed = feed.first();
+        query.prepare(QStringLiteral("SELECT c.name FROM feeds f JOIN categories c ON c.id = f.category_id"
+                                     " WHERE f.id = ?"));
+        query.addBindValue(id);
+        if (!query.exec())
+            return fail(query.lastError().text());
+        if (query.next())
+            taken.category = query.value(0).toString();
+        query.finish();
+        QSqlQuery items(m_db);
+        items.setForwardOnly(true);
+        items.prepare(QStringLiteral("SELECT * FROM items WHERE feed_id = ? ORDER BY id"));
+        items.addBindValue(id);
+        if (!tooLarge && !rows(items, &taken.itemColumns, &taken.items))
+            return false;
+        items.finish();
+        return remove();
+    });
+    // A redo deletes into the snapshot the undo restored from.
+    if (removed)
+        *snapshot = tooLarge ? FeedSnapshot{} : std::move(taken);
+    return removed;
+}
+
+bool Store::restoreFeed(const FeedSnapshot &snapshot, bool *lasting) {
+    if (lasting)
+        *lasting = false;
+    const auto lastingFail = [this, lasting](const QString &message) {
+        if (lasting)
+            *lasting = true;
+        return fail(message);
+    };
+    const auto column = [](const QStringList &columns, const char *name) {
+        return columns.indexOf(QLatin1String(name));
+    };
+    const qsizetype keyColumn = column(snapshot.feedColumns, "url_key"),
+                    urlColumn = column(snapshot.feedColumns, "url"),
+                    categoryColumn = column(snapshot.feedColumns, "category_id"),
+                    createdColumn = column(snapshot.feedColumns, "created_at");
+    if (snapshot.feed.size() != snapshot.feedColumns.size() || keyColumn < 0 || urlColumn < 0 || categoryColumn < 0
+        || createdColumn < 0)
+        return lastingFail(QStringLiteral("nothing to restore"));
+    const qsizetype title = column(snapshot.itemColumns, "title"), author = column(snapshot.itemColumns, "author"),
+                    summary = column(snapshot.itemColumns, "summary"),
+                    content = column(snapshot.itemColumns, "content"),
+                    address = column(snapshot.itemColumns, "address"), url = column(snapshot.itemColumns, "url"),
+                    flags = column(snapshot.itemColumns, "filter_flags"), id = column(snapshot.itemColumns, "id"),
+                    guid = column(snapshot.itemColumns, "guid"), isRead = column(snapshot.itemColumns, "is_read"),
+                    readAt = column(snapshot.itemColumns, "read_at");
+    if (!snapshot.items.isEmpty()
+        && (title < 0 || author < 0 || summary < 0 || content < 0 || address < 0 || url < 0 || flags < 0 || id < 0
+            || guid < 0 || isRead < 0 || readAt < 0))
+        return lastingFail(QStringLiteral("nothing to restore"));
+    const auto insertSql = [this](const QString &table, const QStringList &columns) {
+        QStringList names, marks;
+        // The names come from the library itself, quoted all the same.
+        for (const QString &name : columns)
+            names << m_db.driver()->escapeIdentifier(name, QSqlDriver::FieldName);
+        marks.fill(QStringLiteral("?"), columns.size());
+        return QStringLiteral("INSERT INTO %1 (%2) VALUES (%3)").arg(table, names.join(", "), marks.join(", "));
+    };
+    return transaction([&] {
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral("SELECT 1 FROM feeds WHERE url_key = ?"));
+        query.addBindValue(snapshot.feed.at(keyColumn));
+        if (!query.exec())
+            return fail(query.lastError().text());
+        if (query.next())
+            return lastingFail(
+                QStringLiteral("%1 is subscribed to again").arg(snapshot.feed.at(urlColumn).toString()));
+        query.finish();
+        // The category may have gone with the last feed in it.
+        const qint64 category = categoryId(snapshot.category);
+        if (category < 0)
+            return false;
+        QVariantList feed = snapshot.feed;
+        feed[categoryColumn] = category ? QVariant(category) : QVariant(QMetaType::fromType<qint64>());
+        feed[createdColumn] = QDateTime::currentSecsSinceEpoch();
+        query.prepare(insertSql(QStringLiteral("feeds"), snapshot.feedColumns));
+        for (const QVariant &value : std::as_const(feed))
+            query.addBindValue(value);
+        if (!query.exec())
+            return fail(query.lastError().text());
+        if (snapshot.items.isEmpty())
+            return true;
+        const KeywordFilter::Rules *rules = compiledFilterRules();
+        if (!rules)
+            return false;
+        QSqlQuery insert(m_db), index(m_db), synced(m_db);
+        if (!prepareIndex(index))
+            return false;
+        insert.prepare(insertSql(QStringLiteral("items"), snapshot.itemColumns));
+        synced.prepare(QStringLiteral("SELECT 1 FROM sync_read WHERE guid = ?"));
+        for (QVariantList item : snapshot.items) {
+            // Read on another device since, as saveItems() has it, with no
+            // read time of this machine's.
+            if (!item.at(isRead).toBool()) {
+                synced.addBindValue(item.at(guid));
+                if (!synced.exec())
+                    return fail(synced.lastError().text());
+                if (synced.next()) {
+                    item[isRead] = 1;
+                    item[readAt] = QVariant(QMetaType::fromType<qint64>());
+                }
+                synced.finish();
+            }
+            const QString itemTitle = item.at(title).toString(), itemAuthor = item.at(author).toString(),
+                          itemSummary = item.at(summary).toString(), itemContent = item.at(content).toString(),
+                          itemAddress = item.at(address).toString(), itemUrl = item.at(url).toString();
+            const QString body = searchBody(itemSummary, itemContent, itemAddress, itemUrl);
+            // The rules may have changed since the item was deleted, and
+            // the flags kept are those the rules applied last have to give.
+            KeywordFilter::Outcome outcome;
+            if (!rules->isEmpty())
+                outcome = itemAddress.isEmpty()
+                              ? rules->evaluate(itemTitle, body, itemAuthor)
+                              : rules->evaluateLazily(
+                                    itemTitle,
+                                    [&] { return filterBody(itemSummary, itemContent, itemAddress, itemUrl); },
+                                    itemAuthor);
+            item[flags] = outcome.flags();
+            for (const QVariant &value : std::as_const(item))
+                insert.addBindValue(value);
+            if (!insert.exec())
+                return fail(insert.lastError().text());
+            if (!indexItem(index, item.at(id).toLongLong(), itemTitle, itemAuthor, body))
+                return false;
+        }
+        insert.finish();
+        index.finish();
+        synced.finish();
+        return true;
+    });
 }
 
 bool Store::updateFeedDetails(qint64 id, const ParsedFeed &parsed) {
@@ -1239,25 +1418,114 @@ std::optional<LibraryCounts> Store::counts() {
                          query.value(3).toLongLong()};
 }
 
-int Store::markRead(const ArticleFilter &filter, qint64 upToId) {
+int Store::markRead(const ArticleFilter &filter, qint64 upToId, QList<ReadChange> *changes) {
     QVariantList values;
-    QSqlQuery query(m_db);
-    QString sql = QStringLiteral("UPDATE items AS i SET is_read = 1, read_at = ? WHERE i.is_read = 0 AND i.id <= ?")
-                  + filterSql(filter, values);
+    QString where = QStringLiteral(" WHERE i.is_read = 0 AND i.id <= ?") + filterSql(filter, values);
     // A search marks only its matches read, as only they are in the view.
     const QString match = matchExpression(filter.query);
     if (!match.isEmpty()) {
-        sql += QStringLiteral(" AND i.id IN (SELECT rowid FROM items_fts WHERE items_fts MATCH ?)");
+        where += QStringLiteral(" AND i.id IN (SELECT rowid FROM items_fts WHERE items_fts MATCH ?)");
         values << match;
     }
-    query.prepare(sql);
-    query.addBindValue(QDateTime::currentSecsSinceEpoch());
-    query.addBindValue(upToId);
-    for (const QVariant &value : values)
-        query.addBindValue(value);
-    if (!query.exec())
-        return fail(query.lastError().text()), -1;
-    return query.numRowsAffected();
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    const auto mark = [&] {
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral("UPDATE items AS i SET is_read = 1, read_at = ?") + where);
+        query.addBindValue(now);
+        query.addBindValue(upToId);
+        for (const QVariant &value : std::as_const(values))
+            query.addBindValue(value);
+        if (!query.exec())
+            return fail(query.lastError().text()), -1;
+        return query.numRowsAffected();
+    };
+    if (!changes)
+        return mark();
+    // Listed and marked in one transaction, so the list is exactly what
+    // was marked.
+    QList<ReadChange> found;
+    int marked = -1;
+    const bool ok = transaction([&] {
+        QSqlQuery query(m_db);
+        query.setForwardOnly(true);
+        query.prepare(QStringLiteral("SELECT i.id, i.read_at FROM items AS i") + where);
+        query.addBindValue(upToId);
+        for (const QVariant &value : std::as_const(values))
+            query.addBindValue(value);
+        if (!query.exec())
+            return fail(query.lastError().text());
+        while (query.next()) {
+            ReadChange change{query.value(0).toLongLong(), {false, std::nullopt}, {true, now}};
+            if (!query.value(1).isNull())
+                change.before.readAt = query.value(1).toLongLong();
+            found << change;
+        }
+        if (query.lastError().isValid())
+            return fail(query.lastError().text());
+        query.finish();
+        marked = mark();
+        return marked >= 0;
+    });
+    if (!ok)
+        return -1;
+    *changes << found;
+    return marked;
+}
+
+std::optional<ReadState> Store::readState(qint64 articleId) {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("SELECT is_read, read_at FROM items WHERE id = ?"));
+    query.addBindValue(articleId);
+    if (!query.exec()) {
+        fail(query.lastError().text());
+        return std::nullopt;
+    }
+    if (!query.next()) {
+        fail(QStringLiteral("no article with id %1").arg(articleId));
+        return std::nullopt;
+    }
+    ReadState state{query.value(0).toBool(), std::nullopt};
+    if (!query.value(1).isNull())
+        state.readAt = query.value(1).toLongLong();
+    return state;
+}
+
+namespace {
+const char readStateUpdate[] = "UPDATE items SET is_read = ?, read_at = ? WHERE id = ?";
+
+// Runs `query`, prepared from readStateUpdate, for one article: how many
+// rows it changed, or -1.
+int writeReadState(QSqlQuery &query, qint64 articleId, const ReadState &state) {
+    query.addBindValue(state.read ? 1 : 0);
+    query.addBindValue(state.readAt ? QVariant(*state.readAt) : QVariant(QMetaType::fromType<qint64>()));
+    query.addBindValue(articleId);
+    return query.exec() ? query.numRowsAffected() : -1;
+}
+}
+
+bool Store::setReadState(qint64 articleId, const ReadState &state) {
+    QSqlQuery query(m_db);
+    query.prepare(QString::fromLatin1(readStateUpdate));
+    const int changed = writeReadState(query, articleId, state);
+    if (changed < 0)
+        return fail(query.lastError().text());
+    return changed == 1 || fail(QStringLiteral("no article with id %1").arg(articleId));
+}
+
+int Store::restoreReadStates(const QList<ReadChange> &changes, bool undo) {
+    int found = 0;
+    const bool ok = transaction([&] {
+        QSqlQuery query(m_db);
+        query.prepare(QString::fromLatin1(readStateUpdate));
+        for (const ReadChange &change : changes) {
+            const int changed = writeReadState(query, change.id, undo ? change.before : change.after);
+            if (changed < 0)
+                return fail(query.lastError().text());
+            found += changed;
+        }
+        return true;
+    });
+    return ok ? found : -1;
 }
 
 bool Store::setFlag(const char *column, qint64 articleId, bool value) {
@@ -1797,7 +2065,8 @@ bool Store::setFilterRules(const QList<KeywordFilter::Rule> &rules, const std::f
     return kept && applyFilterRules(superseded);
 }
 
-int Store::markReadByFilter(const QString &ruleId, const std::function<bool()> &stopped, int *marked) {
+int Store::markReadByFilter(const QString &ruleId, const std::function<bool()> &stopped, int *marked,
+                            QList<ReadChange> *changes) {
     int count = 0;
     if (marked)
         *marked = 0;
@@ -1916,6 +2185,7 @@ int Store::markReadByFilter(const QString &ruleId, const std::function<bool()> &
             return -1;
         bool stale = false;
         int written = 0;
+        QList<ReadChange> batch;
         const bool ok = [&] {
             // Rules saved since, even the same ones again, end it: the rule
             // asked for may be another now, or gone. What is marked stays
@@ -1927,17 +2197,32 @@ int Store::markReadByFilter(const QString &ruleId, const std::function<bool()> &
             stale = savesNow != saves || sourceNow != source;
             if (stale)
                 return true;
-            QSqlQuery update(m_db);
+            QSqlQuery update(m_db), readAt(m_db);
             // An item read meanwhile, or whose text changed, is left as it is.
             update.prepare(updateSql);
+            if (changes)
+                readAt.prepare(QStringLiteral("SELECT read_at FROM items WHERE id = ?"));
             const qint64 now = QDateTime::currentSecsSinceEpoch();
             for (const Match &match : std::as_const(matches)) {
+                // Read under this batch's write lock, so it is the time the
+                // update below replaces.
+                ReadChange change{match.id, {false, std::nullopt}, {true, now}};
+                if (changes) {
+                    readAt.addBindValue(match.id);
+                    if (!readAt.exec())
+                        return fail(readAt.lastError().text());
+                    if (readAt.next() && !readAt.value(0).isNull())
+                        change.before.readAt = readAt.value(0).toLongLong();
+                    readAt.finish();
+                }
                 update.addBindValue(now);
                 update.addBindValue(match.id);
                 for (const QVariant &value : match.text)
                     update.addBindValue(value);
                 if (!update.exec())
                     return fail(update.lastError().text());
+                if (update.numRowsAffected() == 1 && changes)
+                    batch << change;
                 written += update.numRowsAffected();
             }
             return true;
@@ -1951,6 +2236,8 @@ int Store::markReadByFilter(const QString &ruleId, const std::function<bool()> &
         count += written;
         if (marked)
             *marked = count;
+        if (changes)
+            *changes << batch;
         if (done || stale)
             break;
     }

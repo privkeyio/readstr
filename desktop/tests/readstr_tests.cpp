@@ -2863,6 +2863,857 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(theme.radius(), 5, 10000);
     }
 
+    // Undo and redo
+
+    // Undoing "mark the view read" makes unread again exactly the articles
+    // it marked, with the read times they had, and leaves alone one that a
+    // refresh brought and something marked read since; redoing marks them
+    // again with the times the action gave them. Both mark the read status
+    // to publish, as the action does.
+    void backendUndoesMarkViewRead()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const qint64 first = seedLibrary().first;
+        seedSyncAccount();
+        const QString path = Paths::databaseFile();
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.setPublishReads(syncPubkey(), true));
+        // An unread article that kept a read time, which the undo puts back.
+        QCOMPARE(rawExec(path, "UPDATE items SET read_at = 123 WHERE guid = 'older'"), QString());
+        QCOMPARE(rawExec(path, "UPDATE items SET read_at = 456 WHERE guid = 'second-b'"), QString());
+        const auto before = readStates(store);
+        QCOMPARE(before.size(), 5);
+        QVERIFY(before.value("older") == std::make_pair(false, std::optional<qint64>(123)));
+        const int readBit = publishBit(Sync::readStatusKind);
+        const auto pending = [&store, readBit] { return (store.syncAccount().publishPending & readBit) != 0; };
+
+        Backend backend;
+        QVERIFY(!backend.canUndo());
+        QVERIFY(!backend.canRedo());
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::All));
+        backend.markViewRead();
+        QVERIFY(backend.canUndo());
+        QTRY_COMPARE(backend.status(), QString("Marked 4 articles read"));
+        QVERIFY(pending());
+        const auto marked = readStates(store);
+        for (const char *guid : {"newest", "older", "oldest", "second-a"})
+            QVERIFY2(marked.value(guid).first && marked.value(guid).second && *marked.value(guid).second > 456, guid);
+        QVERIFY(marked.value("second-b") == before.value("second-b"));
+
+        // A refresh brings an article, which is read before the undo.
+        ParsedItem fresh;
+        fresh.guid = "fresh";
+        fresh.title = "Fresh";
+        QCOMPARE(store.saveItems(first, {fresh}), 1);
+        QVERIFY(store.setRead(articleIdOf(store, "fresh"), true));
+        QVERIFY(store.markPublishPending(syncPubkey(), readBit, false));
+        // One it marked is marked unread and read again since, which the
+        // undo reverses all the same.
+        QVERIFY(store.setRead(articleIdOf(store, "newest"), false));
+        QVERIFY(store.setRead(articleIdOf(store, "newest"), true));
+
+        backend.undo();
+        QVERIFY(!backend.canUndo());
+        QVERIFY(backend.canRedo());
+        QTRY_COMPARE(backend.status(), QString("Undid: marked 4 articles read"));
+        auto now = readStates(store);
+        QVERIFY(now.take("fresh").first);
+        QVERIFY(now == before);
+        QVERIFY(pending());
+        QCOMPARE(backend.sources()->row(backend.sources()->rowOf(SourceModel::Kind::Unread)).count, 4);
+
+        QVERIFY(store.markPublishPending(syncPubkey(), readBit, false));
+        backend.redo();
+        QVERIFY(backend.canUndo());
+        QVERIFY(!backend.canRedo());
+        QTRY_COMPARE(backend.status(), QString("Redid: marked 4 articles read"));
+        now = readStates(store);
+        QVERIFY(now.take("fresh").first);
+        QVERIFY(now == marked);
+        QVERIFY(pending());
+        QCOMPARE(backend.sources()->row(backend.sources()->rowOf(SourceModel::Kind::Unread)).count, 0);
+
+        // A new action clears what could be redone; opening an article,
+        // which marks it read, is not one.
+        backend.undo();
+        QTRY_VERIFY(backend.status().startsWith("Undid:"));
+        backend.selectArticle(0);
+        QVERIFY(backend.canRedo());
+        backend.toggleStar();
+        QVERIFY(!backend.canRedo());
+        QVERIFY(backend.canUndo());
+        backend.redo();
+        QCOMPARE(backend.status(), QString("Nothing to redo"));
+    }
+
+    // M and S are undone and redone, the read time coming back with the
+    // read flag rather than being set anew; the stack keeps the last
+    // Backend::maxUndo actions.
+    void backendUndoesReadAndStarToggles()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        const QString path = Paths::databaseFile();
+        QCOMPARE(rawExec(path, "UPDATE items SET read_at = 1000 WHERE guid = 'second-b'"), QString());
+        Store store;
+        QVERIFY(store.open());
+        const qint64 id = articleIdOf(store, "second-b");
+        const auto state = [&store, id] { return store.readState(id).value_or(ReadState{}); };
+
+        Backend backend;
+        backend.selectArticle(backend.articles()->rowOf(id));
+        QCOMPARE(backend.articleId(), id);
+        QVERIFY(backend.articleRead());
+        QVERIFY(!backend.canUndo());
+
+        backend.toggleRead();
+        QVERIFY(!backend.articleRead());
+        QTRY_VERIFY(!state().read);
+        QVERIFY(!state().readAt);
+        backend.undo();
+        QVERIFY(backend.articleRead());
+        QTRY_COMPARE(backend.status(), QString("Undid: marked an article unread"));
+        QVERIFY(state().read);
+        QCOMPARE(state().readAt, std::optional<qint64>(1000));
+        backend.redo();
+        QVERIFY(!backend.articleRead());
+        QTRY_COMPARE(backend.status(), QString("Redid: marked an article unread"));
+        QVERIFY(!state().read);
+        backend.undo();
+        QTRY_VERIFY(state().read);
+        QCOMPARE(state().readAt, std::optional<qint64>(1000));
+        QVERIFY(backend.canRedo());
+        // Said once the write is done, and differently from the redo below.
+        QTRY_COMPARE(backend.status(), QString("Undid: marked an article unread"));
+
+        // Read again with a new time by a write nobody can undo, as opening
+        // the article is: an undo of its marking unread puts the time back
+        // though the flag is as it asks.
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: marked an article unread"));
+        QVERIFY(!state().read);
+        QVERIFY(store.setRead(id, true));
+        QCOMPARE(rawExec(path, QStringLiteral("UPDATE items SET read_at = 2000 WHERE id = %1").arg(id)), QString());
+        backend.undo();
+        QTRY_COMPARE(state().readAt, std::optional<qint64>(1000));
+        QTRY_COMPARE(backend.status(), QString("Undid: marked an article unread"));
+        QVERIFY(state().read);
+        QVERIFY(backend.canRedo());
+
+        backend.toggleStar();
+        QVERIFY(backend.articleStarred());
+        QVERIFY(!backend.canRedo());
+        QTRY_VERIFY(articleIs(store, id, [](const Article &article) { return article.starred; }));
+        backend.undo();
+        QVERIFY(!backend.articleStarred());
+        QTRY_COMPARE(backend.status(), QString("Undid: starred an article"));
+        QVERIFY(articleIs(store, id, [](const Article &article) { return !article.starred && article.read; }));
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: starred an article"));
+        QVERIFY(articleIs(store, id, [](const Article &article) { return article.starred; }));
+        backend.undo();
+        QTRY_VERIFY(articleIs(store, id, [](const Article &article) { return !article.starred; }));
+        backend.undo();
+        QCOMPARE(backend.status(), QString("Nothing to undo"));
+
+        // Only the newest maxUndo are kept: undoing them all leaves the
+        // star the oldest of these gave, the last undone being the second,
+        // which unstarred it. Each undo says what it undid, the one before
+        // differently, so the last is the one said last.
+        for (int i = 0; i <= Backend::maxUndo; ++i)
+            backend.toggleStar();
+        QVERIFY(backend.articleStarred());
+        QSignalSpy said(&backend, &Backend::statusChanged);
+        for (int i = 0; i < Backend::maxUndo; ++i) {
+            QVERIFY(backend.canUndo());
+            backend.undo();
+        }
+        QVERIFY(!backend.canUndo());
+        QTRY_COMPARE(said.count(), Backend::maxUndo);
+        QCOMPARE(backend.status(), QString("Undid: unstarred an article"));
+        QVERIFY(backend.articleStarred());
+        QTRY_VERIFY(articleIs(store, id, [](const Article &article) { return article.starred; }));
+    }
+
+    // Undoing "mark the matching articles read" makes unread only those
+    // the rule marked then, not the ones it marked as they arrived since.
+    void backendUndoesMarkingMatchesReadOnlyForWhatItMarked()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        Store store;
+        QVERIFY(store.open());
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        const auto item = [](const char *guid, const char *title) {
+            ParsedItem parsed;
+            parsed.guid = guid;
+            parsed.title = title;
+            return parsed;
+        };
+        QCOMPARE(store.saveItems(feed, {item("a", "Weekly a"), item("b", "Weekly b"), item("other", "Other")}), 3);
+        using namespace KeywordFilter;
+        QVERIFY(store.setFilterRules({filterRule("weekly", Target::Title, Type::Word, Action::MarkRead)}));
+        const QString ruleId = store.filterRules()->first().id;
+        const auto read = [&store](const char *guid) { return readStates(store).value(guid).first; };
+
+        Backend backend;
+        backend.markFilterMatchesRead(ruleId);
+        QTRY_COMPARE(backend.status(), QString("Marked 2 articles read"));
+        QVERIFY(read("a") && read("b") && !read("other"));
+        QVERIFY(backend.canUndo());
+        QCOMPARE(store.saveItems(feed, {item("c", "Weekly c")}), 1);
+        QVERIFY(read("c"));
+
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: marked 2 articles read"));
+        QVERIFY(!read("a") && !read("b") && read("c") && !read("other"));
+        QVERIFY(!readStates(store).value("a").second);
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: marked 2 articles read"));
+        QVERIFY(read("a") && read("b") && read("c") && !read("other"));
+
+        // One that marks nothing leaves nothing to undo.
+        backend.undo();
+        QTRY_VERIFY(!read("a"));
+        backend.markFilterMatchesRead("no such rule");
+        QTRY_COMPARE(backend.status(), QString("Marked 0 articles read"));
+        QVERIFY(!backend.canUndo());
+        QVERIFY(!backend.canRedo());
+    }
+
+    // Undoing an unsubscribe puts the feed back under its id, with its
+    // category, its articles under theirs, their read and starred flags,
+    // read times and place in the search, and publishes the subscription
+    // list with it again, and without the deleted mark the unsubscribe
+    // published, as subscribing would. A redo unsubscribes again, and an
+    // undo before that went out leaves no deleted mark to publish either.
+    void backendUndoesUnsubscribeAndPublishesTheFeedAgain()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        relay.keepPublished = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount(true);
+        const auto [first, second] = seedLibrary();
+        const QString path = Paths::databaseFile();
+        const QString firstUrl = "https://first.example.com/feed", secondUrl = "https://second.example.com/feed";
+        Store store;
+        QVERIFY(store.open());
+        // The list the relays hold has both, so an unsubscribe marks one
+        // deleted.
+        const QJsonObject held = syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                                           {{"rss", QJsonArray{firstUrl, secondUrl}}},
+                                           QDateTime::currentSecsSinceEpoch() - 100);
+        QVERIFY(store.setSyncApplied(Sync::subscriptionsTag, held.value("created_at").toInteger(),
+                                     held.value("id").toString()));
+        QVERIFY(store.setSyncRemote(Sync::subscriptionsTag, held.value("id").toString(),
+                                    held.value("content").toString(), QDateTime::currentSecsSinceEpoch() - 100));
+        relay.events = {held};
+        QVERIFY(store.recordFetch(first, {}, {}, {}));
+        QVERIFY(store.recordFetch(second, {}, {}, {}));
+        // Subscribed long before the list the unsubscribe publishes, so only
+        // a restore dated now gets it back on the list.
+        QCOMPARE(rawExec(path, "UPDATE feeds SET created_at = created_at - 1000"), QString());
+        QCOMPARE(rawExec(path, "INSERT INTO categories (name) VALUES ('News')"), QString());
+        QCOMPARE(rawExec(path, QStringLiteral("UPDATE feeds SET category_id = (SELECT id FROM categories)"
+                                              " WHERE id = %1")
+                                   .arg(first)),
+                 QString());
+        const qint64 older = articleIdOf(store, "older"), newest = articleIdOf(store, "newest");
+        QVERIFY(store.setRead(older, true));
+        QCOMPARE(rawExec(path, QStringLiteral("UPDATE items SET read_at = 777 WHERE id = %1").arg(older)), QString());
+        QVERIFY(store.setStarred(newest, true));
+        QList<qint64> ids;
+        ArticleFilter ofFirst;
+        ofFirst.feedId = first;
+        ofFirst.limit = 0;
+        for (const Article &article : store.articles(ofFirst))
+            ids << article.id;
+        QCOMPARE(ids.size(), 3);
+        const auto states = readStates(store);
+        const auto list = [&relay] {
+            return QJsonDocument::fromJson(relay.published.last().value("content").toString().toUtf8()).object();
+        };
+
+        FakeKeyStore keys;
+        keys.keys.insert(syncNpub(), QByteArray(32, '\1'));
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setPublishDelays(300, 300);
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+
+        QVERIFY(backend.unsubscribe(first));
+        QTRY_COMPARE_WITH_TIMEOUT(relay.published.size(), 1, 10000);
+        QTRY_VERIFY(!backend.publishing());
+        QCOMPARE(list().value("rss").toArray(), QJsonArray{secondUrl});
+        QCOMPARE(list().value("deleted").toArray(), QJsonArray{firstUrl});
+        QVERIFY(!store.feed(first));
+        QCOMPARE(rawCount(path, QStringLiteral("SELECT COUNT(*) FROM items WHERE feed_id = %1").arg(first)), 0);
+        QCOMPARE(searchTitles(store, "full"), QStringList());
+        // The category goes too, as when it is left empty elsewhere.
+        QCOMPARE(rawExec(path, "DELETE FROM categories"), QString());
+
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: unsubscribed from First"));
+        QTRY_COMPARE_WITH_TIMEOUT(relay.published.size(), 2, 10000);
+        QTRY_VERIFY(!backend.publishing());
+        QVERIFY2(backend.publishError().isEmpty(), qPrintable(backend.publishError()));
+        QCOMPARE(list().value("rss").toArray(), (QJsonArray{firstUrl, secondUrl}));
+        QVERIFY(!list().contains("deleted"));
+        QCOMPARE(list().value("categories").toObject(), (QJsonObject{{firstUrl, QJsonObject{{"name", "News"}}}}));
+        QTRY_COMPARE(store.syncAccount().publishPending, 0);
+        const std::optional<Feed> restored = store.feed(first);
+        QVERIFY(restored);
+        QCOMPARE(restored->category, QString("News"));
+        QCOMPARE(restored->title, QString("First"));
+        QVERIFY(restored->lastFetchedAt.isValid());
+        QList<qint64> restoredIds;
+        for (const Article &article : store.articles(ofFirst))
+            restoredIds << article.id;
+        QCOMPARE(restoredIds, ids);
+        QVERIFY(readStates(store) == states);
+        QVERIFY(states.value("older") == std::make_pair(true, std::optional<qint64>(777)));
+        QVERIFY(articleIs(store, newest, [](const Article &article) { return article.starred; }));
+        QCOMPARE(searchTitles(store, "full"), QStringList{"Newest"});
+        QVERIFY(backend.sources()->rowOf(SourceModel::Kind::Feed, first) >= 0);
+
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: unsubscribed from First"));
+        QTRY_COMPARE_WITH_TIMEOUT(relay.published.size(), 3, 10000);
+        QTRY_VERIFY(!backend.publishing());
+        QCOMPARE(list().value("rss").toArray(), QJsonArray{secondUrl});
+        QCOMPARE(list().value("deleted").toArray(), QJsonArray{firstUrl});
+        QVERIFY(backend.sources()->rowOf(SourceModel::Kind::Feed, first) < 0);
+
+        // Redone and undone before anything goes out: what is left to
+        // publish is the feed, with no deleted mark.
+        backend.setPublishDelays(60000, 60000);
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: unsubscribed from First"));
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: unsubscribed from First"));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: unsubscribed from First"));
+        QTest::qWait(500);
+        QCOMPARE(relay.published.size(), 3);
+        QVERIFY(store.syncAccount().publishPending & publishBit(Sync::subscriptionsKind));
+        QVERIFY(readStates(store) == states);
+        backend.publishNow();
+        QTRY_COMPARE_WITH_TIMEOUT(relay.published.size(), 4, 10000);
+        QTRY_VERIFY(!backend.publishing());
+        QCOMPARE(list().value("rss").toArray(), (QJsonArray{firstUrl, secondUrl}));
+        QVERIFY(!list().contains("deleted"));
+        QTRY_COMPARE(store.syncAccount().publishPending, 0);
+    }
+
+    // The filter rules come back as they were through the usual save,
+    // which counts as a save and filters the library again.
+    void backendUndoesFilterRuleChanges()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        const QString path = Paths::databaseFile();
+        Backend backend;
+        QCOMPARE(backend.articles()->count(), 5);
+        const auto saves = [&path] { return rawCount(path, "SELECT saves FROM filter_state"); };
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "second"}, {"target", "title"}, {"type", "contains"},
+                                            {"action", "hide"}}));
+        QTRY_COMPARE(backend.articles()->count(), 3);
+        QTRY_COMPARE(saves(), 1);
+        const QString id = backend.filterRules().first().toMap().value("id").toString();
+
+        backend.removeFilterRule(0);
+        QTRY_COMPARE(backend.articles()->count(), 5);
+        QTRY_COMPARE(saves(), 2);
+        backend.undo();
+        QCOMPARE(backend.filterRules().size(), 1);
+        QCOMPARE(backend.filterRules().first().toMap().value("id").toString(), id);
+        QTRY_COMPARE(backend.status(), QString("Undid: removed a filter rule"));
+        QTRY_COMPARE(backend.articles()->count(), 3);
+        QCOMPARE(saves(), 3);
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: added a filter rule"));
+        QVERIFY(backend.filterRules().isEmpty());
+        QTRY_COMPARE(backend.articles()->count(), 5);
+        QCOMPARE(saves(), 4);
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: added a filter rule"));
+        QTRY_COMPARE(backend.articles()->count(), 3);
+        backend.setFilterRuleEnabled(0, false);
+        QTRY_COMPARE(backend.articles()->count(), 5);
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: changed a filter rule"));
+        QTRY_COMPARE(backend.articles()->count(), 3);
+        Store store;
+        QVERIFY(store.open());
+        QCOMPARE(store.filterRules()->size(), 1);
+        QVERIFY(store.filterRules()->first().enabled);
+    }
+
+    // An undo asked for before the action is written waits its turn on the
+    // worker and undoes it; while an unsubscribe's undo is on the worker,
+    // neither undo nor redo moves on.
+    void backendUndoesWhatIsNotWrittenYet()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const qint64 first = seedLibrary().first;
+        Store store;
+        QVERIFY(store.open());
+        const auto before = readStates(store);
+
+        Backend backend;
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::All));
+        backend.markViewRead();
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: marked 4 articles read"));
+        QVERIFY(readStates(store) == before);
+        QVERIFY(backend.canRedo());
+
+        QVERIFY(backend.unsubscribe(first));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: unsubscribed from First"));
+        QVERIFY(store.feed(first));
+        QVERIFY(readStates(store) == before);
+        QVERIFY(backend.sources()->rowOf(SourceModel::Kind::Feed, first) >= 0);
+
+        // While a restore, which may fail for now and come back, is on the
+        // worker, the history stays where it is.
+        QVERIFY(backend.unsubscribe(first));
+        backend.undo();
+        backend.redo();
+        QCOMPARE(backend.status(), QString("Still undoing: unsubscribed from First"));
+        backend.undo();
+        QCOMPARE(backend.status(), QString("Still undoing: unsubscribed from First"));
+        QTRY_COMPARE(backend.status(), QString("Undid: unsubscribed from First"));
+        QVERIFY(store.feed(first));
+        QVERIFY(!backend.canUndo());
+        QVERIFY(backend.canRedo());
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: unsubscribed from First"));
+        QVERIFY(!store.feed(first));
+        QVERIFY(backend.sources()->rowOf(SourceModel::Kind::Feed, first) < 0);
+        QVERIFY(backend.canUndo());
+        QVERIFY(!backend.canRedo());
+    }
+
+    // An action whose write fails leaves nothing to undo, and an undo queued
+    // behind it says nothing; an undo whose write fails is forgotten too.
+    void backendForgetsWhatFailsToWrite()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        const QString path = Paths::databaseFile();
+        Store store;
+        QVERIFY(store.open());
+        const qint64 newest = articleIdOf(store, "newest"), older = articleIdOf(store, "older");
+
+        Backend backend;
+        // Gone from the library under the window's feet.
+        backend.selectArticle(backend.articles()->rowOf(newest));
+        QCOMPARE(backend.articleId(), newest);
+        QCOMPARE(rawExec(path, QStringLiteral("DELETE FROM items WHERE id = %1").arg(newest)), QString());
+        backend.toggleStar();
+        QVERIFY(backend.canUndo());
+        backend.undo();
+        QTRY_VERIFY(!backend.canUndo() && !backend.canRedo());
+        QTRY_VERIFY(backend.status().startsWith("Cannot change the article:"));
+        QTest::qWait(200);
+        QVERIFY2(backend.status().startsWith("Cannot change the article:"), qPrintable(backend.status()));
+        QVERIFY(backend.statusError());
+
+        backend.selectArticle(backend.articles()->rowOf(older));
+        QCOMPARE(backend.articleId(), older);
+        backend.toggleStar();
+        QTRY_VERIFY(articleIs(store, older, [](const Article &article) { return article.starred; }));
+        QCOMPARE(rawExec(path, QStringLiteral("DELETE FROM items WHERE id = %1").arg(older)), QString());
+        backend.undo();
+        QTRY_VERIFY(backend.status().startsWith("Cannot undo:"));
+        QVERIFY(!backend.canUndo());
+        QVERIFY(!backend.canRedo());
+    }
+
+    // An undo of an unsubscribe fails for good once the feed is subscribed
+    // to again, and is forgotten.
+    void backendCannotUndoAnUnsubscribeOnceSubscribedAgain()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const qint64 first = seedLibrary().first;
+        Store store;
+        QVERIFY(store.open());
+
+        Backend backend;
+        QVERIFY(backend.unsubscribe(first));
+        QTRY_COMPARE(backend.status(), QString("Unsubscribed from First"));
+        QVERIFY(store.addFeed("https://first.example.com/feed", "First again") > 0);
+        backend.undo();
+        QTRY_COMPARE(backend.status(),
+                     QString("Cannot undo: https://first.example.com/feed is subscribed to again"));
+        QVERIFY(!backend.canUndo());
+        QVERIFY(!backend.canRedo());
+        QVERIFY(!store.feed(first));
+    }
+
+    // The history forgets the oldest feeds and read changes past its
+    // budget, but keeps the actions that hold nothing; a feed past the
+    // snapshot budget is unsubscribed with no undo.
+    void backendKeepsTheUndoHistoryWithinItsBudget()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        Store store;
+        QVERIFY(store.open());
+        const qint64 newest = articleIdOf(store, "newest");
+
+        Backend backend;
+        backend.setUndoBudget(1, Backend::snapshotBytes, Backend::snapshotItems);
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::All));
+        backend.markViewRead();
+        QTRY_COMPARE(backend.status(), QString("Marked 4 articles read"));
+        backend.selectArticle(backend.articles()->rowOf(newest));
+        QCOMPARE(backend.articleId(), newest);
+        backend.toggleStar();
+        QVERIFY(backend.unsubscribe(second));
+        QTRY_COMPARE(backend.status(), QString("Unsubscribed from Second"));
+        QVERIFY(backend.canUndo());
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: starred an article"));
+        QVERIFY(!backend.canUndo());
+        QVERIFY(!store.feed(second));
+
+        backend.setUndoBudget(Backend::undoBytes, 100, Backend::snapshotItems);
+        QVERIFY(backend.unsubscribe(first));
+        QTRY_COMPARE(backend.status(), QString("Unsubscribed from First (too large to undo)"));
+        QVERIFY(!backend.canUndo());
+        QVERIFY(!store.feed(first));
+    }
+
+    // A history that fits one feed's snapshot, but not two, keeps the newer
+    // and forgets the older, and keeps what holds nothing.
+    void backendForgetsTheOlderSnapshotPastTheBudget()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        Store store;
+        QVERIFY(store.open());
+        // How much each snapshot takes, put back as it was.
+        qsizetype budget = 0;
+        for (const qint64 feed : {first, second}) {
+            FeedSnapshot snapshot;
+            QVERIFY(store.removeFeed(feed, &snapshot));
+            QVERIFY(snapshot.bytes > 0);
+            budget = qMax(budget, snapshot.bytes);
+            QVERIFY2(store.restoreFeed(snapshot), qPrintable(store.lastError()));
+        }
+        const qint64 newest = articleIdOf(store, "newest");
+
+        Backend backend;
+        backend.setUndoBudget(budget, Backend::snapshotBytes, Backend::snapshotItems);
+        backend.selectArticle(backend.articles()->rowOf(newest));
+        QCOMPARE(backend.articleId(), newest);
+        backend.toggleStar();
+        QVERIFY(backend.unsubscribe(second));
+        QTRY_COMPARE(backend.status(), QString("Unsubscribed from Second"));
+        QVERIFY(backend.unsubscribe(first));
+        QTRY_COMPARE(backend.status(), QString("Unsubscribed from First"));
+        QVERIFY(backend.canUndo());
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: unsubscribed from First"));
+        QVERIFY(store.feed(first));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: starred an article"));
+        QVERIFY(!backend.canUndo());
+        QVERIFY(!store.feed(second));
+    }
+
+    // Marking read more articles than a read change may list is done with
+    // no undo, saying so, and forgets nothing else.
+    void backendMarksTooManyArticlesReadWithNoUndo()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        Store store;
+        QVERIFY(store.open());
+        const qint64 newest = articleIdOf(store, "newest");
+
+        Backend backend;
+        backend.setUndoBudget(Backend::undoBytes, 2 * Backend::readChangeBytes, Backend::snapshotItems);
+        backend.selectArticle(backend.articles()->rowOf(newest));
+        backend.toggleStar();
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::All));
+        backend.markViewRead();
+        QTRY_VERIFY(backend.status().endsWith("articles read (too large to undo)"));
+        QVERIFY(backend.status().startsWith("Marked "));
+        QCOMPARE(backend.sources()->row(backend.sources()->rowOf(SourceModel::Kind::Unread)).count, 0);
+        QVERIFY(backend.canUndo());
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: starred an article"));
+        QVERIFY(!backend.canUndo());
+    }
+
+    // A filter rule change whose save a later one skipped, which then
+    // failed, was never kept by the library, and is not left to undo; the
+    // one saved before them is.
+    void backendForgetsFilterRuleChangesNeverSaved()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        const QString path = Paths::databaseFile();
+        // The first save's pass holds the worker until both others are
+        // queued, so the second is skipped for the third, which fails.
+        QSemaphore reached, go;
+        std::atomic<bool> armed{false};
+        Store::filterWriteHook = [&] {
+            if (!armed.exchange(false))
+                return;
+            reached.release();
+            go.tryAcquire(1, 60000);
+        };
+        const auto unhook = qScopeGuard([] { Store::filterWriteHook = nullptr; });
+        Backend backend;
+        // Even when a check fails, the worker goes on and is joined.
+        const auto release = qScopeGuard([&go] { go.release(); });
+        Store store;
+        QVERIFY(store.open());
+        // Once the article opened is read, the worker is past any pass of
+        // its own at the start.
+        backend.selectArticle(backend.articles()->rowOf(articleIdOf(store, "newest")));
+        QTRY_VERIFY(readStates(store).value("newest").first);
+
+        armed = true;
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "oldest"}, {"target", "title"}, {"type", "contains"},
+                                            {"action", "hide"}}));
+        QVERIFY(reached.tryAcquire(1, 60000));
+        QCOMPARE(rawExec(path, "CREATE TRIGGER refuse BEFORE INSERT ON filter_rules"
+                               " BEGIN SELECT RAISE(ABORT, 'refused'); END"),
+                 QString());
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "second"}, {"target", "title"}, {"type", "contains"},
+                                            {"action", "hide"}}));
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "older"}, {"target", "title"}, {"type", "contains"},
+                                            {"action", "hide"}}));
+        go.release();
+        QTRY_VERIFY(backend.status().startsWith("Cannot save the filter rules:"));
+        QTRY_COMPARE(backend.filterRules().size(), 1);
+        QCOMPARE(backend.filterRules().first().toMap().value("pattern").toString(), QString("oldest"));
+        QVERIFY(backend.canUndo());
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: added a filter rule"));
+        QVERIFY(!backend.canUndo());
+        QVERIFY(backend.filterRules().isEmpty());
+        QCOMPARE(store.filterRules()->size(), 0);
+    }
+
+    // markReadByFilter() lists exactly what each batch it wrote marked, with
+    // the read time before, and nothing of a batch the rules went stale for,
+    // so restoreReadStates() undoes it all.
+    void storeListsWhatMarkReadByFilterMarksBatchByBatch()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        QList<ParsedItem> items;
+        for (int i = 0; i < 1200; ++i) {
+            ParsedItem item;
+            item.guid = QString::number(i);
+            item.title = "weekly " + QString::number(i);
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 1200);
+        QCOMPARE(rawExec(path, "UPDATE items SET read_at = 42 WHERE guid = '7'"), QString());
+        using namespace KeywordFilter;
+        const Rule weekly = filterRule("weekly", Target::Title, Type::Word, Action::MarkRead);
+        QVERIFY(store.setFilterRules({weekly}));
+
+        QList<ReadChange> changes;
+        QCOMPARE(store.markReadByFilter(weekly.id, {}, nullptr, &changes), 1200);
+        QCOMPARE(changes.size(), 1200);
+        QSet<qint64> ids;
+        for (const ReadChange &change : std::as_const(changes)) {
+            ids.insert(change.id);
+            QVERIFY(!change.before.read);
+            QVERIFY(change.after.read && change.after.readAt);
+        }
+        QCOMPARE(ids.size(), 1200);
+        QVERIFY(std::any_of(changes.cbegin(), changes.cend(),
+                            [](const ReadChange &change) { return change.before.readAt == 42; }));
+        QCOMPARE(store.restoreReadStates(changes, true), 1200);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1"), 0);
+        QCOMPARE(rawCount(path, "SELECT read_at FROM items WHERE guid = '7'"), 42);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE read_at IS NOT NULL"), 1);
+
+        // Before the second batch, the rules are saved again.
+        Store other;
+        QVERIFY(other.open(path));
+        int batches = 0;
+        bool saving = false;
+        Store::filterWriteHook = [&] {
+            if (saving || ++batches != 2)
+                return;
+            saving = true;
+            QVERIFY(other.setFilterRules({weekly}));
+            saving = false;
+        };
+        const auto unhook = qScopeGuard([] { Store::filterWriteHook = nullptr; });
+        changes.clear();
+        const int marked = store.markReadByFilter(weekly.id, {}, nullptr, &changes);
+        QVERIFY(marked > 0 && marked < 1200);
+        QCOMPARE(changes.size(), marked);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1"), marked);
+        QCOMPARE(store.restoreReadStates(changes, true), marked);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1"), 0);
+    }
+
+    // restoreFeed() puts back what removeFeed() kept, filtered by the rules
+    // as they are now and read where the synced reads say, and refuses a
+    // feed subscribed to again; removeFeed() keeps nothing past its budget,
+    // and deletes all the same.
+    void storeRestoresAFeedAsTheLibraryHasItNow()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const QString url = "https://a.invalid/feed";
+        const qint64 feed = store.addFeed(url, "A");
+        QList<ParsedItem> items;
+        for (const char *guid : {"plain", "spam", "synced"}) {
+            ParsedItem item;
+            item.guid = guid;
+            item.title = QString("Title ") + guid;
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 3);
+
+        FeedSnapshot snapshot;
+        QVERIFY(store.removeFeed(feed, &snapshot));
+        QCOMPARE(snapshot.items.size(), 3);
+        QVERIFY(snapshot.bytes > 0);
+        QVERIFY(!store.feed(feed));
+        using namespace KeywordFilter;
+        QVERIFY(store.setFilterRules({filterRule("spam", Target::Title)}));
+        QCOMPARE(rawExec(path, "INSERT INTO sync_read (guid) VALUES ('synced')"), QString());
+        bool lasting = true;
+        QVERIFY2(store.restoreFeed(snapshot, &lasting), qPrintable(store.lastError()));
+        QVERIFY(!lasting);
+        QVERIFY(store.feed(feed));
+        QCOMPARE(rawCount(path, QStringLiteral("SELECT filter_flags FROM items WHERE guid = 'spam'")),
+                 int(Outcome::Hidden));
+        QCOMPARE(rawCount(path, QStringLiteral("SELECT filter_flags FROM items WHERE guid = 'plain'")), 0);
+        QCOMPARE(rawCount(path, "SELECT is_read FROM items WHERE guid = 'synced'"), 1);
+        QCOMPARE(rawCount(path, "SELECT read_at IS NULL FROM items WHERE guid = 'synced'"), 1);
+        QCOMPARE(rawCount(path, "SELECT is_read FROM items WHERE guid = 'plain'"), 0);
+
+        // Subscribed to again: the restore fails for good.
+        QVERIFY(store.removeFeed(feed, &snapshot));
+        const qint64 again = store.addFeed(url, "A again");
+        QVERIFY(again > 0 && again != feed);
+        QVERIFY(!store.restoreFeed(snapshot, &lasting));
+        QVERIFY(lasting);
+        QVERIFY(!store.feed(feed));
+
+        // Past the budget, nothing is kept, and the feed goes anyway.
+        snapshot = {};
+        // Two new ones count: the rule above hides "spam".
+        QCOMPARE(store.saveItems(again, items), 2);
+        QVERIFY(store.removeFeed(again, &snapshot, std::numeric_limits<qsizetype>::max(), 2));
+        QVERIFY(snapshot.feedColumns.isEmpty());
+        QVERIFY(snapshot.items.isEmpty());
+        QVERIFY(!store.feed(again));
+        QCOMPARE(rawCount(path, QStringLiteral("SELECT COUNT(*) FROM items WHERE feed_id = %1").arg(again)), 0);
+        QVERIFY(!store.restoreFeed(snapshot, &lasting));
+        QVERIFY(lasting);
+    }
+
+    // Ctrl+Z and Ctrl+Shift+Z undo and redo in the window, listed in the ?
+    // overlay, except in a text field, which keeps them for its own typing.
+    void windowUndoesWithCtrlZ()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        write(dir.path() + "/language", "en");
+        QTest::failOnWarning(QRegularExpression("Binding loop|qrc:/"));
+        LoadedWindow loaded(dir.path() + "/language");
+        QVERIFY(loaded.window);
+        QVERIFY(QTest::qWaitForWindowExposed(loaded.window));
+        Backend &backend = *loaded.backend;
+        QStringList listed;
+        for (const QVariant &shortcut : loaded.window->property("shortcuts").toList())
+            listed << shortcut.toMap().value("keys").toString();
+        QVERIFY(listed.contains("Ctrl+Z"));
+        QVERIFY(listed.contains("Ctrl+Shift+Z"));
+
+        backend.selectArticle(0);
+        QVERIFY(backend.hasArticle());
+        QVERIFY(!backend.articleStarred());
+        QTest::keyClick(loaded.window, Qt::Key_S);
+        QVERIFY(backend.articleStarred());
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!backend.articleStarred());
+        QTRY_COMPARE(backend.status(), QString("Undid: starred an article"));
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QVERIFY(backend.articleStarred());
+        QTRY_COMPARE(backend.status(), QString("Redid: starred an article"));
+
+        // Undone again, so there is something both to undo and to redo.
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier);
+        QVERIFY(!backend.articleStarred());
+        QTRY_COMPARE(backend.status(), QString("Undid: starred an article"));
+        QVERIFY(backend.canRedo());
+        QObject *undoShortcut = loaded.window->findChild<QObject *>("undoShortcut");
+        QObject *redoShortcut = loaded.window->findChild<QObject *>("redoShortcut");
+        QVERIFY(undoShortcut && redoShortcut);
+        QVERIFY(undoShortcut->property("enabled").toBool());
+        QVERIFY(redoShortcut->property("enabled").toBool());
+
+        QQuickItem *field = loaded.window->findChild<QQuickItem *>("searchField");
+        QVERIFY(field);
+        QTest::keyClick(loaded.window, Qt::Key_F, Qt::ControlModifier);
+        QTRY_VERIFY(field->hasActiveFocus());
+        // The window's own keys are off while the field has the keyboard,
+        // whether or not it takes them itself.
+        QVERIFY(loaded.window->property("editingText").toBool());
+        QVERIFY(!undoShortcut->property("enabled").toBool());
+        QVERIFY(!redoShortcut->property("enabled").toBool());
+        QTest::keyClick(loaded.window, 'x');
+        QCOMPARE(field->property("text").toString(), QString("x"));
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(field->property("text").toString(), QString());
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QTest::qWait(100);
+        QVERIFY(!backend.articleStarred());
+        QCOMPARE(backend.status(), QString("Undid: starred an article"));
+        QVERIFY(backend.canRedo());
+        QVERIFY(!backend.canUndo());
+    }
+
     // The catalogs translate every string the window and its C++ show, so a
     // new string cannot ship in English only.
     void catalogsCoverEveryString_data()
@@ -15399,6 +16250,24 @@ private:
     static QByteArray fixture(const char *name)
     {
         return fixtureAt(QFINDTESTDATA(QString("fixtures/") + name));
+    }
+
+    // The read flag and read time of every article, by GUID.
+    static QMap<QString, std::pair<bool, std::optional<qint64>>> readStates(Store &store)
+    {
+        QMap<QString, std::pair<bool, std::optional<qint64>>> states;
+        for (const Article &article : store.articles({0, false, false, 0}))
+            if (const auto state = store.readState(article.id))
+                states.insert(article.guid, {state->read, state->readAt});
+        return states;
+    }
+
+    static qint64 articleIdOf(Store &store, const char *guid)
+    {
+        for (const Article &article : store.articles({0, false, false, 0}))
+            if (article.guid == guid)
+                return article.id;
+        return 0;
     }
 
     // Two feeds, five articles: "Newest" (with markup to sanitize), "Older",
