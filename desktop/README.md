@@ -37,8 +37,9 @@ Run `build/readstr` (or `build/readstr open`) to open the window.
 
 ## The window
 
-Sources on the left (All articles, Unread, Starred, then your feeds by
-category, with unread counts and a feed's last refresh error under it),
+Sources on the left (All articles, Unread, Starred, the saved views synced
+from the web app, then your feeds by category, with unread counts and a
+feed's last refresh error under it),
 the articles of the selected source in the middle, newest first, and the
 article itself on the right. Selecting an article marks it read. Right-click
 a feed to refresh it or unsubscribe (and, for a Nostr author, to open their
@@ -128,6 +129,41 @@ one with `(?i)` in it ignores case from there even with it on, as the
 dialog says. A regular expression reads the first 64 KiB of
 each field, since the largest patterns RE2 accepts take about half a second
 for that much; contains and whole word read all of it.
+
+### Saved views
+
+The views saved in the web app come with a sync pull (see Sync with the web
+app) and are listed under **Views** in the sources, in the web app's order,
+with their icons; the section is not there while there are none, and it
+follows each pull, with no restart. Selecting a view, with the mouse or
+`Up` and `Down`, lists its articles as the web app does: starred ones for a
+Favorites view, unread or read ones, newest or oldest first, and, when it
+has keywords, only articles whose title, summary, text (without its
+markup), or author holds one of them, ignoring case, and whose title, text,
+or author holds none of its mute words, as in the web app (which does not
+look in the summary at all; here it is looked in for the keywords only, so a
+view lists more, never less). Up to 50 keywords and 50 mute words of 200
+characters each count, as in the web app. The keywords are looked for in the
+view's first 20,000 articles (in its order) at most, so that even a view of
+rare words over a large library lists at once; when that leaves some
+unread for them, the list says so under it (`readstr articles --view`
+reads them all). A search searches within the
+view, and `Ctrl+Shift+A` marks what it lists read, within the same
+articles, which `Ctrl+Z` undoes.
+
+A view of one feed, one category, or some tags names them by the web app's
+own ids, which no feed here has, and Readstr keeps no tags yet, so which
+articles it means cannot be told here. Such a view is listed greyed out,
+with a tip that says so, and cannot be selected: a click does nothing and
+`Up` and `Down` step past it. A view with only other rules this version
+does not know (a field a later web app adds) lists what the rules it knows
+pick: its row says **Partial**, and the tip names what is left out. The web
+app's sidebar mode (`organizationMode`) picks no articles. When the view
+selected is gone, changes, or turns to a feed, category, or tags, after a
+pull (or `readstr sync`, once the window next reads the library), the list
+follows: All articles is selected again, or the view lists what its rules
+now pick. Views are read only here for now:
+create, rename, reorder, and delete them in the web app.
 
 ## Nostr
 
@@ -268,7 +304,7 @@ Merging is close to the web app's and never removes anything here:
 - Read GUIDs mark the matching articles read in every feed, and are kept for
   articles that arrive later, which come in read. An article is never
   marked unread by a sync.
-- Saved views are imported and stored for a later phase to show. A view's
+- Saved views are shown under Views (see Saved views). A view's
   mute words (`keywords.exclude`) never come from a relay, which never
   carries them, and stay as they are here.
 
@@ -359,8 +395,9 @@ those that take `--json` print one line of JSON whose shape is stable (below).
 | Command | What it does |
 |---|---|
 | `readstr feeds [--json]` | List subscriptions with unread and total counts |
-| `readstr articles [--feed ID] [--unread] [--starred] [--limit N] [--json]` | List articles, newest first (50 unless `--limit`; `--limit 0` for all) |
-| `readstr search QUERY [--feed ID] [--unread] [--starred] [--limit N] [--json]` | Search titles, authors, summaries, and text, best match first, as `Ctrl+F` does; exits 1 for a query with no letters or digits or over 256 characters |
+| `readstr articles [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]` | List articles, newest first (50 unless `--limit`; `--limit 0` for all); `--view` lists a saved view's, in its order, naming on stderr the rules left out; exits 1 for a view of a feed, category, or tags, which cannot be identified here yet, or with `--unread` for a view of read articles |
+| `readstr search QUERY [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]` | Search titles, authors, summaries, and text, best match first, as `Ctrl+F` does; exits 1 for a query with no letters or digits or over 256 characters |
+| `readstr views [--json]` | List the saved views in the web app's order, with the rules that cannot be applied here, and those that list nothing here |
 | `readstr subscribe URL\|NPUB [--json]` | Subscribe to a feed URL, find the feed behind a page URL, or follow a Nostr author (npub or nprofile) |
 | `readstr unsubscribe ID` | Remove a feed and its articles |
 | `readstr refresh [--feed ID] [--json]` | Fetch every feed (or one) now; exits 1 if any failed |
@@ -432,6 +469,15 @@ ISO 8601 (`2026-11-19T20:57:14Z`), and anything unknown is `null`.
 // refused, empty on success)
 {"npub": "npub1…", "added": 2, "skipped": 40, "unsupported": 0, "markedRead": 12,
  "pendingRead": 300, "views": 3, "syncedAt": "2026-11-19T21:30:00Z", "errors": []}
+
+// readstr views --json (in the web app's order: each view as the web app
+// publishes it, "exclude" its mute words, which stay on this machine,
+// "unsupported" the rules left out here, and "listable" false for a view of
+// a feed, category, or tags, which lists nothing here)
+[{"id": "1732040000000-k3j9", "name": "Morning", "icon": "☀", "order": 0,
+  "source": {"kind": "all"}, "readState": "unread", "sort": "newest",
+  "keywords": {"include": ["rust"]}, "exclude": [], "unsupported": [],
+  "listable": true}]
 
 // readstr filters --json (in the order they apply; "target" is "title",
 // "content", "author", or "any", "type" "contains", "word", or "regex", and
@@ -544,7 +590,7 @@ field.
 |---|---|
 | `J`, `K` | Next or previous article |
 | `N` | Next unread article |
-| `Up`, `Down` | Move in the selected list (sources or articles) |
+| `Up`, `Down` | Move in the selected list (sources and saved views, or articles) |
 | `Tab` | Switch between sources and articles |
 | `Space`, `Shift+Space` | Scroll the article |
 | `M` | Mark read or unread |

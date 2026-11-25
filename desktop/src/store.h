@@ -152,6 +152,28 @@ struct ArticleFilter {
     // with every word are listed, best match first; alsoId is listed only
     // if it matches too. A query without a word lists as though none was set.
     QString query = {};
+    // The rules a saved view adds (SavedViews::evaluate()). Only read
+    // articles, as unreadOnly lists only unread ones.
+    bool readOnly = false;
+    // Oldest first instead of newest first; a search still lists the best
+    // matches first.
+    bool oldestFirst = false;
+    // An article is listed only when its title, summary, text, or author
+    // contains, ignoring case, one of includeWords (when there are any) and
+    // its title, text, or author none of excludeWords, as the web app's
+    // matchesView() has it (Store::matchesWords()). alsoId is listed only
+    // if it does.
+    QStringList includeWords = {};
+    QStringList excludeWords = {};
+    // With words, at most this many articles that the other rules pick are
+    // read for them, the first in the list's order, so a view of rare
+    // words over a large library still lists at once; 0 reads them all.
+    int maxScanned = 0;
+    // With words, markRead() marks only among these when there are any:
+    // the articles a list that maxScanned stopped read for them
+    // (articles()' `scannedIds`), so it marks no further than the list
+    // looked, whatever arrived or was read since.
+    QList<qint64> scannedIds = {};
 };
 
 struct LibraryCounts {
@@ -227,7 +249,14 @@ public:
 
     // Leaves out the articles a keyword filter rule hides, as counts(),
     // feeds()' counts, and markRead() do; article() still finds them.
-    QList<Article> articles(const ArticleFilter &filter);
+    // `scanCapped` says whether the filter's maxScanned stopped the list
+    // before it had its limit and before the articles ran out, and
+    // `scannedIds` then gets every article it read for the words.
+    QList<Article> articles(const ArticleFilter &filter, bool *scanCapped = nullptr,
+                            QList<qint64> *scannedIds = nullptr);
+    // Whether `article`, its content included, holds one of the filter's
+    // includeWords, when it has any, and none of its excludeWords.
+    static bool matchesWords(const ArticleFilter &filter, const Article &article);
     std::optional<Article> article(qint64 id);
     std::optional<LibraryCounts> counts();
     bool setRead(qint64 articleId, bool read);
@@ -338,10 +367,13 @@ public:
     // Only in the test build: called by applyFilterRules() between two
     // batches, with what it checks for being superseded, on its thread.
     static inline std::function<void(const std::function<bool()> &stopped)> filterBatchHook;
-    // Only in the test build: called by applyFilterRules() and
-    // markReadByFilter() once a batch is read and worked out, before it is
-    // written, on their thread.
+    // Only in the test build: called by applyFilterRules(),
+    // markReadByFilter(), and markRead() for a filter with words once a
+    // batch is read and worked out, before it is written, on their thread.
     static inline std::function<void()> filterWriteHook;
+    // Only in the test build: called by articles() for each article it
+    // reads to look for a filter's words in.
+    static inline std::function<void()> wordsReadHook;
 #endif
 
     // Runs `work` in one transaction that commits when it returns true and
@@ -385,6 +417,12 @@ private:
     const KeywordFilter::Rules *compiledFilterRules();
     // The filter rules as kept, one JSON text each, in order.
     QStringList filterSource(bool *ok);
+    // articles() and markRead() for a filter with words, `match` its
+    // search, and `where` and `values` what markRead() has worked out.
+    QList<Article> articlesByWords(const ArticleFilter &filter, const QString &match, bool *scanCapped,
+                                   QList<qint64> *scannedIds);
+    int markReadByWords(const ArticleFilter &filter, qint64 upToId, const QString &where, const QVariantList &values,
+                        qint64 now, QList<ReadChange> *changes, qsizetype maxChanges, bool *overflow);
 
     QString m_connection;
     QSqlDatabase m_db;

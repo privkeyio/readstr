@@ -76,6 +76,7 @@
 #include "relaypool.h"
 #include "remotesigner.h"
 #include "sanitizer.h"
+#include "savedviews.h"
 #include "settings.h"
 #include "signer.h"
 #include "sourcemodel.h"
@@ -7633,6 +7634,742 @@ private slots:
         model.setLibrary({loose, alpha}, LibraryCounts{});
         QCOMPARE(reset.count(), 1);
         QCOMPARE(model.rowCount(), 7);
+    }
+
+    // Saved views
+
+    // Each rule of a view becomes the filter's, as the web app applies it;
+    // one that names what the desktop does not have, or that this version
+    // does not know, is left out and named.
+    void savedViewsTurnIntoFilters()
+    {
+        const auto evaluate = [](const QJsonObject &rules, const QStringList &exclude = {}) {
+            return SavedViews::evaluate(savedView("v", rules, exclude));
+        };
+        const auto plain = [](const ArticleFilter &filter) {
+            return !filter.feedId && !filter.unreadOnly && !filter.starredOnly && !filter.readOnly
+                   && !filter.oldestFirst && filter.includeWords.isEmpty() && filter.excludeWords.isEmpty();
+        };
+
+        // Everything, newest first; the sidebar's grouping picks nothing.
+        auto result = evaluate({{"source", QJsonObject{{"kind", "all"}}},
+                                {"readState", "all"},
+                                {"sort", "newest"},
+                                {"order", 3},
+                                {"icon", "📰"},
+                                {"organizationMode", "tags"}});
+        QVERIFY(result.unsupported.isEmpty());
+        QVERIFY(plain(result.filter));
+        // A view that says nothing lists everything too.
+        result = evaluate({});
+        QVERIFY(result.unsupported.isEmpty());
+        QVERIFY(plain(result.filter));
+
+        result = evaluate(
+            {{"source", QJsonObject{{"kind", "favorites"}}}, {"readState", "unread"}, {"sort", "oldest"}});
+        QVERIFY(result.unsupported.isEmpty());
+        QVERIFY(result.filter.starredOnly && result.filter.unreadOnly && result.filter.oldestFirst);
+        QVERIFY(!result.filter.readOnly);
+        result = evaluate({{"readState", "read"}});
+        QVERIFY(result.filter.readOnly && !result.filter.unreadOnly);
+
+        // The web app's own feed and category ids, and tags, name nothing
+        // here: such a view cannot list.
+        QVERIFY(!result.unknownSource);
+        result = evaluate({{"source", QJsonObject{{"kind", "feed"}, {"feedId", "clx1"}}}, {"readState", "unread"}});
+        QCOMPARE(result.unsupported, QStringList{"source.feedId"});
+        QVERIFY(result.unknownSource);
+        result = evaluate({{"source", QJsonObject{{"kind", "category"}, {"categoryId", "clx2"}}}});
+        QCOMPARE(result.unsupported, QStringList{"source.categoryId"});
+        QVERIFY(result.unknownSource);
+        result = evaluate({{"source", QJsonObject{{"kind", "tags"}, {"tags", QJsonArray{"rust"}}}}});
+        QCOMPARE(result.unsupported, QStringList{"source.tags"});
+        QVERIFY(result.unknownSource);
+        // One without what it names is every feed, in the web app too.
+        result = evaluate({{"source", QJsonObject{{"kind", "feed"}}}});
+        QVERIFY(result.unsupported.isEmpty());
+        QVERIFY(!result.unknownSource);
+        result = evaluate({{"source", QJsonObject{{"kind", "tags"}, {"tags", QJsonArray{""}}}}});
+        QVERIFY(result.unsupported.isEmpty());
+        QVERIFY(!result.unknownSource);
+
+        // Values and fields this version does not know are left out of a
+        // view that still lists.
+        result = evaluate({{"source", QJsonObject{{"kind", "smart"}}}, {"readState", "skimmed"}, {"sort", "random"}});
+        QCOMPARE(result.unsupported, (QStringList{"source.kind", "readState", "sort"}));
+        QVERIFY(plain(result.filter));
+        QVERIFY(!result.unknownSource);
+        result = evaluate(
+            {{"pinned", true}, {"keywords", QJsonObject{{"include", QJsonArray{"go"}}, {"regex", "x+"}}}});
+        QCOMPARE(result.unsupported, (QStringList{"pinned", "keywords.regex"}));
+        QCOMPARE(result.filter.includeWords, QStringList{"go"});
+        QVERIFY(!result.unknownSource);
+
+        // Words to include, and mute words, kept apart or in the view.
+        result = evaluate({{"keywords", QJsonObject{{"include", QJsonArray{"rust", "", 7, "go"}},
+                                                    {"exclude", QJsonArray{"ads"}}}}},
+                          {"ads", "promo", ""});
+        QVERIFY(result.unsupported.isEmpty());
+        QCOMPARE(result.filter.includeWords, (QStringList{"rust", "go"}));
+        QCOMPARE(result.filter.excludeWords, (QStringList{"ads", "promo"}));
+        // As many words, as long, as the web app keeps, mute words too.
+        QJsonArray many;
+        QStringList kept;
+        for (int i = 0; i < 60; ++i) {
+            many << QString::number(i) + QString(300, 'x');
+            if (i < 50)
+                kept << (QString::number(i) + QString(300, 'x')).left(200);
+        }
+        result = evaluate({{"keywords", QJsonObject{{"include", many}, {"exclude", many}}}}, {"more"});
+        QCOMPARE(result.filter.includeWords, kept);
+        QCOMPARE(result.filter.excludeWords, kept);
+        result = evaluate({}, QStringList(60, QString(300, 'y')) << "z");
+        QCOMPARE(result.filter.excludeWords, (QStringList{QString(200, 'y'), "z"}));
+
+        // Shown without line breaks or overrides; a view always has a name.
+        SavedView named = savedView("id-1", {{"name", QString("Morning\n") + QChar(0x202E) + "news"}, {"icon", "☀\n"}});
+        QCOMPARE(SavedViews::name(named), QString("Morning news"));
+        QCOMPARE(SavedViews::icon(named), QString("☀"));
+        named.view.remove("name");
+        QCOMPARE(SavedViews::name(named), QString("id-1"));
+    }
+
+    // The store lists and marks read what a view's rules pick: read ones,
+    // oldest first, and words in the title, the text as shown, or the
+    // author, ignoring case.
+    void storeAppliesSavedViewRules()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        Store store;
+        QVERIFY(store.open());
+        const auto titles = [&store](const ArticleFilter &filter) { return titlesOf(store.articles(filter)); };
+
+        ArticleFilter filter;
+        filter.readOnly = true;
+        QCOMPARE(titles(filter), QStringList{"Second B"});
+        filter = {};
+        filter.oldestFirst = true;
+        QCOMPARE(titles(filter), (QStringList{"Oldest", "Second B", "Older", "Second A", "Newest"}));
+
+        filter = {};
+        filter.includeWords = {"FULL"};
+        QCOMPARE(titles(filter), QStringList{"Newest"});
+        // Markup and scripts are not text.
+        filter.includeWords = {"strong"};
+        QVERIFY(titles(filter).isEmpty());
+        filter.includeWords = {"alert"};
+        QVERIFY(titles(filter).isEmpty());
+        // Any word will do; a mute word keeps an article out.
+        filter.includeWords = {"second", "oldest"};
+        QCOMPARE(titles(filter), (QStringList{"Second A", "Second B", "Oldest"}));
+        filter.excludeWords = {"SECOND b"};
+        QCOMPARE(titles(filter), (QStringList{"Second A", "Oldest"}));
+        filter.includeWords = {};
+        QCOMPARE(titles(filter), (QStringList{"Newest", "Second A", "Older", "Oldest"}));
+        filter.oldestFirst = true;
+        QCOMPARE(titles(filter), (QStringList{"Oldest", "Older", "Second A", "Newest"}));
+
+        // The limit counts only what the words let through, and the open
+        // article is listed past it only when it holds them.
+        const qint64 oldest = articleIdOf(store, "oldest"), newest = articleIdOf(store, "newest");
+        filter = {};
+        filter.includeWords = {"o"};
+        filter.limit = 2;
+        QCOMPARE(titles(filter), (QStringList{"Second A", "Older"}));
+        filter.alsoId = oldest;
+        QCOMPARE(titles(filter), (QStringList{"Second A", "Older", "Oldest"}));
+        filter.alsoId = newest;
+        // One that does not hold them never makes the list read on for it.
+        int read = 0;
+        Store::wordsReadHook = [&read] { ++read; };
+        const auto unhook = qScopeGuard([] { Store::wordsReadHook = {}; });
+        QCOMPARE(titles(filter), (QStringList{"Second A", "Older"}));
+        QCOMPARE(read, 3);
+        // Nor does one that is gone, or that a rule hides.
+        read = 0;
+        filter.alsoId = 1000000;
+        QCOMPARE(titles(filter), (QStringList{"Second A", "Older"}));
+        QCOMPARE(read, 3);
+        filter.alsoId = oldest;
+        QCOMPARE(rawExec(Paths::databaseFile(), "UPDATE items SET filter_flags = 1 WHERE guid = 'oldest'"), QString());
+        QCOMPARE(titles(filter), (QStringList{"Second A", "Older"}));
+        QCOMPARE(rawExec(Paths::databaseFile(), "UPDATE items SET filter_flags = 0 WHERE guid = 'oldest'"), QString());
+        // Outside a feed it is held to.
+        filter.feedId = store.article(articleIdOf(store, "second-a"))->feedId;
+        QCOMPARE(titles(filter), (QStringList{"Second A", "Second B"}));
+        filter.feedId = 0;
+        // It takes its own place in the order, as in the other lists.
+        filter = {};
+        filter.includeWords = {"e"};
+        filter.unreadOnly = true;
+        filter.alsoId = articleIdOf(store, "second-b");
+        QCOMPARE(titles(filter), (QStringList{"Newest", "Second A", "Older", "Second B", "Oldest"}));
+        filter.oldestFirst = true;
+        QCOMPARE(titles(filter), (QStringList{"Oldest", "Second B", "Older", "Second A", "Newest"}));
+
+        // At most maxScanned articles are read for the words, and the list
+        // says when that left some unread.
+        filter = {};
+        filter.includeWords = {"o"};
+        filter.limit = 0;
+        filter.maxScanned = 2;
+        bool capped = false;
+        QCOMPARE(titlesOf(store.articles(filter, &capped)), QStringList{"Second A"});
+        QVERIFY(capped);
+        filter.maxScanned = 5;
+        QCOMPARE(titlesOf(store.articles(filter, &capped)), (QStringList{"Second A", "Older", "Second B", "Oldest"}));
+        QVERIFY(!capped);
+        filter.maxScanned = 2;
+        filter.limit = 1;
+        QCOMPARE(titlesOf(store.articles(filter, &capped)), QStringList{"Second A"});
+        QVERIFY(!capped);
+        // As for Unread: the open article stays though it is read.
+        filter = {};
+        filter.includeWords = {"second"};
+        filter.unreadOnly = true;
+        QCOMPARE(titles(filter), QStringList{"Second A"});
+        filter.alsoId = articleIdOf(store, "second-b");
+        QCOMPARE(titles(filter), (QStringList{"Second A", "Second B"}));
+        // The text is read for the words, and left out when not asked for.
+        filter = {};
+        filter.includeWords = {"full"};
+        filter.withContent = false;
+        QCOMPARE(store.articles(filter).value(0).content, QString());
+        filter.withContent = true;
+        QVERIFY(store.articles(filter).value(0).content.contains("full"));
+        // A search within a view.
+        filter = {};
+        filter.query = "second";
+        filter.includeWords = {"b"};
+        QCOMPARE(titles(filter), QStringList{"Second B"});
+        QVERIFY(Store::matchesWords({}, Article{}));
+
+        // Marking the view read marks only what it lists.
+        const qint64 upTo = store.counts()->lastId;
+        filter = {};
+        filter.readOnly = true;
+        QCOMPARE(store.markRead(filter, upTo), 0);
+        filter = {};
+        filter.includeWords = {"older", "OLDEST"};
+        QList<ReadChange> changes;
+        QCOMPARE(store.markRead(filter, upTo, &changes), 2);
+        QCOMPARE(changes.size(), 2);
+        QCOMPARE(QSet<qint64>({changes.at(0).id, changes.at(1).id}),
+                 QSet<qint64>({oldest, articleIdOf(store, "older")}));
+        auto states = readStates(store);
+        QVERIFY(states.value("older").first && states.value("oldest").first);
+        QVERIFY(!states.value("newest").first && !states.value("second-a").first);
+        filter.includeWords = {"second"};
+        QCOMPARE(store.markRead(filter, upTo), 1);
+        QVERIFY(readStates(store).value("second-a").first);
+        // Too many to keep: marked all the same, with none listed.
+        filter.includeWords = {"newest"};
+        changes.clear();
+        bool overflow = false;
+        QCOMPARE(store.markRead(filter, upTo, &changes, 0, &overflow), 1);
+        QVERIFY(overflow);
+        QVERIFY(changes.isEmpty());
+        QVERIFY(unreadIs(store, 0));
+
+        // Past maxChanges, every article the view lists is still marked.
+        for (const Article &article : store.articles({0, false, false, 0}))
+            QVERIFY(store.setRead(article.id, false));
+        filter = {};
+        filter.includeWords = {"o"};
+        filter.limit = 0;
+        const qsizetype listed = store.articles(filter).size();
+        QCOMPARE(listed, 4);
+        changes.clear();
+        QCOMPARE(store.markRead(filter, upTo, &changes, 1, &overflow), listed);
+        QVERIFY(overflow);
+        QVERIFY(changes.isEmpty());
+        QVERIFY(!readStates(store).value("newest").first);
+        // Only within the articles a capped list read for its words, though
+        // a newer article arrives before the mark.
+        const auto allUnread = [&store] {
+            for (const Article &article : store.articles({0, false, false, 0}))
+                QVERIFY(store.setRead(article.id, false));
+        };
+        allUnread();
+        filter.maxScanned = 2;
+        QList<qint64> scanned;
+        QCOMPARE(titlesOf(store.articles(filter, &capped, &scanned)), QStringList{"Second A"});
+        QVERIFY(capped);
+        QCOMPARE(scanned, (QList<qint64>{newest, articleIdOf(store, "second-a")}));
+        const qint64 listedUpTo = store.counts()->lastId;
+        ParsedItem latest;
+        latest.guid = "latest";
+        latest.title = "Latest";
+        latest.published = QDateTime(QDate(2026, 1, 25), QTime(12, 0), QTimeZone::UTC);
+        QVERIFY(store.saveItems(store.article(newest)->feedId, {latest}) >= 0);
+        filter.scannedIds = scanned;
+        changes.clear();
+        QCOMPARE(store.markRead(filter, listedUpTo, &changes), 1);
+        QCOMPARE(changes.value(0).id, articleIdOf(store, "second-a"));
+        // Nor past where it stopped, though one it read is read since.
+        allUnread();
+        filter = {};
+        filter.includeWords = {"o"};
+        filter.unreadOnly = true;
+        filter.limit = 0;
+        filter.maxScanned = 3;
+        QCOMPARE(titlesOf(store.articles(filter, &capped, &scanned)), QStringList{"Second A"});
+        QVERIFY(capped);
+        QVERIFY(store.setRead(newest, true));
+        filter.scannedIds = scanned;
+        QCOMPARE(store.markRead(filter, store.counts()->lastId), 1);
+        states = readStates(store);
+        QVERIFY(states.value("second-a").first);
+        QVERIFY(!states.value("older").first && !states.value("oldest").first);
+        // Uncapped, the mark covers every article the words pick.
+        filter.scannedIds = {};
+        filter.maxScanned = 0;
+        QCOMPARE(store.markRead(filter, store.counts()->lastId), 3);
+
+        // Mute words are not looked for in the summary, which the web app
+        // does not look in; keywords are.
+        QCOMPARE(rawExec(Paths::databaseFile(), "UPDATE items SET summary = 'A promo' WHERE guid = 'older'"),
+                 QString());
+        filter = {};
+        filter.excludeWords = {"promo"};
+        QVERIFY(titles(filter).contains("Older"));
+        filter = {};
+        filter.includeWords = {"promo"};
+        QCOMPARE(titles(filter), QStringList{"Older"});
+
+        // An article whose text changes between the words being looked for
+        // and the mark, as a refresh rewrites it, is marked only if it
+        // still holds them.
+        allUnread();
+        filter = {};
+        filter.includeWords = {"o"};
+        filter.excludeWords = {"promo"};
+        Store::filterWriteHook = [] {
+            rawExec(Paths::databaseFile(), "UPDATE items SET title = 'Older promo' WHERE guid = 'older'");
+        };
+        const auto unhookWrite = qScopeGuard([] { Store::filterWriteHook = nullptr; });
+        changes.clear();
+        QCOMPARE(store.markRead(filter, store.counts()->lastId, &changes), 3);
+        Store::filterWriteHook = nullptr;
+        QCOMPARE(changes.size(), 3);
+        states = readStates(store);
+        QVERIFY(!states.value("older").first);
+        QVERIFY(states.value("oldest").first && states.value("second-a").first && states.value("second-b").first);
+
+        // A search orders the open article by its score before its date:
+        // an older one that holds the words more often comes first.
+        allUnread();
+        ParsedItem often;
+        often.guid = "second-often";
+        often.title = "Second second second";
+        often.published = QDateTime(QDate(2026, 1, 2), QTime(12, 0), QTimeZone::UTC);
+        QVERIFY(store.saveItems(store.article(newest)->feedId, {often}) >= 0);
+        QVERIFY(store.setRead(articleIdOf(store, "second-often"), true));
+        filter = {};
+        filter.query = "second";
+        filter.includeWords = {"second"};
+        filter.unreadOnly = true;
+        QCOMPARE(titles(filter), (QStringList{"Second A", "Second B"}));
+        filter.alsoId = articleIdOf(store, "second-often");
+        QCOMPARE(titles(filter), (QStringList{"Second second second", "Second A", "Second B"}));
+    }
+
+    void sourceModelListsSavedViews()
+    {
+        SourceModel model;
+        const Feed loose{1, "https://l.example/", "Loose", {}, {}, {}, {}, {}, {}, {}, {}, {}, 2, 3};
+        QList<SavedView> views{savedView("a", {{"name", "Morning"}, {"icon", "☀"}}),
+                               savedView("b", {{"name", "Tech"},
+                                               {"source", QJsonObject{{"kind", "feed"}, {"feedId", "x"}}}})};
+        model.setLibrary({loose}, LibraryCounts{3, 2, 0, 3}, views);
+        const QStringList kinds{"all", "unread", "starred", "views", "view", "view", "category", "feed"};
+        QCOMPARE(model.rowCount(), kinds.size());
+        for (int i = 0; i < kinds.size(); ++i)
+            QCOMPARE(model.data(model.index(i), SourceModel::KindRole).toString(), kinds.at(i));
+        QVERIFY(!model.isSelectable(3));
+        QVERIFY(!model.data(model.index(3), SourceModel::SelectableRole).toBool());
+        QVERIFY(model.data(model.index(4), SourceModel::SelectableRole).toBool());
+        // A view of a feed cannot list here, so it cannot be selected.
+        QVERIFY(!model.isSelectable(5));
+        QVERIFY(!model.data(model.index(5), SourceModel::SelectableRole).toBool());
+        QVERIFY(model.data(model.index(5), SourceModel::UnknownSourceRole).toBool());
+        QVERIFY(!model.data(model.index(4), SourceModel::UnknownSourceRole).toBool());
+        QCOMPARE(model.step(2, 1), 4);
+        QCOMPARE(model.step(4, -1), 2);
+        QCOMPARE(model.step(4, 1), 7);
+        QCOMPARE(model.step(7, -1), 4);
+        QCOMPARE(model.rowOfView("b"), 5);
+        QCOMPARE(model.rowOfView("c"), -1);
+        QCOMPARE(model.rowOf(model.row(4)), 4);
+        QCOMPARE(model.rowOf(model.row(5)), -1);
+        QCOMPARE(model.rowOf(model.row(7)), 7);
+        QCOMPARE(model.data(model.index(4), SourceModel::TitleRole).toString(), QString("Morning"));
+        QCOMPARE(model.data(model.index(4), SourceModel::IconRole).toString(), QString("☀"));
+        QCOMPARE(model.data(model.index(4), SourceModel::ViewIdRole).toString(), QString("a"));
+        QCOMPARE(model.data(model.index(4), SourceModel::CountRole).toInt(), 0);
+        QVERIFY(model.data(model.index(4), SourceModel::UnsupportedRole).toStringList().isEmpty());
+        QCOMPARE(model.data(model.index(5), SourceModel::UnsupportedRole).toStringList(), QStringList{"source.feedId"});
+
+        // A view renamed, or its rules changed, updates in place.
+        QSignalSpy reset(&model, &QAbstractItemModel::modelReset);
+        QSignalSpy changed(&model, &QAbstractItemModel::dataChanged);
+        views[0].view.insert("name", "Evening");
+        views[1].view.insert("source", QJsonObject{{"kind", "all"}});
+        model.setLibrary({loose}, LibraryCounts{3, 2, 0, 3}, views);
+        QCOMPARE(reset.count(), 0);
+        QCOMPARE(changed.count(), 2);
+        QCOMPARE(model.data(model.index(4), SourceModel::TitleRole).toString(), QString("Evening"));
+        QVERIFY(model.data(model.index(5), SourceModel::UnsupportedRole).toStringList().isEmpty());
+        QVERIFY(model.isSelectable(5));
+        QCOMPARE(model.rowOf(model.row(5)), 5);
+        // One gone, or another order, resets; with none, no heading either.
+        model.setLibrary({loose}, LibraryCounts{3, 2, 0, 3}, {views.at(1), views.at(0)});
+        QCOMPARE(reset.count(), 1);
+        QCOMPARE(model.rowOfView("b"), 4);
+        model.setLibrary({loose}, LibraryCounts{3, 2, 0, 3}, {});
+        QCOMPARE(reset.count(), 2);
+        QCOMPARE(model.rowCount(), 5);
+        QCOMPARE(model.rowOf(SourceModel::Kind::ViewHeading), -1);
+    }
+
+    // A saved view lists its articles in its order, the keys step through
+    // the views, and marking one read marks what it lists, which an undo
+    // puts back.
+    void backendShowsAndMarksSavedViews()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        seedViews({savedView("firsts", {{"name", "Firsts"},
+                                        {"readState", "unread"},
+                                        {"keywords", QJsonObject{{"include", QJsonArray{"newest", "oldest"}}}}}),
+                   savedView("old", {{"name", "Old first"}, {"sort", "oldest"}}),
+                   savedView("cat", {{"name", "Category"},
+                                     {"source", QJsonObject{{"kind", "category"}, {"categoryId", "clx"}}}})});
+        Store store;
+        QVERIFY(store.open());
+        QCOMPARE(rawExec(Paths::databaseFile(), "UPDATE items SET read_at = 77 WHERE guid = 'oldest'"), QString());
+        const auto before = readStates(store);
+
+        Backend backend;
+        SourceModel &sources = *backend.sources();
+        QCOMPARE(backend.savedViews().size(), 3);
+        const int firsts = sources.rowOfView("firsts");
+        QCOMPARE(firsts, sources.rowOf(SourceModel::Kind::Starred) + 2);
+        backend.selectSource(firsts);
+        QCOMPARE(backend.sourceKind(), QString("view"));
+        QCOMPARE(backend.selectedViewId(), QString("firsts"));
+        QCOMPARE(backend.sourceTitle(), QString("Firsts"));
+        QCOMPARE(backend.selectedFeedId(), 0);
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Newest", "Oldest"}));
+        backend.moveSource(1);
+        QCOMPARE(backend.selectedViewId(), QString("old"));
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Oldest", "Second B", "Older", "Second A", "Newest"}));
+        // A view of a category cannot list here: stepped past, and a click
+        // on it does nothing.
+        backend.moveSource(1);
+        QCOMPARE(backend.sourceKind(), QString("feed"));
+        backend.selectSource(sources.rowOfView("cat"));
+        QCOMPARE(backend.sourceKind(), QString("feed"));
+        backend.moveSource(-1);
+        QCOMPARE(backend.selectedViewId(), QString("old"));
+        backend.moveSource(-1);
+        backend.moveSource(-1);
+        QCOMPARE(backend.sourceKind(), QString("starred"));
+        QVERIFY(backend.selectedViewId().isEmpty());
+        QVERIFY(!backend.viewScanCapped());
+
+        backend.selectSource(firsts);
+        backend.markViewRead();
+        QTRY_COMPARE(backend.status(), QString("Marked 2 articles read"));
+        auto marked = readStates(store);
+        QVERIFY(marked.value("newest").first && marked.value("oldest").first);
+        QVERIFY(!marked.value("older").first && !marked.value("second-a").first);
+        QVERIFY(backend.articles()->count() == 0);
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: marked 2 articles read"));
+        QVERIFY(readStates(store) == before);
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Newest", "Oldest"}));
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: marked 2 articles read"));
+        QVERIFY(readStates(store) == marked);
+        QCOMPARE(backend.selectedViewId(), QString("firsts"));
+    }
+
+    // The views follow each sync pull with no restart: a view whose rules
+    // change lists what they pick now, and the selected one going leaves
+    // All articles selected.
+    void backendFollowsSavedViewsThatChange()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        const QJsonObject seconds{{"id", "seconds"}, {"name", "Seconds"}, {"order", 1},
+                                  {"keywords", QJsonObject{{"include", QJsonArray{"second"}}}}};
+        relay.events = {viewsEvent({QJsonObject{{"id", "firsts"}, {"name", "Firsts"}, {"order", 0},
+                                                {"keywords", QJsonObject{{"include", QJsonArray{"newest", "oldest"}}}}},
+                                    seconds},
+                                   now)};
+
+        Backend backend;
+        backend.setRelays({relay.url()});
+        QSignalSpy synced(&backend, &Backend::syncFinished);
+        SourceModel &sources = *backend.sources();
+        QCOMPARE(sources.rowOf(SourceModel::Kind::ViewHeading), -1);
+        QVERIFY(backend.setSyncNpub(syncNpub()));
+        QVERIFY(synced.wait(10000));
+        QVERIFY2(!backend.statusError(), qPrintable(backend.status()));
+        QCOMPARE(sources.rowOf(SourceModel::Kind::ViewHeading), 3);
+        QCOMPARE(sources.rowOfView("firsts"), 4);
+        QCOMPARE(sources.rowOfView("seconds"), 5);
+        backend.selectSource(sources.rowOfView("firsts"));
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Newest", "Oldest"}));
+
+        relay.events = {viewsEvent({QJsonObject{{"id", "firsts"}, {"name", "Firsts again"}, {"order", 0},
+                                                {"keywords", QJsonObject{{"include", QJsonArray{"older"}}}}},
+                                    seconds},
+                                   now + 1)};
+        QVERIFY(backend.setSyncNpub(syncNpub()));
+        QVERIFY(synced.wait(10000));
+        QCOMPARE(backend.selectedViewId(), QString("firsts"));
+        QCOMPARE(backend.sourceTitle(), QString("Firsts again"));
+        QCOMPARE(titlesOf(backend.articles()), QStringList{"Older"});
+
+        // Renamed elsewhere, its rules the same: the row and the title
+        // follow once the window reads the counts again, and the list is
+        // not read again for its words.
+        Store renamer;
+        QVERIFY(renamer.open());
+        QList<SavedView> renamed = renamer.savedViews();
+        QCOMPARE(renamed.value(0).id, QString("firsts"));
+        renamed[0].view.insert("name", "Firsts renamed");
+        renamed[0].view.insert("icon", "★");
+        QVERIFY(renamer.transaction([&] { return renamer.replaceSavedViews(renamed); }));
+        int read = 0;
+        Store::wordsReadHook = [&read] { ++read; };
+        const auto unhook = qScopeGuard([] { Store::wordsReadHook = {}; });
+        backend.selectArticle(0);
+        QTRY_COMPARE(backend.sourceTitle(), QString("Firsts renamed"));
+        QCOMPARE(sources.row(sources.rowOfView("firsts")).icon, QString("★"));
+        QCOMPARE(read, 0);
+        Store::wordsReadHook = {};
+        QCOMPARE(titlesOf(backend.articles()), QStringList{"Older"});
+
+        // Deleted elsewhere: the next pull, which changes nothing itself,
+        // shows the views as they are.
+        Store other;
+        QVERIFY(other.open());
+        QVERIFY(other.transaction([&] { return other.replaceSavedViews({other.savedViews().value(1)}); }));
+        QVERIFY(backend.setSyncNpub(syncNpub()));
+        QVERIFY(synced.wait(10000));
+        QCOMPARE(sources.rowOfView("firsts"), -1);
+        QCOMPARE(backend.sourceKind(), QString("all"));
+        QCOMPARE(backend.articles()->count(), 5);
+
+        // And between pulls, once the window reads the library again.
+        backend.selectSource(sources.rowOfView("seconds"));
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Second A", "Second B"}));
+        QVERIFY(other.transaction([&] { return other.replaceSavedViews({}); }));
+        backend.markViewRead();
+        QTRY_COMPARE(backend.sourceKind(), QString("all"));
+        QCOMPARE(sources.rowOf(SourceModel::Kind::ViewHeading), -1);
+        QCOMPARE(backend.articles()->count(), 5);
+        QVERIFY(backend.savedViews().isEmpty());
+    }
+
+    // The sources pane shows the Views section only with views, a mark on
+    // one with rules left out, and a click or the arrow keys select one,
+    // whose articles Ctrl+Shift+A marks read and Ctrl+Z puts back.
+    void windowListsAndSelectsSavedViews()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        write(dir.path() + "/language", "en");
+        QTest::failOnWarning(QRegularExpression("Binding loop|qrc:/"));
+        LoadedWindow loaded(dir.path() + "/language");
+        QVERIFY(loaded.window);
+        QVERIFY(QTest::qWaitForWindowExposed(loaded.window));
+        Backend &backend = *loaded.backend;
+        QTRY_VERIFY(sourceRow(loaded.window, "feed"));
+        QVERIFY(!sourceRow(loaded.window, "views"));
+        QVERIFY(!sourceRow(loaded.window, "view"));
+
+        relay.events = {viewsEvent(
+            {QJsonObject{{"id", "firsts"}, {"name", "Firsts"}, {"icon", "☀"}, {"readState", "unread"},
+                         {"keywords", QJsonObject{{"include", QJsonArray{"newest", "oldest"}}}}},
+             QJsonObject{{"id", "tech"},
+                         {"name", "Tech"},
+                         {"source", QJsonObject{{"kind", "feed"}, {"feedId", "clx"}}}}},
+            now)};
+        backend.setRelays({relay.url()});
+        QSignalSpy synced(&backend, &Backend::syncFinished);
+        QVERIFY(backend.setSyncNpub(syncNpub()));
+        QVERIFY(synced.wait(10000));
+        QTRY_VERIFY(sourceRow(loaded.window, "views") && sourceRow(loaded.window, "view", "tech"));
+        QQuickItem *heading = sourceRow(loaded.window, "views");
+        QQuickItem *firsts = sourceRow(loaded.window, "view", "firsts");
+        QQuickItem *tech = sourceRow(loaded.window, "view", "tech");
+        QVERIFY(heading->isVisible() && firsts->isVisible() && tech->isVisible());
+        QVERIFY(heading->property("header").toBool());
+        QCOMPARE(firsts->property("icon").toString(), QString("☀"));
+        const auto mark = [](QQuickItem *row) {
+            QQuickItem *found = nullptr;
+            const std::function<void(QQuickItem *)> walk = [&](QQuickItem *item) {
+                if (item->objectName() == "viewUnsupported")
+                    found = item;
+                for (QQuickItem *child : item->childItems())
+                    walk(child);
+            };
+            walk(row);
+            return found;
+        };
+        QVERIFY(mark(firsts) && mark(tech));
+        QVERIFY(!mark(firsts)->isVisible());
+        // A view of a feed is not Partial but disabled, and a click on it
+        // does nothing.
+        QVERIFY(!mark(tech)->isVisible());
+        QVERIFY(!tech->property("selectable").toBool());
+        QVERIFY(tech->property("unknownSource").toBool());
+        QTest::mouseClick(loaded.window, Qt::LeftButton, {},
+                          tech->mapToScene(QPointF(tech->width() / 2, tech->height() / 2)).toPoint());
+        QCOMPARE(backend.sourceKind(), QString("all"));
+        // Its tip is plain text, as what a view holds comes from a relay.
+        QObject *tip = tech->findChild<QObject *>("viewUnknownSource");
+        QVERIFY(tip);
+        QObject *tipText = tip->property("contentItem").value<QObject *>();
+        QVERIFY(tipText);
+        QCOMPARE(tipText->property("textFormat").toInt(), int(Qt::PlainText));
+        QVERIFY(tipText->property("text").toString().contains("can't identify yet"));
+
+        QTest::mouseClick(loaded.window, Qt::LeftButton, {},
+                          firsts->mapToScene(QPointF(firsts->width() / 2, firsts->height() / 2)).toPoint());
+        QCOMPARE(backend.selectedViewId(), QString("firsts"));
+        QCOMPARE(loaded.window->property("activePane").toString(), QString("sources"));
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Newest", "Oldest"}));
+        // Under the list, a note when the keywords were looked for in only
+        // so many of its articles.
+        QQuickItem *capped = loaded.window->findChild<QQuickItem *>("viewScanCapped");
+        QVERIFY(capped);
+        QVERIFY(!capped->isVisible());
+        backend.setViewScanLimitForTests(2);
+        backend.selectSource(backend.sourceIndex());
+        QVERIFY(backend.viewScanCapped());
+        QCOMPARE(titlesOf(backend.articles()), QStringList{"Newest"});
+        QTRY_VERIFY(capped->isVisible());
+        QCOMPARE(capped->property("text").toString(), QString("Showing keyword matches among this view's first 2 articles"));
+        backend.setViewScanLimitForTests(Backend::maxViewScanned);
+        backend.selectSource(backend.sourceIndex());
+        QVERIFY(!backend.viewScanCapped());
+        QTRY_VERIFY(!capped->isVisible());
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Newest", "Oldest"}));
+        QTest::keyClick(loaded.window, Qt::Key_Down);
+        QCOMPARE(backend.sourceKind(), QString("feed"));
+        QTest::keyClick(loaded.window, Qt::Key_Up);
+        QCOMPARE(backend.selectedViewId(), QString("firsts"));
+        QTest::keyClick(loaded.window, Qt::Key_Up);
+        QCOMPARE(backend.sourceKind(), QString("starred"));
+        QTest::keyClick(loaded.window, Qt::Key_Down);
+        QCOMPARE(backend.selectedViewId(), QString("firsts"));
+
+        QTest::keyClick(loaded.window, Qt::Key_A, Qt::ControlModifier | Qt::ShiftModifier);
+        QTRY_COMPARE(backend.status(), QString("Marked 2 articles read"));
+        QCOMPARE(backend.articles()->count(), 0);
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier);
+        QTRY_COMPARE(backend.status(), QString("Undid: marked 2 articles read"));
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Newest", "Oldest"}));
+
+        // Gone again: the section goes, and All articles is selected.
+        Store other;
+        QVERIFY(other.open());
+        QVERIFY(other.transaction([&] { return other.replaceSavedViews({}); }));
+        QVERIFY(backend.setSyncNpub(syncNpub()));
+        QVERIFY(synced.wait(10000));
+        QTRY_VERIFY(!sourceRow(loaded.window, "views"));
+        QVERIFY(!sourceRow(loaded.window, "view"));
+        QCOMPARE(backend.sourceKind(), QString("all"));
+    }
+
+    // `readstr views` lists the saved views and `--view` a view's articles,
+    // saying on stderr which of its rules are left out.
+    void cliListsSavedViewsAndTheirArticles()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        seedViews({savedView("firsts",
+                             {{"name", "Firsts"},
+                              {"keywords", QJsonObject{{"include", QJsonArray{"newest", "oldest"}}}}},
+                             {"older"}),
+                   savedView("tech", {{"name", "Tech"},
+                                      {"sort", "oldest"},
+                                      {"source", QJsonObject{{"kind", "feed"}, {"feedId", "clx"}}}}),
+                   savedView("old", {{"name", "Read"}, {"readState", "read"}}),
+                   savedView("odd", {{"name", "Odd"}, {"sort", "oldest"}, {"pinned", true}})});
+        QString out, err;
+        QCOMPARE(run({"views", "--json"}, out, err), 0);
+        const QJsonArray views = QJsonDocument::fromJson(out.toUtf8()).array();
+        QCOMPARE(views.size(), 4);
+        QCOMPARE(views.at(0)["id"].toString(), QString("firsts"));
+        QCOMPARE(views.at(0)["name"].toString(), QString("Firsts"));
+        QCOMPARE(views.at(0)["exclude"].toArray(), QJsonArray{"older"});
+        QCOMPARE(views.at(0)["unsupported"].toArray(), QJsonArray());
+        QCOMPARE(views.at(1)["source"]["kind"].toString(), QString("feed"));
+        QCOMPARE(views.at(1)["unsupported"].toArray(), QJsonArray{"source.feedId"});
+        QVERIFY(views.at(0)["listable"].toBool());
+        QVERIFY(!views.at(1)["listable"].toBool());
+        out.clear();
+        QCOMPARE(run({"views"}, out, err), 0);
+        QVERIFY2(out.startsWith("firsts  Firsts  all, all, newest\n"), qPrintable(out));
+        QVERIFY2(out.contains("tech  Tech  feed, all, oldest  (lists nothing here: its feed, category, or tags cannot "
+                              "be identified yet)\n"),
+                 qPrintable(out));
+        QCOMPARE(run({"views", "extra"}, out, err), 1);
+
+        out.clear();
+        err.clear();
+        QCOMPARE(run({"articles", "--view", "firsts", "--json"}, out, err), 0);
+        QStringList titles;
+        for (const QJsonValue &article : QJsonDocument::fromJson(out.toUtf8()).array())
+            titles << article["title"].toString();
+        QCOMPARE(titles, (QStringList{"Newest", "Oldest"}));
+        QVERIFY(err.isEmpty());
+        out.clear();
+        QCOMPARE(run({"articles", "--view", "tech"}, out, err), 1);
+        QCOMPARE(err, QString("readstr articles: the saved view 'tech' targets a feed, category, or tags that cannot "
+                              "be identified here yet\n"));
+        QVERIFY(out.isEmpty());
+        err.clear();
+        QCOMPARE(run({"articles", "--view", "old", "--unread"}, out, err), 1);
+        QCOMPARE(err, QString("readstr articles: --unread contradicts the saved view, which lists read articles\n"));
+        err.clear();
+        QCOMPARE(run({"articles", "--view", "old", "--starred"}, out, err), 0);
+        QVERIFY(err.isEmpty());
+        QVERIFY(out.isEmpty());
+        QCOMPARE(run({"articles", "--view", "old"}, out, err), 0);
+        QVERIFY2(out.contains("Second B") && !out.contains("Oldest"), qPrintable(out));
+        out.clear();
+        QCOMPARE(run({"articles", "--view", "odd", "--unread"}, out, err), 0);
+        QCOMPARE(err, QString("readstr articles: not supported here, so left out: pinned\n"));
+        QVERIFY2(out.indexOf("Oldest") < out.indexOf("Newest") && out.indexOf("Oldest") >= 0, qPrintable(out));
+        QVERIFY(!out.contains("Second B"));
+        out.clear();
+        QCOMPARE(run({"search", "oldest", "--view", "firsts", "--json"}, out, err), 0);
+        QCOMPARE(QJsonDocument::fromJson(out.toUtf8()).array().size(), 1);
+        err.clear();
+        QCOMPARE(run({"articles", "--view", "nope"}, out, err), 1);
+        QCOMPARE(err, QString("readstr articles: no saved view has the id 'nope'\n"));
     }
 
     void articleModelTracksFlags()
@@ -16879,6 +17616,71 @@ private:
             if (article.guid == "second-b")
                 store.setRead(article.id, true);
         return {first, second};
+    }
+
+    // A saved view as the store keeps it: `rules` with the id, and the id
+    // as its name unless the rules name it.
+    static SavedView savedView(const QString &id, QJsonObject rules, const QStringList &exclude = {})
+    {
+        rules.insert("id", id);
+        if (!rules.contains("name"))
+            rules.insert("name", id);
+        return SavedView{id, rules, exclude};
+    }
+
+    static void seedViews(const QList<SavedView> &views)
+    {
+        Store store;
+        if (!store.open() || !store.transaction([&] { return store.replaceSavedViews(views); }))
+            qFatal("cannot seed the saved views: %s", qPrintable(store.lastError()));
+    }
+
+    // The views as kind 30406 carries them, at `createdAt`.
+    static QJsonObject viewsEvent(const QJsonArray &views, qint64 createdAt)
+    {
+        return syncEvent(Sync::viewsKind, Sync::viewsTag, {{"views", views}}, createdAt);
+    }
+
+    static QStringList titlesOf(const QList<Article> &articles)
+    {
+        QStringList titles;
+        for (const Article &article : articles)
+            titles << article.title;
+        return titles;
+    }
+
+    static QStringList titlesOf(ArticleModel *model)
+    {
+        QStringList titles;
+        for (int i = 0; i < model->count(); ++i)
+            titles << model->at(i).title;
+        return titles;
+    }
+
+    // The rows of the window's sources pane that are laid out, in order.
+    static QList<QQuickItem *> sourceRows(QQuickWindow *window)
+    {
+        QList<QQuickItem *> rows;
+        const std::function<void(QQuickItem *)> walk = [&](QQuickItem *item) {
+            if (item->property("selectable").isValid() && item->property("viewId").isValid())
+                rows << item;
+            for (QQuickItem *child : item->childItems())
+                walk(child);
+        };
+        walk(window->contentItem());
+        std::sort(rows.begin(), rows.end(), [](QQuickItem *a, QQuickItem *b) {
+            return a->property("index").toInt() < b->property("index").toInt();
+        });
+        return rows;
+    }
+
+    static QQuickItem *sourceRow(QQuickWindow *window, const QString &kind, const QString &viewId = {})
+    {
+        for (QQuickItem *row : sourceRows(window))
+            if (row->property("kind").toString() == kind
+                && (viewId.isEmpty() || row->property("viewId").toString() == viewId))
+                return row;
+        return nullptr;
     }
 
     // For polling: each looks the library up once per try, and a missing

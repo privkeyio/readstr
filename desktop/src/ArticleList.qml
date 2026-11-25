@@ -39,7 +39,8 @@ Rectangle {
         switch (backend.sourceKind) {
         case "unread": return qsTr("Unread")
         case "starred": return qsTr("Starred")
-        case "feed": return backend.sourceTitle
+        case "feed":
+        case "view": return backend.sourceTitle
         default: return qsTr("All articles")
         }
     }
@@ -243,6 +244,27 @@ Rectangle {
                 }
             }
         }
+
+        // A view's keywords are looked for in only so many of its articles,
+        // so a view of rare ones over a large library says it may hold more.
+        Label {
+            objectName: "viewScanCapped"
+            visible: backend.viewScanCapped
+            Layout.fillWidth: true
+            Layout.leftMargin: 16
+            Layout.rightMargin: 16
+            Layout.topMargin: 6
+            Layout.bottomMargin: 6
+            text: {
+                translator.language
+                return qsTr("Showing keyword matches among this view's first %1 articles")
+                    .arg(backend.viewScanLimit.toLocaleString(Qt.locale(), 'f', 0))
+            }
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            font.pixelSize: 11
+            opacity: 0.6
+        }
     }
 
     Label {
@@ -254,6 +276,7 @@ Rectangle {
         text: backend.searching ? qsTr("No articles match the search")
             : backend.sourceKind === "unread" ? qsTr("All caught up")
             : backend.sourceKind === "starred" ? qsTr("Press S to star an article")
+            : backend.sourceKind === "view" ? qsTr("No articles in this view")
             : qsTr("No articles yet")
         textFormat: Text.PlainText
         opacity: 0.55

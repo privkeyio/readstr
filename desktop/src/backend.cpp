@@ -16,6 +16,7 @@
 #include "markdown.h"
 #include "qrcode.h"
 #include "sanitizer.h"
+#include "savedviews.h"
 #include "wipe.h"
 
 // Lives on the worker thread and owns that thread's connection to the
@@ -274,6 +275,36 @@ qint64 Backend::selectedFeedId() const {
     return row.kind == SourceModel::Kind::Feed ? row.feedId : 0;
 }
 
+QString Backend::selectedViewId() const {
+    const SourceModel::Row row = m_sources.row(m_sourceIndex);
+    return row.kind == SourceModel::Kind::View ? row.viewId : QString();
+}
+
+const SavedView *Backend::savedView(const QString &id) const {
+    for (const SavedView &view : m_views)
+        if (view.id == id)
+            return &view;
+    return nullptr;
+}
+
+bool Backend::loadViews() {
+    if (!m_storeOpen)
+        return false;
+    const QList<SavedView> views = m_store.savedViews();
+    if (!m_store.lastError().isEmpty()) {
+        setStatus(tr("Cannot read the saved views: %1").arg(m_store.lastError()), true);
+        return false;
+    }
+    const bool same = std::equal(views.begin(), views.end(), m_views.begin(), m_views.end(),
+                                 [](const SavedView &a, const SavedView &b) {
+                                     return a.id == b.id && a.view == b.view && a.exclude == b.exclude;
+                                 });
+    if (same)
+        return false;
+    m_views = views;
+    return true;
+}
+
 QVariant Backend::articlePublished() const {
     return m_article.published.isValid() ? QVariant(m_article.published) : QVariant();
 }
@@ -298,6 +329,17 @@ ArticleFilter Backend::currentFilter() const {
         filter.starredOnly = true;
     else if (row.kind == SourceModel::Kind::Feed)
         filter.feedId = row.feedId;
+    else if (row.kind == SourceModel::Kind::View)
+        if (const SavedView *view = savedView(row.viewId)) {
+            const ArticleFilter rules = SavedViews::evaluate(*view).filter;
+            filter.unreadOnly = rules.unreadOnly;
+            filter.starredOnly = rules.starredOnly;
+            filter.readOnly = rules.readOnly;
+            filter.oldestFirst = rules.oldestFirst;
+            filter.includeWords = rules.includeWords;
+            filter.excludeWords = rules.excludeWords;
+            filter.maxScanned = m_maxViewScanned;
+        }
     filter.query = m_searchQuery;
     return filter;
 }
@@ -323,13 +365,16 @@ void Backend::reloadLibrary() {
             setStatus(tr("Cannot read the library: %1").arg(m_store.lastError()), true);
         counts = m_store.counts().value_or(LibraryCounts{});
         hideRemoving(feeds);
+        loadViews();
     }
-    m_sources.setLibrary(feeds, counts);
+    m_sources.setLibrary(feeds, counts, m_views);
     if (m_feedCount != feeds.size()) {
         m_feedCount = int(feeds.size());
         emit libraryChanged();
     }
-    const int row = m_sources.rowOf(selected.kind, selected.feedId);
+    // A view or feed that is gone leaves All articles selected; one that
+    // changed lists what it holds now, as the articles are read again.
+    const int row = m_sources.rowOf(selected);
     m_sourceIndex = row < 0 ? 0 : row;
     emit sourceChanged();
     loadArticles();
@@ -348,11 +393,22 @@ void Backend::reloadCounts() {
     if (!counts || !m_store.lastError().isEmpty())
         return;
     hideRemoving(feeds);
-    // Another process can add, rename, or remove feeds, which moves rows;
-    // the selection follows its source rather than its row.
+    // Another process can add, rename, or remove feeds, or pull saved
+    // views, which moves rows; the selection follows its source rather
+    // than its row.
     const SourceModel::Row selected = m_sources.row(m_sourceIndex);
-    m_sources.setLibrary(feeds, *counts);
-    const int row = m_sources.rowOf(selected.kind, selected.feedId);
+    std::optional<SavedView> viewBefore;
+    if (const SavedView *view = savedView(selected.viewId); view && selected.kind == SourceModel::Kind::View)
+        viewBefore = *view;
+    bool rulesChanged = false;
+    if (loadViews() && viewBefore) {
+        const SavedView *view = savedView(selected.viewId);
+        // A view renamed, given another icon, or moved lists the same, and
+        // reading it again would scan for its words for nothing.
+        rulesChanged = view && !SavedViews::listsSame(*view, *viewBefore);
+    }
+    m_sources.setLibrary(feeds, *counts, m_views);
+    const int row = m_sources.rowOf(selected);
     if (m_feedCount != feeds.size()) {
         m_feedCount = int(feeds.size());
         emit libraryChanged();
@@ -362,25 +418,33 @@ void Backend::reloadCounts() {
         // shown for it follows.
         if (m_sources.row(row).title != selected.title)
             emit sourceChanged();
+        // A view whose rules changed lists what they hold now.
+        if (rulesChanged)
+            loadArticles();
         return;
     }
-    // A feed that is gone leaves All articles selected, as after a reload,
-    // and the list it showed goes with it.
+    // A feed or view that is gone leaves All articles selected, as after a
+    // reload, and the list it showed goes with it.
     m_sourceIndex = row < 0 ? 0 : row;
     emit sourceChanged();
-    if (row < 0)
+    if (row < 0 || rulesChanged)
         loadArticles();
 }
 
 void Backend::loadArticles() {
     QList<Article> list;
+    bool capped = false;
     if (m_storeOpen) {
         // Taken before the list, so marking the view read never reaches an
         // article that arrived after it was shown.
         m_viewLastId = m_store.counts().value_or(LibraryCounts{}).lastId;
-        list = m_store.articles(currentFilter());
+        list = m_store.articles(currentFilter(), &capped, &m_viewScanned);
         if (!m_store.lastError().isEmpty())
             setStatus(tr("Cannot read the library: %1").arg(m_store.lastError()), true);
+    }
+    if (capped != m_viewScanCapped) {
+        m_viewScanCapped = capped;
+        emit viewScanCappedChanged();
     }
     if (!m_pendingFlags.isEmpty())
         for (Article &article : list)
@@ -1044,7 +1108,8 @@ bool Backend::openLink(const QString &link) {
 void Backend::markViewRead() {
     if (!m_storeOpen)
         return;
-    const ArticleFilter filter = currentFilter();
+    ArticleFilter filter = currentFilter();
+    filter.scannedIds = m_viewScanned;
     const qint64 upToId = m_viewLastId;
     const QString failure = tr("Cannot mark the view read: %1");
     // The articles marked, which an undo reverses whatever came since.

@@ -347,5 +347,12 @@
     "many": "%n статей отмечено как прочитанные (слишком много, чтобы отменить)",
     "other": "%n статьи отмечены как прочитанные (слишком много, чтобы отменить)"
   },
-  "Still undoing: %1": "Ещё отменяется: %1"
+  "Still undoing: %1": "Ещё отменяется: %1",
+  "Views": "Подборки",
+  "Partial": "Частично",
+  "Some rules of this view are not supported here, so they are left out: %1": "Некоторые правила этой подборки здесь не поддерживаются и не применяются: %1",
+  "No articles in this view": "В этой подборке нет статей",
+  "Cannot read the saved views: %1": "Не удаётся прочитать сохранённые подборки: %1",
+  "Showing keyword matches among this view's first %1 articles": "Совпадения с ключевыми словами среди первых %1 статей этой подборки",
+  "This view targets a feed, category, or tags that this app can't identify yet": "Эта подборка относится к ленте, категории или тегам, которые это приложение пока не может определить"
 }
