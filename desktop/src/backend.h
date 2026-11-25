@@ -57,6 +57,14 @@ class Backend : public QObject {
     Q_PROPERTY(QString sourceKind READ sourceKind NOTIFY sourceChanged)
     Q_PROPERTY(QString sourceTitle READ sourceTitle NOTIFY sourceChanged)
     Q_PROPERTY(qint64 selectedFeedId READ selectedFeedId NOTIFY sourceChanged)
+    // The selected saved view's id, empty when the source is not one.
+    Q_PROPERTY(QString selectedViewId READ selectedViewId NOTIFY sourceChanged)
+    // Whether the selected view's keywords were looked for in no more than
+    // its first maxViewScanned articles, which left some unread for them.
+    Q_PROPERTY(bool viewScanCapped READ viewScanCapped NOTIFY viewScanCappedChanged)
+    // Not CONSTANT: tests lower the limit, and the note re-reads it whenever
+    // the list is capped again.
+    Q_PROPERTY(int viewScanLimit READ viewScanLimit NOTIFY viewScanCappedChanged)
 
     // The words the article list is searched for, as typed; empty for none.
     // `searching` is whether they hold a word to search for, so the list
@@ -159,6 +167,15 @@ class Backend : public QObject {
 public:
     // The window shows at most this many articles per view, newest first.
     static constexpr int viewLimit = 2000;
+    // A saved view with keywords reads at most this many articles for them
+    // each time it lists (ArticleFilter::maxScanned), on this thread, so a
+    // view of rare words over a large library never holds the window up
+    // for long. Not on the worker, which runs the refreshes and the user's
+    // writes one at a time: the scan would hold those up instead. Marking
+    // the view read reads those articles again, no more, on the worker,
+    // which holds up the writes queued behind it that once; accepted for
+    // an action the user takes now and then.
+    static constexpr int maxViewScanned = 20000;
     static constexpr int autoRefreshMinutes = 30;
     // The most actions undo() keeps, the oldest going first.
     static constexpr int maxUndo = 100;
@@ -186,6 +203,13 @@ public:
     QString sourceKind() const;
     QString sourceTitle() const;
     qint64 selectedFeedId() const;
+    QString selectedViewId() const;
+    bool viewScanCapped() const { return m_viewScanCapped; }
+    int viewScanLimit() const { return m_maxViewScanned; }
+    // For the tests, which cannot list maxViewScanned articles quickly.
+    void setViewScanLimitForTests(int limit) { m_maxViewScanned = limit; }
+    // The saved views as the sources show them, in order.
+    const QList<SavedView> &savedViews() const { return m_views; }
 
     QString searchQuery() const { return m_searchQuery; }
     void setSearchQuery(const QString &query);
@@ -401,6 +425,7 @@ public:
 signals:
     void libraryChanged();
     void sourceChanged();
+    void viewScanCappedChanged();
     void articleChanged();
     void articleHtmlChanged();
     void searchChanged();
@@ -558,6 +583,13 @@ private:
     void changeFilterRules(const QList<KeywordFilter::Rule> &before, std::function<QString()> label);
     void reloadLibrary();
     void reloadCounts();
+    // Reads the saved views again; true when they changed. Editing views
+    // (readstr-gp3.6.2) writes them through the worker and then reloads
+    // the library, which shows them and moves the selection off a view
+    // that is gone, as a sync pull does.
+    bool loadViews();
+    // The saved view `id`, or null when there is none.
+    const SavedView *savedView(const QString &id) const;
     void loadArticles();
     ArticleFilter currentFilter() const;
     void showArticle(const Article &article);
@@ -697,6 +729,7 @@ private:
 
     SourceModel m_sources;
     ArticleModel m_articles;
+    QList<SavedView> m_views;
     int m_feedCount = 0;
     int m_sourceIndex = 0;
     QString m_searchQuery;
@@ -722,6 +755,11 @@ private:
     quint64 m_imagesRequest = 0;
     QTimer m_imagesArrived;
     qint64 m_viewLastId = 0;
+    bool m_viewScanCapped = false;
+    int m_maxViewScanned = maxViewScanned;
+    // The articles the list read for its view's words when maxViewScanned
+    // stopped it, which marking the view read stays within.
+    QList<qint64> m_viewScanned;
 
     bool m_refreshing = false;
     int m_refreshDone = 0;

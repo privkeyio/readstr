@@ -1323,6 +1323,8 @@ QString filterSql(const ArticleFilter &filter, QVariantList &values) {
         only << QStringLiteral("i.is_read = 0");
     if (filter.starredOnly)
         only << QStringLiteral("i.is_starred = 1");
+    if (filter.readOnly)
+        only << QStringLiteral("i.is_read = 1");
     if (only.isEmpty())
         return sql;
     if (!filter.alsoId)
@@ -1330,20 +1332,213 @@ QString filterSql(const ArticleFilter &filter, QVariantList &values) {
     values << filter.alsoId;
     return sql + " AND ((" + only.join(" AND ") + ") OR i.id = ?)";
 }
+
+// The join a search adds, which gives each match its score, s.score.
+QString searchJoinSql(const QString &match) {
+    return match.isEmpty() ? QString()
+                           : QStringLiteral(" JOIN (SELECT rowid AS id, %1 AS score FROM items_fts"
+                                            " WHERE items_fts MATCH ?) s ON s.id = i.id")
+                                 .arg(QLatin1String(searchScore));
 }
 
-QList<Article> Store::articles(const ArticleFilter &filter) {
-    m_error.clear();
+// A search lists the best matches first, and newest (or oldest) first among
+// equally good ones.
+QString orderSql(const ArticleFilter &filter, bool searching) {
+    const QLatin1String direction = filter.oldestFirst ? QLatin1String(" ASC") : QLatin1String(" DESC");
+    return QStringLiteral(" ORDER BY ") + (searching ? QStringLiteral("s.score, ") : QString())
+           + QStringLiteral("COALESCE(i.published_at, i.created_at)") + direction + QStringLiteral(", i.id")
+           + direction;
+}
+
+bool byWords(const ArticleFilter &filter) { return !filter.includeWords.isEmpty() || !filter.excludeWords.isEmpty(); }
+
+// What a saved view's words are looked for in besides the title, summary,
+// and author: the text without its markup, as the web app strips the tags
+// before it looks. Both ways here are linear and read no more than the
+// text, since a view reads it for each article it passes; the sanitizer,
+// which the search index and the filter rules read through, would cost
+// more than the whole list. An inline tag parts no word, as in the reader
+// and searchBody(), so `pro<b>gram</b>ming` holds "programming".
+QString wordsBody(const Article &article) {
+    if (article.content.isEmpty())
+        return {};
+    if (!article.address.isEmpty())
+        return FeedParser::decodeEntities(withoutLinkTargets(article.content));
+    return FeedParser::plainText(article.content, FeedParser::InlineTags::Join);
+}
+}
+
+bool Store::matchesWords(const ArticleFilter &filter, const Article &article) {
+    if (!byWords(filter))
+        return true;
+    std::optional<QString> body;
+    const auto holds = [&](const QString &word, bool inSummary) {
+        for (const QString *field : {&article.title, &article.author})
+            if (field->contains(word, Qt::CaseInsensitive))
+                return true;
+        if (inSummary && article.summary.contains(word, Qt::CaseInsensitive))
+            return true;
+        if (!body)
+            body = wordsBody(article);
+        return body->contains(word, Qt::CaseInsensitive);
+    };
+    // The web app looks in the title, text, and author. Words to include
+    // are looked for in the summary too, where a feed that gives no text
+    // has all of it, which can only list more here; mute words are not, so
+    // nothing the web app lists is hidden here.
+    if (!filter.includeWords.isEmpty()
+        && std::none_of(filter.includeWords.begin(), filter.includeWords.end(),
+                        [&](const QString &word) { return holds(word, true); }))
+        return false;
+    return std::none_of(filter.excludeWords.begin(), filter.excludeWords.end(),
+                        [&](const QString &word) { return holds(word, false); });
+}
+
+QList<Article> Store::articlesByWords(const ArticleFilter &filter, const QString &match, bool *scanCapped,
+                                     QList<qint64> *scannedIds) {
+    // SQL cannot read text past its markup, so the words are looked for
+    // here: the list is read in order until it has `limit` articles that
+    // hold them, or maxScanned are read. Keeping each view's match per
+    // article, as filter_flags keeps the rules', is the way past that bound.
+    const QString searchJoin = searchJoinSql(match);
+    ArticleFilter rest = filter;
+    rest.alsoId = 0;
+    // Each article's place in the order too, to put alsoId in its own.
+    // The ordered list leaves the text out, so a sort reads none of it;
+    // each article's is read on its own, only when it is looked at.
+    const auto withPlace = [&match](const char *content) {
+        QString columns = QString::fromLatin1(articleColumns).arg(QLatin1String(content));
+        columns.insert(columns.indexOf(QLatin1String(" FROM items i")),
+                       QStringLiteral(", COALESCE(i.published_at, i.created_at), %1")
+                           .arg(match.isEmpty() ? QLatin1String("0") : QLatin1String("s.score")));
+        return columns;
+    };
+    const QString columns = withPlace("i.content");
+    struct Place {
+        double score = 0;
+        qint64 date = 0;
+        qint64 id = 0;
+    };
+    const auto placeOf = [](const QSqlQuery &query) {
+        return Place{query.value(19).toDouble(), query.value(18).toLongLong(), query.value(0).toLongLong()};
+    };
+    const auto before = [&filter](const Place &a, const Place &b) {
+        if (a.score != b.score)
+            return a.score < b.score;
+        if (a.date != b.date)
+            return filter.oldestFirst ? a.date < b.date : a.date > b.date;
+        return filter.oldestFirst ? a.id < b.id : a.id > b.id;
+    };
     QVariantList values;
-    // A search lists only the matches, best first, and newest first among
-    // equally good ones.
+    if (!match.isEmpty())
+        values << match;
+    QList<Article> result;
+    QList<Place> places;
+    QString sql = withPlace("NULL") + searchJoin + " WHERE 1" + filterSql(rest, values);
+    // Looked up on its own below, so it never counts against maxScanned.
+    if (filter.alsoId) {
+        sql += " AND i.id <> ?";
+        values << filter.alsoId;
+    }
+    QSqlQuery query(m_db);
+    query.setForwardOnly(true);
+    query.prepare(sql + orderSql(filter, !match.isEmpty()));
+    for (const QVariant &value : std::as_const(values))
+        query.addBindValue(value);
+    if (!query.exec()) {
+        fail(query.lastError().text());
+        return {};
+    }
+    QSqlQuery body(m_db);
+    body.setForwardOnly(true);
+    body.prepare(QStringLiteral("SELECT content FROM items WHERE id = ?"));
+    QList<qint64> scanned;
+    while ((filter.limit <= 0 || result.size() < filter.limit) && query.next()) {
+        if (filter.maxScanned > 0 && scanned.size() >= filter.maxScanned) {
+            if (scanCapped)
+                *scanCapped = true;
+            if (scannedIds)
+                *scannedIds = scanned;
+            break;
+        }
+        scanned << query.value(0).toLongLong();
+#ifdef READSTR_TESTS
+        if (wordsReadHook)
+            wordsReadHook();
+#endif
+        Article article = articleFrom(query);
+        body.addBindValue(article.id);
+        if (!body.exec()) {
+            fail(body.lastError().text());
+            return {};
+        }
+        if (body.next())
+            article.content = body.value(0).toString();
+        body.finish();
+        if (!matchesWords(filter, article))
+            continue;
+        if (!filter.withContent)
+            article.content.clear();
+        result << article;
+        places << placeOf(query);
+    }
+    if (query.lastError().isValid()) {
+        fail(query.lastError().text());
+        return {};
+    }
+    query.finish();
+    if (!filter.alsoId)
+        return result;
+    // As in the other lists: past the limit and the read state, but still
+    // within feedId and a search, unless a rule hides it, and here only
+    // when it holds the words.
+    values.clear();
+    if (!match.isEmpty())
+        values << match;
+    values << filter.alsoId;
+    sql = columns + searchJoin + " WHERE i.id = ? AND " NOT_HIDDEN("i.");
+    if (filter.feedId) {
+        sql += " AND i.feed_id = ?";
+        values << filter.feedId;
+    }
+    query.prepare(sql);
+    for (const QVariant &value : std::as_const(values))
+        query.addBindValue(value);
+    if (!query.exec()) {
+        fail(query.lastError().text());
+        return {};
+    }
+    if (query.next()) {
+        Article article = articleFrom(query);
+        if (matchesWords(filter, article)) {
+            const Place place = placeOf(query);
+            qsizetype at = 0;
+            while (at < places.size() && !before(place, places.at(at)))
+                ++at;
+            if (!filter.withContent)
+                article.content.clear();
+            result.insert(at, article);
+        }
+    }
+    if (query.lastError().isValid()) {
+        fail(query.lastError().text());
+        return {};
+    }
+    return result;
+}
+
+QList<Article> Store::articles(const ArticleFilter &filter, bool *scanCapped, QList<qint64> *scannedIds) {
+    m_error.clear();
+    if (scanCapped)
+        *scanCapped = false;
+    if (scannedIds)
+        scannedIds->clear();
     const QString match = matchExpression(filter.query);
-    const QString searchJoin = match.isEmpty() ? QString()
-                                               : QStringLiteral(" JOIN (SELECT rowid AS id, %1 AS score FROM items_fts"
-                                                                " WHERE items_fts MATCH ?) s ON s.id = i.id")
-                                                     .arg(QLatin1String(searchScore));
-    const QString order = QStringLiteral(" ORDER BY ") + (match.isEmpty() ? QString() : QStringLiteral("s.score, "))
-                          + QStringLiteral("COALESCE(i.published_at, i.created_at) DESC, i.id DESC");
+    if (byWords(filter))
+        return articlesByWords(filter, match, scanCapped, scannedIds);
+    QVariantList values;
+    const QString searchJoin = searchJoinSql(match);
+    const QString order = orderSql(filter, !match.isEmpty());
     QString sql = QString::fromLatin1(articleColumns).arg(filter.withContent ? "i.content" : "NULL") + searchJoin;
     if (!match.isEmpty())
         values << match;
@@ -1431,6 +1626,8 @@ int Store::markRead(const ArticleFilter &filter, qint64 upToId, QList<ReadChange
         values << match;
     }
     const qint64 now = QDateTime::currentSecsSinceEpoch();
+    if (byWords(filter))
+        return markReadByWords(filter, upToId, where, values, now, changes, maxChanges, overflow);
     const auto mark = [&] {
         QSqlQuery query(m_db);
         query.prepare(QStringLiteral("UPDATE items AS i SET is_read = 1, read_at = ?") + where);
@@ -1478,6 +1675,114 @@ int Store::markRead(const ArticleFilter &filter, qint64 upToId, QList<ReadChange
     if (!ok)
         return -1;
     *changes << found;
+    if (overflow)
+        *overflow = tooMany;
+    return marked;
+}
+
+int Store::markReadByWords(const ArticleFilter &filter, qint64 upToId, const QString &where,
+                           const QVariantList &values, qint64 now, QList<ReadChange> *changes, qsizetype maxChanges,
+                           bool *overflow) {
+    // The articles to look at, with no transaction open, as
+    // markReadByFilter() reads, so other connections write meanwhile; only
+    // those a capped list read, when it was capped.
+    QList<qint64> candidates;
+    {
+        const QSet<qint64> scanned(filter.scannedIds.cbegin(), filter.scannedIds.cend());
+        QSqlQuery query(m_db);
+        query.setForwardOnly(true);
+        query.prepare(QStringLiteral("SELECT i.id FROM items AS i") + where);
+        query.addBindValue(upToId);
+        for (const QVariant &value : std::as_const(values))
+            query.addBindValue(value);
+        if (!query.exec())
+            return fail(query.lastError().text()), -1;
+        // The open article is looked up apart from the capped scan, so it is
+        // never in `scanned`, though the list shows it when it holds the words.
+        while (query.next())
+            if (const qint64 id = query.value(0).toLongLong();
+                scanned.isEmpty() || scanned.contains(id) || (filter.alsoId && id == filter.alsoId))
+                candidates << id;
+        if (query.lastError().isValid())
+            return fail(query.lastError().text()), -1;
+    }
+    // Each article as it is now, which the words are looked for in as
+    // articles() looks for them, still held to all the view's other rules.
+    QSqlQuery text(m_db);
+    text.setForwardOnly(true);
+    text.prepare(QStringLiteral("SELECT i.read_at, i.title, i.summary, i.author, i.content, i.address"
+                                " FROM items AS i")
+                 + where + QStringLiteral(" AND i.id = ?"));
+    // Whether the article `id` is still in the view and holds the words.
+    const auto holds = [&](qint64 id, std::optional<qint64> *readAt) {
+        text.addBindValue(upToId);
+        for (const QVariant &value : values)
+            text.addBindValue(value);
+        text.addBindValue(id);
+        if (!text.exec())
+            return std::optional<bool>{};
+        if (!text.next())
+            return std::optional<bool>{false};
+        Article article;
+        article.title = text.value(1).toString();
+        article.summary = text.value(2).toString();
+        article.author = text.value(3).toString();
+        article.content = text.value(4).toString();
+        article.address = text.value(5).toString();
+        if (readAt && !text.value(0).isNull())
+            *readAt = text.value(0).toLongLong();
+        text.finish();
+        return std::optional<bool>{matchesWords(filter, article)};
+    };
+    QList<qint64> ids;
+    for (const qint64 id : std::as_const(candidates)) {
+        const std::optional<bool> match = holds(id, nullptr);
+        if (!match)
+            return fail(text.lastError().text()), -1;
+        if (*match)
+            ids << id;
+    }
+#ifdef READSTR_TESTS
+    if (filterWriteHook)
+        filterWriteHook();
+#endif
+    // Then marked in one short transaction, each only if it is still in
+    // the view and holds the words, as a refresh may have changed its
+    // text since, its read time before read there, so the list is exactly
+    // what was marked.
+    QList<ReadChange> found;
+    bool tooMany = false;
+    int marked = 0;
+    const bool ok = transaction([&] {
+        QSqlQuery write(m_db);
+        write.prepare(QStringLiteral("UPDATE items SET is_read = 1, read_at = ? WHERE id = ?"));
+        for (const qint64 id : std::as_const(ids)) {
+            ReadChange change{id, {false, std::nullopt}, {true, now}};
+            const std::optional<bool> match = holds(id, &change.before.readAt);
+            if (!match)
+                return fail(text.lastError().text());
+            if (!*match)
+                continue;
+            write.addBindValue(now);
+            write.addBindValue(id);
+            if (!write.exec())
+                return fail(write.lastError().text());
+            ++marked;
+            if (!changes || tooMany)
+                continue;
+            if (found.size() >= maxChanges) {
+                tooMany = true;
+                found = {};
+                continue;
+            }
+            found << change;
+        }
+        return true;
+    });
+    if (!ok)
+        return -1;
+    if (changes)
+        *changes << found;
     if (overflow)
         *overflow = tooMany;
     return marked;

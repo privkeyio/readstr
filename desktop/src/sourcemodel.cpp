@@ -8,6 +8,7 @@
 #include "feedparser.h"
 #include "library.h"
 #include "nip19.h"
+#include "savedviews.h"
 
 SourceModel::SourceModel(QObject *parent) : QAbstractListModel(parent) {
     setLibrary({}, {});
@@ -19,7 +20,8 @@ QHash<int, QByteArray> SourceModel::roleNames() const {
     return {{KindRole, "kind"},         {FeedIdRole, "feedId"}, {TitleRole, "title"},
             {UrlRole, "url"},           {CategoryRole, "category"}, {CountRole, "unread"},
             {LastErrorRole, "lastError"}, {SelectableRole, "selectable"}, {NostrRole, "nostr"},
-            {IncompleteRole, "incomplete"}};
+            {IncompleteRole, "incomplete"}, {ViewIdRole, "viewId"}, {IconRole, "icon"},
+            {UnsupportedRole, "unsupported"}, {UnknownSourceRole, "unknownSource"}};
 }
 
 QVariant SourceModel::data(const QModelIndex &index, int role) const {
@@ -34,6 +36,8 @@ QVariant SourceModel::data(const QModelIndex &index, int role) const {
         case Kind::Starred: return QStringLiteral("starred");
         case Kind::Category: return QStringLiteral("category");
         case Kind::Feed: return QStringLiteral("feed");
+        case Kind::ViewHeading: return QStringLiteral("views");
+        case Kind::View: return QStringLiteral("view");
         }
         return {};
     case FeedIdRole: return row.feedId;
@@ -42,17 +46,37 @@ QVariant SourceModel::data(const QModelIndex &index, int role) const {
     case CategoryRole: return row.category;
     case CountRole: return row.count;
     case LastErrorRole: return row.lastError;
-    case SelectableRole: return row.kind != Kind::Category;
+    case SelectableRole: return isSelectable(index.row());
     case NostrRole: return row.nostr;
     case IncompleteRole: return row.incomplete;
+    case ViewIdRole: return row.viewId;
+    case IconRole: return row.icon;
+    case UnsupportedRole: return row.unsupported;
+    case UnknownSourceRole: return row.unknownSource;
     default: return {};
     }
 }
 
-void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &counts) {
+void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &counts, const QList<SavedView> &views) {
     QList<Row> rows{{Kind::All, 0, {}, {}, {}, {}, counts.unread},
                     {Kind::Unread, 0, {}, {}, {}, {}, counts.unread},
                     {Kind::Starred, 0, {}, {}, {}, {}, counts.starred}};
+    if (!views.isEmpty()) {
+        Row heading;
+        heading.kind = Kind::ViewHeading;
+        rows << heading;
+    }
+    for (const SavedView &view : views) {
+        Row row;
+        row.kind = Kind::View;
+        row.title = SavedViews::name(view);
+        row.viewId = view.id;
+        row.icon = SavedViews::icon(view);
+        const SavedViews::Evaluation evaluation = SavedViews::evaluate(view);
+        row.unsupported = evaluation.unsupported;
+        row.unknownSource = evaluation.unknownSource;
+        rows << row;
+    }
 
     // The feeds come sorted by title; categories sort by name the way the
     // user's language does.
@@ -121,7 +145,8 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
         const Row &before = m_rows.at(i), &after = rows.at(i);
         if (before.title != after.title || before.url != after.url || before.count != after.count
             || before.lastError != after.lastError || before.nostr != after.nostr
-            || before.incomplete != after.incomplete) {
+            || before.incomplete != after.incomplete || before.icon != after.icon
+            || before.unsupported != after.unsupported || before.unknownSource != after.unknownSource) {
             m_rows[i] = after;
             emit dataChanged(index(int(i)), index(int(i)));
         }
@@ -129,7 +154,10 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
 }
 
 bool SourceModel::isSelectable(int index) const {
-    return index >= 0 && index < m_rows.size() && m_rows.at(index).kind != Kind::Category;
+    if (index < 0 || index >= m_rows.size())
+        return false;
+    const Row &row = m_rows.at(index);
+    return row.kind != Kind::Category && row.kind != Kind::ViewHeading && !row.unknownSource;
 }
 
 int SourceModel::rowOf(Kind kind, qint64 feedId) const {
@@ -137,6 +165,20 @@ int SourceModel::rowOf(Kind kind, qint64 feedId) const {
         if (m_rows.at(i).kind == kind && m_rows.at(i).feedId == feedId)
             return int(i);
     return -1;
+}
+
+int SourceModel::rowOfView(const QString &viewId) const {
+    for (qsizetype i = 0; i < m_rows.size(); ++i)
+        if (m_rows.at(i).kind == Kind::View && m_rows.at(i).viewId == viewId)
+            return int(i);
+    return -1;
+}
+
+int SourceModel::rowOf(const Row &row) const {
+    const int found = row.kind == Kind::View ? rowOfView(row.viewId) : rowOf(row.kind, row.feedId);
+    // A view selected until its source turned to one that cannot list here
+    // stays selected no more than it could be selected anew.
+    return isSelectable(found) ? found : -1;
 }
 
 int SourceModel::step(int from, int step) const {

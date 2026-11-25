@@ -4,11 +4,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
+#include <algorithm>
 
 #include "discovery.h"
 #include "feedparser.h"
 #include "fetcher.h"
 #include "library.h"
+#include "savedviews.h"
 #include "settings.h"
 #include "store.h"
 #include "sync.h"
@@ -24,8 +26,9 @@ struct Command {
 void usage(QTextStream &stream) {
     stream << "Usage: readstr [open]\n"
               "       readstr feeds [--json]\n"
-              "       readstr articles [--feed ID] [--unread] [--starred] [--limit N] [--json]\n"
-              "       readstr search QUERY [--feed ID] [--unread] [--starred] [--limit N] [--json]\n"
+              "       readstr articles [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]\n"
+              "       readstr search QUERY [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]\n"
+              "       readstr views [--json]\n"
               "       readstr subscribe URL|NPUB [--json]\n"
               "       readstr unsubscribe ID\n"
               "       readstr refresh [--feed ID] [--json]\n"
@@ -199,7 +202,8 @@ int feeds(const QString &command, const QStringList &arguments, QTextStream &out
 // the best matches first.
 int articles(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
     Options options;
-    if (!parseOptions(command, arguments, {"--json", "--unread", "--starred"}, {"--feed", "--limit"}, options, err))
+    if (!parseOptions(command, arguments, {"--json", "--unread", "--starred"}, {"--feed", "--view", "--limit"}, options,
+                      err))
         return 1;
     ArticleFilter filter;
     if (command == QLatin1String("search")) {
@@ -230,6 +234,38 @@ int articles(const QString &command, const QStringList &arguments, QTextStream &
         return 1;
     if (filter.feedId && !store.feed(filter.feedId))
         return fail(command, store.lastError(), err);
+    // A saved view's rules narrow the list further, as --unread and
+    // --starred do; any it holds that cannot be applied are said on stderr.
+    if (options.values.contains("--view")) {
+        const QString id = options.values.value("--view");
+        const QList<SavedView> views = store.savedViews();
+        if (!store.lastError().isEmpty())
+            return fail(command, store.lastError(), err);
+        const auto view =
+            std::find_if(views.begin(), views.end(), [&id](const SavedView &view) { return view.id == id; });
+        if (view == views.end())
+            return fail(command, QStringLiteral("no saved view has the id '%1'").arg(printable(id)), err);
+        const SavedViews::Evaluation evaluation = SavedViews::evaluate(*view);
+        if (evaluation.unknownSource)
+            return fail(command,
+                        QStringLiteral("the saved view '%1' targets a feed, category, or tags that cannot be "
+                                       "identified here yet")
+                            .arg(printable(id)),
+                        err);
+        // Unread articles of a view of read ones would be none at all.
+        if (filter.unreadOnly && evaluation.filter.readOnly)
+            return fail(command, QStringLiteral("--unread contradicts the saved view, which lists read articles"),
+                        err);
+        if (!evaluation.unsupported.isEmpty())
+            err << "readstr " << command << ": not supported here, so left out: "
+                << printable(evaluation.unsupported.join(", ")) << "\n";
+        filter.unreadOnly = filter.unreadOnly || evaluation.filter.unreadOnly;
+        filter.starredOnly = filter.starredOnly || evaluation.filter.starredOnly;
+        filter.readOnly = evaluation.filter.readOnly;
+        filter.oldestFirst = evaluation.filter.oldestFirst;
+        filter.includeWords = evaluation.filter.includeWords;
+        filter.excludeWords = evaluation.filter.excludeWords;
+    }
     const QList<Article> list = store.articles(filter);
     if (!store.lastError().isEmpty())
         return fail(command, store.lastError(), err);
@@ -651,6 +687,50 @@ int filters(const QString &command, const QStringList &arguments, QTextStream &o
     return 0;
 }
 
+// The saved views, in the web app's order, each with the rules it holds
+// that cannot be applied here; `articles --view ID` lists one's articles.
+int views(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
+    Options options;
+    if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
+        return 1;
+    if (!options.positional.isEmpty())
+        return fail(command, "takes no arguments", err);
+    Store store;
+    if (!openStore(command, store, err))
+        return 1;
+    const QList<SavedView> list = store.savedViews();
+    if (!store.lastError().isEmpty())
+        return fail(command, store.lastError(), err);
+    if (options.json) {
+        QJsonArray array;
+        for (const SavedView &view : list) {
+            QJsonObject object = view.view;
+            object.insert("id", view.id);
+            object.insert("exclude", QJsonArray::fromStringList(view.exclude));
+            const SavedViews::Evaluation evaluation = SavedViews::evaluate(view);
+            object.insert("unsupported", QJsonArray::fromStringList(evaluation.unsupported));
+            object.insert("listable", !evaluation.unknownSource);
+            array << object;
+        }
+        printJson(array, out);
+        return 0;
+    }
+    for (const SavedView &view : list) {
+        const QJsonObject source = view.view.value("source").toObject();
+        out << printable(view.id) << "  " << printable(SavedViews::name(view)) << "  "
+            << printable(source.value("kind").toString("all")) << ", "
+            << printable(view.view.value("readState").toString("all")) << ", "
+            << printable(view.view.value("sort").toString("newest"));
+        const SavedViews::Evaluation evaluation = SavedViews::evaluate(view);
+        if (evaluation.unknownSource)
+            out << "  (lists nothing here: its feed, category, or tags cannot be identified yet)";
+        else if (!evaluation.unsupported.isEmpty())
+            out << "  (not supported here: " << printable(evaluation.unsupported.join(", ")) << ")";
+        out << "\n";
+    }
+    return 0;
+}
+
 int help(const QString &, const QStringList &, QTextStream &out, QTextStream &) {
     usage(out);
     return 0;
@@ -661,6 +741,7 @@ constexpr Command commands[] = {
     {"feeds", feeds},
     {"articles", articles},
     {"search", articles},
+    {"views", views},
     {"subscribe", subscribe},
     {"unsubscribe", unsubscribe},
     {"refresh", refresh},

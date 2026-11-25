@@ -3,11 +3,28 @@ import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Layouts
 
-// All articles, Unread, and Starred, then the feeds by category, with unread
+// All articles, Unread, and Starred, then the saved views synced from the
+// web app, when there are any, then the feeds by category, with unread
 // counts, a mark on Nostr authors, and the last refresh error of each feed
 // (or, for a Nostr author, a quieter note when the refresh missed something).
+// A view with rules that cannot be applied here says so, and one whose
+// source cannot be told here is shown disabled.
 Rectangle {
     id: pane
+
+    // The tips name what a view holds, which comes from a relay, so they
+    // are plain text: the default tip would take markup in it as rich text.
+    component PlainToolTip: ToolTip {
+        id: tip
+        delay: 500
+        contentItem: Text {
+            text: tip.text
+            textFormat: Text.PlainText
+            font: tip.font
+            wrapMode: Text.Wrap
+            color: tip.Material.foreground
+        }
+    }
 
     property bool active: false
     readonly property bool menuOpen: appMenu.visible || feedMenu.visible
@@ -127,9 +144,13 @@ Rectangle {
                 required property bool selectable
                 required property bool nostr
                 required property bool incomplete
+                required property string viewId
+                required property string icon
+                required property var unsupported
+                required property bool unknownSource
 
                 readonly property bool selected: index === backend.sourceIndex
-                readonly property bool header: kind === "category"
+                readonly property bool header: kind === "category" || kind === "views"
 
                 width: ListView.view.width
                 height: header ? 36 : (lastError !== "" || incomplete ? 50 : 34)
@@ -141,7 +162,7 @@ Rectangle {
                     anchors.topMargin: 1
                     anchors.bottomMargin: 1
                     radius: Math.min(4, theme.radius)
-                    visible: !row.header && (row.selected || hover.hovered)
+                    visible: !row.header && (row.selected || (hover.hovered && row.selectable))
                     color: row.selected ? Qt.alpha(theme.accent, pane.active ? 0.28 : 0.16) : Qt.alpha(theme.foreground, 0.06)
                 }
 
@@ -153,7 +174,8 @@ Rectangle {
                     anchors.leftMargin: 16
                     anchors.rightMargin: 16
                     anchors.bottomMargin: 6
-                    text: row.category === "" ? qsTr("Feeds") : row.category
+                    text: row.kind === "views" ? qsTr("Views")
+                        : row.category === "" ? qsTr("Feeds") : row.category
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
                     maximumLineCount: 1
@@ -165,6 +187,7 @@ Rectangle {
 
                 ColumnLayout {
                     visible: !row.header
+                    opacity: row.unknownSource ? 0.45 : 1
                     anchors.fill: parent
                     anchors.leftMargin: 16
                     anchors.rightMargin: 14
@@ -180,12 +203,31 @@ Rectangle {
                             text: row.kind === "all" ? qsTr("All articles")
                                 : row.kind === "unread" ? qsTr("Unread")
                                 : row.kind === "starred" ? qsTr("Starred")
+                                : row.icon !== "" ? row.icon + " " + row.title
                                 : row.title
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
                             // A title with a line break must not grow the row.
                             maximumLineCount: 1
-                            font.weight: row.kind === "feed" ? Font.Normal : Font.DemiBold
+                            font.weight: row.kind === "feed" || row.kind === "view" ? Font.Normal : Font.DemiBold
+                        }
+
+                        // The view lists more here than in the web app:
+                        // which of its rules are left out is in the tip.
+                        Label {
+                            objectName: "viewUnsupported"
+                            visible: row.unsupported.length > 0 && !row.unknownSource
+                            text: qsTr("Partial")
+                            textFormat: Text.PlainText
+                            font.pixelSize: 10
+                            font.weight: Font.DemiBold
+                            opacity: 0.5
+
+                            HoverHandler { id: unsupportedHover }
+                            PlainToolTip {
+                                visible: unsupportedHover.hovered
+                                text: qsTr("Some rules of this view are not supported here, so they are left out: %1").arg(row.unsupported.join(", "))
+                            }
                         }
 
                         Label {
@@ -262,6 +304,12 @@ Rectangle {
                 }
 
                 HoverHandler { id: hover }
+
+                PlainToolTip {
+                    objectName: "viewUnknownSource"
+                    visible: row.unknownSource && hover.hovered
+                    text: qsTr("This view targets a feed, category, or tags that this app can't identify yet")
+                }
 
                 MouseArea {
                     anchors.fill: parent
