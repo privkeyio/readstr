@@ -1697,8 +1697,11 @@ int Store::markReadByWords(const ArticleFilter &filter, qint64 upToId, const QSt
             query.addBindValue(value);
         if (!query.exec())
             return fail(query.lastError().text()), -1;
+        // The open article is looked up apart from the capped scan, so it is
+        // never in `scanned`, though the list shows it when it holds the words.
         while (query.next())
-            if (const qint64 id = query.value(0).toLongLong(); scanned.isEmpty() || scanned.contains(id))
+            if (const qint64 id = query.value(0).toLongLong();
+                scanned.isEmpty() || scanned.contains(id) || (filter.alsoId && id == filter.alsoId))
                 candidates << id;
         if (query.lastError().isValid())
             return fail(query.lastError().text()), -1;

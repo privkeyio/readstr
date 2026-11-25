@@ -7946,6 +7946,28 @@ private slots:
         states = readStates(store);
         QVERIFY(states.value("second-a").first);
         QVERIFY(!states.value("older").first && !states.value("oldest").first);
+        // The open article, listed apart from the capped scan, is marked
+        // when it holds the words, and only then.
+        allUnread();
+        filter.scannedIds = {};
+        filter.alsoId = oldest;
+        QCOMPARE(titlesOf(store.articles(filter, &capped, &scanned)), (QStringList{"Second A", "Oldest"}));
+        QVERIFY(capped);
+        QVERIFY(!scanned.contains(oldest));
+        filter.scannedIds = scanned;
+        QCOMPARE(store.markRead(filter, store.counts()->lastId), 2);
+        states = readStates(store);
+        QVERIFY(states.value("second-a").first && states.value("oldest").first);
+        QVERIFY(!states.value("older").first);
+        allUnread();
+        QCOMPARE(rawExec(Paths::databaseFile(), "UPDATE items SET filter_flags = 1 WHERE guid = 'oldest'"), QString());
+        QCOMPARE(store.markRead(filter, store.counts()->lastId), 1);
+        QVERIFY(!readStates(store).value("oldest").first);
+        QCOMPARE(rawExec(Paths::databaseFile(), "UPDATE items SET filter_flags = 0 WHERE guid = 'oldest'"), QString());
+        filter.alsoId = 0;
+        allUnread();
+        QVERIFY(store.setRead(newest, true));
+        QVERIFY(store.setRead(articleIdOf(store, "second-a"), true));
         // Uncapped, the mark covers every article the words pick.
         filter.scannedIds = {};
         filter.maxScanned = 0;

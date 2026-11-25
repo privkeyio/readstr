@@ -99,6 +99,7 @@ Rectangle {
                             Layout.row: second ? index - overlay.half : index
                             Layout.column: second ? 3 : 1
                             Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignTop
                         }
                     }
                 }
