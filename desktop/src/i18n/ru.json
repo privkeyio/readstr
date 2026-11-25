@@ -320,6 +320,8 @@
   "Redo what was undone": "Повторить отменённое",
   "Nothing to undo": "Нечего отменять",
   "Nothing to redo": "Нечего повторять",
+  "Nothing left to undo: those articles are gone": "Нечего больше отменять: этих статей уже нет",
+  "Nothing left to redo: those articles are gone": "Нечего больше повторять: этих статей уже нет",
   "Undid: %1": "Отменено: %1",
   "Redid: %1": "Повторено: %1",
   "Cannot undo: %1": "Не удаётся отменить: %1",

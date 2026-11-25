@@ -431,17 +431,6 @@ private:
         // Not run, as an earlier write of the same undo command failed.
         bool skipped = false;
     };
-    // A write the user asked for; `work` returns how many rows it changed,
-    // or -1 with the reason in the Store's lastError(). `failure` describes
-    // a failed one, given the reason, when the window is gone to show it.
-    struct UserWrite {
-        enum State { Queued, Saved, Failed };
-        std::function<int(Store &)> work;
-        QString failure;
-        // Set on the worker before `state`, read once it has stopped.
-        QString error;
-        std::atomic<int> state = Queued;
-    };
     // What the worker and this thread share about an undo command.
     struct UndoState {
         // Set once the action, or an undo or redo of it, failed or left
@@ -454,6 +443,22 @@ private:
         // so the command goes back to be undone again.
         bool retry = false;
     };
+    // A write the user asked for; `work` returns how many rows it changed,
+    // or -1 with the reason in the Store's lastError(). `failure` describes
+    // a failed one, given the reason, when the window is gone to show it.
+    struct UserWrite {
+        enum State { Queued, Saved, Failed };
+        std::function<int(Store &)> work;
+        QString failure;
+        // The undo command it is a step of, if any.
+        std::shared_ptr<UndoState> undo;
+        // Set on the worker before `state`, read once it has stopped.
+        QString error;
+        std::atomic<int> state = Queued;
+    };
+    // Runs `write` on `store`, on the worker or, at closing, here: skipped
+    // once write.undo->failed is set, which it sets when `work` fails.
+    static WriteResult runWrite(UserWrite &write, Store &store);
     // With `undo`, skips `work` once undo->failed is set, and sets it when
     // `work` fails.
     void writeOnWorker(std::function<int(Store &)> work, const QString &failure,
@@ -493,9 +498,10 @@ private:
     std::shared_ptr<UndoCommand> pushReadsUndo(const std::shared_ptr<const QList<ReadChange>> &changes,
                                                const std::shared_ptr<const qsizetype> &count);
     // Once the marking is done, forgets its command if it marked nothing or
-    // more than maxReadChanges(), or else counts it in the history's bytes.
-    // Returns whether it was too large to undo.
-    bool keepReadsUndo(const std::shared_ptr<UndoCommand> &command, qsizetype count);
+    // more than maxReadChanges(), which the store says in `tooLarge`, or
+    // else counts it in the history's bytes. Returns whether it was too
+    // large to undo.
+    bool keepReadsUndo(const std::shared_ptr<UndoCommand> &command, qsizetype count, bool tooLarge);
     // Forgets the oldest commands that keep something to undo with, undo's
     // before redo's, until the history is within m_undoBytes.
     void trimUndo();
@@ -507,10 +513,11 @@ private:
     // an undo does to put back the read time too. `finished` is called once
     // the write is done, or at once when there is nothing to write.
     // A write that is the read time's own, as an undo's is, is made even
-    // when the flag is as asked already.
+    // when the flag is as asked already. `writeStar`, when set, writes the
+    // starred flag in place of setStarred().
     void saveFlags(const Article &before, bool read, bool starred, const QString &failure,
                    const std::function<bool(Store &)> &writeRead = {}, const Finished &finished = {},
-                   const std::shared_ptr<UndoState> &undo = {});
+                   const std::shared_ptr<UndoState> &undo = {}, const std::function<bool(Store &)> &writeStar = {});
     void showFlags(qint64 id, bool read, bool starred);
     // Article `id` with the flags the window shows for it, or, once it is
     // gone, one with only its id and the flags opposite to `read` and

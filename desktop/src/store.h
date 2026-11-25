@@ -234,9 +234,18 @@ public:
     // Marks every unread article the filter matches (its limit aside) read,
     // up to `upToId`, so articles that arrived after the view was listed stay
     // unread. Returns how many changed, or -1 on failure; `changes` gets
-    // each article it marked, with its read state before and after.
-    int markRead(const ArticleFilter &filter, qint64 upToId, QList<ReadChange> *changes = nullptr);
+    // each article it marked, with its read state before and after, unless
+    // that is more than `maxChanges`: then it gets none, the articles are
+    // marked all the same, and `overflow` is set.
+    int markRead(const ArticleFilter &filter, qint64 upToId, QList<ReadChange> *changes = nullptr,
+                 qsizetype maxChanges = std::numeric_limits<qsizetype>::max(), bool *overflow = nullptr);
     bool setStarred(qint64 articleId, bool starred);
+    // As setRead(), with `change` getting the article's read state before
+    // and after, read in the same transaction as the write.
+    bool setRead(qint64 articleId, bool read, ReadChange *change);
+    // As setStarred(), with `was` getting whether the article was starred,
+    // read in the same transaction as the write.
+    bool setStarred(qint64 articleId, bool starred, bool *was);
     // Null, with lastError() set, when there is no such article.
     std::optional<ReadState> readState(qint64 articleId);
     // Gives the article its read flag and read time as `state` has them;
@@ -319,9 +328,12 @@ public:
     // still unread and as read; it stops when they are not, or when
     // `stopped` returns true. Returns how many changed, or -1; `marked`
     // says how many did either way, and `changes` which they were, with
-    // their read state before and after, batch by committed batch.
+    // their read state before and after, batch by committed batch. Past
+    // `maxChanges` of those, `changes` is emptied and gets no more, the
+    // marking goes on, and `overflow` is set.
     int markReadByFilter(const QString &ruleId, const std::function<bool()> &stopped = {}, int *marked = nullptr,
-                         QList<ReadChange> *changes = nullptr);
+                         QList<ReadChange> *changes = nullptr,
+                         qsizetype maxChanges = std::numeric_limits<qsizetype>::max(), bool *overflow = nullptr);
 #ifdef READSTR_TESTS
     // Only in the test build: called by applyFilterRules() between two
     // batches, with what it checks for being superseded, on its thread.

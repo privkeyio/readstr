@@ -3650,6 +3650,402 @@ private slots:
         QVERIFY(lasting);
     }
 
+    // At closing, a write still queued is replayed, except one of an undo
+    // command whose earlier write failed: the undo of a star that was never
+    // written does not clear one another window gave. Others still go in.
+    void backendSkipsAFailedCommandsStepsAtClosing()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString path = Paths::databaseFile();
+        qint64 x = 0, y = 0;
+        {
+            Store store;
+            QVERIFY(store.open());
+            const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+            // Past one batch, so the pass below stops between two.
+            QList<ParsedItem> items;
+            for (int i = 0; i < 600; ++i) {
+                ParsedItem item;
+                item.guid = QString::number(i);
+                item.title = "Item " + QString::number(i);
+                items << item;
+            }
+            QCOMPARE(store.saveItems(feed, items), 600);
+            x = articleIdOf(store, "0");
+            y = articleIdOf(store, "1");
+        }
+        const QString starred = "SELECT is_starred FROM items WHERE id = %1";
+        auto backend = std::make_unique<Backend>();
+        backend->selectArticle(backend->articles()->rowOf(x));
+        QCOMPARE(backend->articleId(), x);
+        QTRY_COMPARE(rawCount(path, QString("SELECT is_read FROM items WHERE id = %1").arg(x)), 1);
+        // Another window stars it, and starring it here is refused.
+        QCOMPARE(rawExec(path, QString("UPDATE items SET is_starred = 1 WHERE id = %1").arg(x)), QString());
+        QCOMPARE(rawExec(path, QString("CREATE TRIGGER refuse BEFORE UPDATE OF is_starred ON items"
+                                       " WHEN NEW.is_starred = 1 AND NEW.id = %1"
+                                       " BEGIN SELECT RAISE(ABORT, 'refused'); END")
+                                   .arg(x)),
+                 QString());
+
+        QSemaphore reached;
+        std::atomic<bool> held{false};
+        Store::filterBatchHook = [&reached, &held](const std::function<bool()> &stopped) {
+            if (held.exchange(true))
+                return;
+            reached.release();
+            const QDeadlineTimer deadline(60000);
+            while (!stopped() && !deadline.hasExpired())
+                QThread::msleep(1);
+        };
+        const auto unhook = qScopeGuard([] { Store::filterBatchHook = nullptr; });
+        const auto join = qScopeGuard([&backend] { backend.reset(); });
+        QVERIFY(backend->saveFilterRule(-1, {{"pattern", "zzz"}, {"target", "title"}, {"type", "contains"},
+                                             {"action", "highlight"}}));
+        QVERIFY(reached.tryAcquire(1, 60000));
+        QVERIFY(!backend->articleStarred());
+        backend->toggleStar();
+        backend->undo();
+        backend->selectArticle(backend->articles()->rowOf(y));
+        QCOMPARE(backend->articleId(), y);
+        backend->toggleStar();
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("^readstr: Cannot change the article: .*refused"));
+        backend.reset();
+        QCOMPARE(rawCount(path, starred.arg(x)), 1);
+        QCOMPARE(rawCount(path, starred.arg(y)), 1);
+    }
+
+    // setRead() and setStarred() can say what the row held before them, read
+    // in their own transaction, and fail for an article that is not there.
+    void storeReadsTheFlagsItReplaces()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        const QString path = Paths::databaseFile();
+        QCOMPARE(rawExec(path, "UPDATE items SET read_at = 1000 WHERE guid = 'second-b'"), QString());
+        Store store;
+        QVERIFY(store.open());
+        const qint64 id = articleIdOf(store, "second-b");
+
+        ReadChange change;
+        QVERIFY(store.setRead(id, false, &change));
+        QCOMPARE(change.id, id);
+        QVERIFY(change.before.read);
+        QCOMPARE(change.before.readAt, std::optional<qint64>(1000));
+        QVERIFY(!change.after.read);
+        QVERIFY(!change.after.readAt);
+        QVERIFY(store.setRead(id, true, &change));
+        QVERIFY(!change.before.read && change.after.read && change.after.readAt);
+        QCOMPARE(store.readState(id)->readAt, change.after.readAt);
+        change = {};
+        QVERIFY(!store.setRead(id + 1000, true, &change));
+        QCOMPARE(change.id, qint64(0));
+
+        bool was = true;
+        QVERIFY(store.setStarred(id, true, &was));
+        QVERIFY(!was);
+        QVERIFY(store.setStarred(id, true, &was));
+        QVERIFY(was);
+        QVERIFY(!store.setStarred(id + 1000, true, &was));
+        // Neither left a transaction open.
+        QVERIFY(store.setStarred(id, false));
+    }
+
+    // S on an article another window starred already changes nothing, so
+    // it leaves nothing to undo, and the star stays.
+    void backendKeepsNoUndoForAStarAlreadyThere()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        Store store;
+        QVERIFY(store.open());
+        const qint64 id = articleIdOf(store, "older");
+
+        Backend backend;
+        backend.selectArticle(backend.articles()->rowOf(id));
+        QCOMPARE(backend.articleId(), id);
+        QVERIFY(store.setStarred(id, true));
+        QVERIFY(!backend.articleStarred());
+        backend.toggleStar();
+        QVERIFY(backend.articleStarred());
+        QTRY_VERIFY(!backend.canUndo());
+        backend.undo();
+        QCOMPARE(backend.status(), QString("Nothing to undo"));
+        QTest::qWait(100);
+        QVERIFY(articleIs(store, id, [](const Article &article) { return article.starred; }));
+
+        // A star it gives is undone as ever.
+        backend.toggleStar();
+        QTRY_VERIFY(articleIs(store, id, [](const Article &article) { return !article.starred; }));
+        QVERIFY(backend.canUndo());
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: unstarred an article"));
+        QVERIFY(articleIs(store, id, [](const Article &article) { return article.starred; }));
+    }
+
+    // An undo of a marking whose articles have all gone since is forgotten,
+    // saying so; while some are left, it puts those back.
+    void backendForgetsAMarkingWhoseArticlesAreGone()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        const QString path = Paths::databaseFile();
+        Store store;
+        QVERIFY(store.open());
+
+        Backend backend;
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::All));
+        backend.markViewRead();
+        QTRY_COMPARE(backend.status(), QString("Marked 4 articles read"));
+        QCOMPARE(rawExec(path, "DELETE FROM items WHERE guid = 'oldest'"), QString());
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: marked 4 articles read"));
+        auto states = readStates(store);
+        QVERIFY(!states.value("newest").first && !states.value("older").first && !states.value("second-a").first);
+        QVERIFY(backend.canRedo());
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: marked 4 articles read"));
+
+        QCOMPARE(rawExec(path, "DELETE FROM items WHERE guid IN ('newest', 'older', 'second-a')"), QString());
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Nothing left to undo: those articles are gone"));
+        QVERIFY(!backend.statusError());
+        QVERIFY(!backend.canUndo());
+        QVERIFY(!backend.canRedo());
+    }
+
+    // A rule change whose save failed, but which a later save committed
+    // with its own, is undone like any other.
+    void backendUndoesAFailedRuleChangeALaterSaveCommitted()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString path = Paths::databaseFile();
+        QString ruleId;
+        {
+            Store store;
+            QVERIFY(store.open());
+            const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+            QList<ParsedItem> items;
+            for (const char *guid : {"a", "b", "other"}) {
+                ParsedItem item;
+                item.guid = guid;
+                item.title = QString(guid) == "other" ? "Other" : QString("Weekly ") + guid;
+                items << item;
+            }
+            QCOMPARE(store.saveItems(feed, items), 3);
+            using namespace KeywordFilter;
+            QVERIFY(store.setFilterRules({filterRule("weekly", Target::Title, Type::Word, Action::MarkRead)}));
+            ruleId = store.filterRules()->first().id;
+        }
+        Store store;
+        QVERIFY(store.open());
+        QSemaphore reached, go;
+        std::atomic<bool> armed{false};
+        Store::filterWriteHook = [&] {
+            if (!armed.exchange(false))
+                return;
+            reached.release();
+            go.tryAcquire(1, 60000);
+        };
+        const auto unhook = qScopeGuard([] { Store::filterWriteHook = nullptr; });
+        Backend backend;
+        const auto release = qScopeGuard([&go] { go.release(); });
+        // Once the article opened is read, the worker is past its start.
+        backend.selectArticle(backend.articles()->rowOf(articleIdOf(store, "other")));
+        QTRY_VERIFY(readStates(store).value("other").first);
+        QCOMPARE(backend.filterRules().size(), 1);
+
+        QCOMPARE(rawExec(path, "CREATE TRIGGER refuse BEFORE INSERT ON filter_rules"
+                               " BEGIN SELECT RAISE(ABORT, 'refused'); END"),
+                 QString());
+        armed = true;
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "aaa"}, {"target", "title"}, {"type", "contains"},
+                                            {"action", "hide"}}));
+        // Held behind the failed save, whose result waits on this thread.
+        backend.markFilterMatchesRead(ruleId);
+        QVERIFY(reached.tryAcquire(1, 60000));
+        QCOMPARE(rawExec(path, "DROP TRIGGER refuse"), QString());
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "bbb"}, {"target", "title"}, {"type", "contains"},
+                                            {"action", "hide"}}));
+        go.release();
+        QTRY_COMPARE(store.filterRules()->size(), 3);
+        QTRY_COMPARE(backend.status(), QString("Marked 2 articles read"));
+        QVERIFY(backend.canUndo());
+
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: added a filter rule"));
+        QCOMPARE(store.filterRules()->size(), 2);
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: marked 2 articles read"));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: added a filter rule"));
+        QCOMPARE(store.filterRules()->size(), 1);
+        QVERIFY(!backend.canUndo());
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: added a filter rule"));
+        QCOMPARE(store.filterRules()->size(), 2);
+        QCOMPARE(store.filterRules()->at(1).pattern, QString("aaa"));
+    }
+
+    // A rule change saved, though its pass over the library failed, says so
+    // and is undone all the same.
+    void backendUndoesARuleChangeSavedButNotApplied()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        const QString path = Paths::databaseFile();
+        Store store;
+        QVERIFY(store.open());
+        Backend backend;
+        QCOMPARE(backend.articles()->count(), 5);
+        backend.selectArticle(backend.articles()->rowOf(articleIdOf(store, "newest")));
+        QTRY_VERIFY(readStates(store).value("newest").first);
+
+        QCOMPARE(rawExec(path, "CREATE TRIGGER refuse BEFORE UPDATE OF filter_flags ON items"
+                               " BEGIN SELECT RAISE(ABORT, 'refused'); END"),
+                 QString());
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "second"}, {"target", "title"}, {"type", "contains"},
+                                            {"action", "hide"}}));
+        QTRY_VERIFY(backend.status().startsWith("Cannot apply the filter rules:"));
+        QVERIFY(backend.statusError());
+        QCOMPARE(store.filterRules()->size(), 1);
+        QVERIFY(backend.canUndo());
+        QCOMPARE(rawExec(path, "DROP TRIGGER refuse"), QString());
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: added a filter rule"));
+        QCOMPARE(store.filterRules()->size(), 0);
+        QVERIFY(backend.filterRules().isEmpty());
+        QVERIFY(backend.canRedo());
+    }
+
+    // markRead() and markReadByFilter() list no more read changes than they
+    // are allowed, and say so, marking every article all the same; within
+    // the cap, they list them all.
+    void storeCapsTheReadChangesItLists()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        QList<ParsedItem> items;
+        for (int i = 0; i < 1200; ++i) {
+            ParsedItem item;
+            item.guid = QString::number(i);
+            item.title = "weekly " + QString::number(i);
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 1200);
+        const qint64 last = store.counts()->lastId;
+        const QString read = "SELECT COUNT(*) FROM items WHERE is_read = 1";
+        const ArticleFilter all{0, false, false, 0};
+
+        QList<ReadChange> changes;
+        bool overflow = false;
+        QCOMPARE(store.markRead(all, last, &changes, 1199, &overflow), 1200);
+        QVERIFY(overflow);
+        QVERIFY(changes.isEmpty());
+        QCOMPARE(rawCount(path, read), 1200);
+        QCOMPARE(rawExec(path, "UPDATE items SET is_read = 0, read_at = NULL"), QString());
+        QCOMPARE(store.markRead(all, last, &changes, 1200, &overflow), 1200);
+        QVERIFY(!overflow);
+        QCOMPARE(changes.size(), 1200);
+        QCOMPARE(rawExec(path, "UPDATE items SET is_read = 0, read_at = NULL"), QString());
+
+        using namespace KeywordFilter;
+        const Rule weekly = filterRule("weekly", Target::Title, Type::Word, Action::MarkRead);
+        QVERIFY(store.setFilterRules({weekly}));
+        changes.clear();
+        int marked = 0;
+        QCOMPARE(store.markReadByFilter(weekly.id, {}, &marked, &changes, 600, &overflow), 1200);
+        QCOMPARE(marked, 1200);
+        QVERIFY(overflow);
+        QVERIFY(changes.isEmpty());
+        QCOMPARE(rawCount(path, read), 1200);
+        QCOMPARE(rawExec(path, "UPDATE items SET is_read = 0, read_at = NULL"), QString());
+        QCOMPARE(store.markReadByFilter(weekly.id, {}, &marked, &changes, 1200, &overflow), 1200);
+        QVERIFY(!overflow);
+        QCOMPARE(changes.size(), 1200);
+    }
+
+    // When a later batch of "mark the matching articles read" fails, the
+    // window says so, an undo puts back only what the batches written
+    // before it marked, read times included, and a redo marks only those
+    // again.
+    void backendUndoesTheBatchesWrittenBeforeOneFailed()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const QString path = Paths::databaseFile();
+        QString ruleId;
+        {
+            Store store;
+            QVERIFY(store.open());
+            const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+            QList<ParsedItem> items;
+            for (int i = 0; i < 1200; ++i) {
+                ParsedItem item;
+                item.guid = QString::number(i);
+                item.title = "weekly " + QString::number(i);
+                items << item;
+            }
+            QCOMPARE(store.saveItems(feed, items), 1200);
+            using namespace KeywordFilter;
+            QVERIFY(store.setFilterRules({filterRule("weekly", Target::Title, Type::Word, Action::MarkRead)}));
+            ruleId = store.filterRules()->first().id;
+        }
+        // One in the first batch and one in the second kept a read time.
+        QCOMPARE(rawExec(path, "UPDATE items SET read_at = 42 WHERE guid = '7'"), QString());
+        QCOMPARE(rawExec(path, "UPDATE items SET read_at = 99 WHERE guid = '900'"), QString());
+        const QString read = "SELECT COUNT(*) FROM items WHERE is_read = 1";
+        Store store;
+        QVERIFY(store.open());
+        Backend backend;
+        backend.selectArticle(0);
+        QTRY_COMPARE(rawCount(path, read), 1);
+        QCOMPARE(rawExec(path, "UPDATE items SET is_read = 0, read_at = NULL WHERE is_read = 1"), QString());
+
+        // The second batch is refused before it is written.
+        std::atomic<int> batches{0};
+        Store::filterWriteHook = [&batches, path] {
+            if (++batches == 2)
+                rawExec(path, "CREATE TRIGGER refuse BEFORE UPDATE OF is_read ON items"
+                              " BEGIN SELECT RAISE(ABORT, 'refused'); END");
+        };
+        const auto unhook = qScopeGuard([] { Store::filterWriteHook = nullptr; });
+        backend.markFilterMatchesRead(ruleId);
+        QTRY_VERIFY(backend.status().startsWith("Cannot mark the matching articles read:"));
+        QVERIFY(backend.statusError());
+        QCOMPARE(batches.load(), 2);
+        QCOMPARE(rawCount(path, read), 500);
+        QCOMPARE(rawExec(path, "DROP TRIGGER refuse"), QString());
+        QVERIFY(backend.canUndo());
+
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: marked 500 articles read"));
+        QCOMPARE(rawCount(path, read), 0);
+        QCOMPARE(rawCount(path, "SELECT read_at FROM items WHERE guid = '7'"), 42);
+        QCOMPARE(rawCount(path, "SELECT read_at FROM items WHERE guid = '900'"), 99);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE read_at IS NOT NULL"), 2);
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: marked 500 articles read"));
+        QCOMPARE(rawCount(path, read), 500);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1 AND CAST(guid AS INTEGER) >= 500"), 0);
+        QCOMPARE(rawCount(path, "SELECT read_at FROM items WHERE guid = '900'"), 99);
+    }
+
     // Ctrl+Z and Ctrl+Shift+Z undo and redo in the window, listed in the ?
     // overlay, except in a text field, which keeps them for its own typing.
     void windowUndoesWithCtrlZ()

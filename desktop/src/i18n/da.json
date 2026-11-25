@@ -302,6 +302,8 @@
   "Redo what was undone": "Gentag det, der blev fortrudt",
   "Nothing to undo": "Intet at fortryde",
   "Nothing to redo": "Intet at gentage",
+  "Nothing left to undo: those articles are gone": "Intet tilbage at fortryde: de artikler er væk",
+  "Nothing left to redo: those articles are gone": "Intet tilbage at gentage: de artikler er væk",
   "Undid: %1": "Fortrudt: %1",
   "Redid: %1": "Gentaget: %1",
   "Cannot undo: %1": "Kan ikke fortryde: %1",

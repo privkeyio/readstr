@@ -1418,7 +1418,10 @@ std::optional<LibraryCounts> Store::counts() {
                          query.value(3).toLongLong()};
 }
 
-int Store::markRead(const ArticleFilter &filter, qint64 upToId, QList<ReadChange> *changes) {
+int Store::markRead(const ArticleFilter &filter, qint64 upToId, QList<ReadChange> *changes, qsizetype maxChanges,
+                    bool *overflow) {
+    if (overflow)
+        *overflow = false;
     QVariantList values;
     QString where = QStringLiteral(" WHERE i.is_read = 0 AND i.id <= ?") + filterSql(filter, values);
     // A search marks only its matches read, as only they are in the view.
@@ -1444,6 +1447,7 @@ int Store::markRead(const ArticleFilter &filter, qint64 upToId, QList<ReadChange
     // Listed and marked in one transaction, so the list is exactly what
     // was marked.
     QList<ReadChange> found;
+    bool tooMany = false;
     int marked = -1;
     const bool ok = transaction([&] {
         QSqlQuery query(m_db);
@@ -1455,6 +1459,11 @@ int Store::markRead(const ArticleFilter &filter, qint64 upToId, QList<ReadChange
         if (!query.exec())
             return fail(query.lastError().text());
         while (query.next()) {
+            if (found.size() >= maxChanges) {
+                tooMany = true;
+                found = {};
+                break;
+            }
             ReadChange change{query.value(0).toLongLong(), {false, std::nullopt}, {true, now}};
             if (!query.value(1).isNull())
                 change.before.readAt = query.value(1).toLongLong();
@@ -1469,6 +1478,8 @@ int Store::markRead(const ArticleFilter &filter, qint64 upToId, QList<ReadChange
     if (!ok)
         return -1;
     *changes << found;
+    if (overflow)
+        *overflow = tooMany;
     return marked;
 }
 
@@ -1549,6 +1560,34 @@ bool Store::setRead(qint64 articleId, bool read) {
     return query.numRowsAffected() == 1 || fail(QStringLiteral("no article with id %1").arg(articleId));
 }
 bool Store::setStarred(qint64 articleId, bool starred) { return setFlag("is_starred", articleId, starred); }
+
+bool Store::setRead(qint64 articleId, bool read, ReadChange *change) {
+    return transaction([&] {
+        const auto before = readState(articleId);
+        if (!before || !setRead(articleId, read))
+            return false;
+        const auto after = readState(articleId);
+        if (!after)
+            return false;
+        *change = {articleId, *before, *after};
+        return true;
+    });
+}
+
+bool Store::setStarred(qint64 articleId, bool starred, bool *was) {
+    return transaction([&] {
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral("SELECT is_starred FROM items WHERE id = ?"));
+        query.addBindValue(articleId);
+        if (!query.exec())
+            return fail(query.lastError().text());
+        if (!query.next())
+            return fail(QStringLiteral("no article with id %1").arg(articleId));
+        *was = query.value(0).toBool();
+        query.finish();
+        return setStarred(articleId, starred);
+    });
+}
 
 SyncAccount Store::syncAccount() {
     m_error.clear();
@@ -2066,10 +2105,15 @@ bool Store::setFilterRules(const QList<KeywordFilter::Rule> &rules, const std::f
 }
 
 int Store::markReadByFilter(const QString &ruleId, const std::function<bool()> &stopped, int *marked,
-                            QList<ReadChange> *changes) {
+                            QList<ReadChange> *changes, qsizetype maxChanges, bool *overflow) {
     int count = 0;
     if (marked)
         *marked = 0;
+    if (overflow)
+        *overflow = false;
+    // Whether it still keeps the changes, which it stops doing past
+    // `maxChanges` of them.
+    qsizetype kept = 0;
     const auto stop = [&stopped] { return stopped && stopped(); };
     // The rules as kept and how many times they were saved.
     const auto state = [this](QStringList *source, qint64 *saves) {
@@ -2236,8 +2280,17 @@ int Store::markReadByFilter(const QString &ruleId, const std::function<bool()> &
         count += written;
         if (marked)
             *marked = count;
-        if (changes)
-            *changes << batch;
+        if (changes) {
+            kept += batch.size();
+            if (kept > maxChanges) {
+                *changes = {};
+                changes = nullptr;
+                if (overflow)
+                    *overflow = true;
+            } else {
+                *changes << batch;
+            }
+        }
         if (done || stale)
             break;
     }

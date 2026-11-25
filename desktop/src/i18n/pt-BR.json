@@ -197,6 +197,7 @@
   "Undo the last change": "Desfazer a última alteração",
   "Redo what was undone": "Refazer o que foi desfeito",
   "Nothing to undo": "Nada para desfazer",
+  "Nothing left to undo: those articles are gone": "Nada mais para desfazer: esses artigos não existem mais",
   "Undid: %1": "Desfeito: %1",
   "Cannot undo: %1": "Não é possível desfazer: %1",
   "marked an article unread": "artigo marcado como não lido",

@@ -97,10 +97,9 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+R"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.refreshAll() }
     Shortcut { sequence: "Ctrl+N"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: addDialog.open() }
     Shortcut { sequence: "Ctrl+Shift+A"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.markViewRead() }
-    Shortcut { objectName: "undoShortcut"; sequences: [StandardKey.Undo]; context: Qt.ApplicationShortcut; enabled: win.keysFree && !win.editingText; onActivated: backend.undo() }
-    // Where StandardKey.Redo is Ctrl+Shift+Z already, as on Linux, the key
-    // is bound twice here and Qt calls it ambiguous, though it is one action.
-    Shortcut { objectName: "redoShortcut"; sequences: [StandardKey.Redo, "Ctrl+Shift+Z"]; context: Qt.ApplicationShortcut; enabled: win.keysFree && !win.editingText; onActivated: backend.redo(); onActivatedAmbiguously: backend.redo() }
+    // Spelled out, as StandardKey.Redo is Ctrl+Y on some platforms and not others.
+    Shortcut { objectName: "undoShortcut"; sequences: ["Ctrl+Z"]; context: Qt.ApplicationShortcut; enabled: win.keysFree && !win.editingText; onActivated: backend.undo() }
+    Shortcut { objectName: "redoShortcut"; sequences: ["Ctrl+Shift+Z"]; context: Qt.ApplicationShortcut; enabled: win.keysFree && !win.editingText; onActivated: backend.redo() }
     Shortcut { sequence: "Ctrl+O"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.importOpml() }
     Shortcut { sequence: "Ctrl+Shift+E"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: backend.exportOpml() }
     // The article never takes the keyboard, so its selection is copied

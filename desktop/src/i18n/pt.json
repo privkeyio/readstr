@@ -311,6 +311,8 @@
   "Redo what was undone": "Refazer o que foi anulado",
   "Nothing to undo": "Nada para anular",
   "Nothing to redo": "Nada para refazer",
+  "Nothing left to undo: those articles are gone": "Nada mais para anular: esses artigos já não existem",
+  "Nothing left to redo: those articles are gone": "Nada mais para refazer: esses artigos já não existem",
   "Undid: %1": "Anulado: %1",
   "Redid: %1": "Refeito: %1",
   "Cannot undo: %1": "Não é possível anular: %1",
