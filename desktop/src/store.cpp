@@ -1357,13 +1357,14 @@ bool byWords(const ArticleFilter &filter) { return !filter.includeWords.isEmpty(
 // before it looks. Both ways here are linear and read no more than the
 // text, since a view reads it for each article it passes; the sanitizer,
 // which the search index and the filter rules read through, would cost
-// more than the whole list.
+// more than the whole list. An inline tag parts no word, as in the reader
+// and searchBody(), so `pro<b>gram</b>ming` holds "programming".
 QString wordsBody(const Article &article) {
     if (article.content.isEmpty())
         return {};
     if (!article.address.isEmpty())
         return FeedParser::decodeEntities(withoutLinkTargets(article.content));
-    return FeedParser::plainText(article.content);
+    return FeedParser::plainText(article.content, FeedParser::InlineTags::Join);
 }
 }
 
@@ -1403,10 +1404,16 @@ QList<Article> Store::articlesByWords(const ArticleFilter &filter, const QString
     ArticleFilter rest = filter;
     rest.alsoId = 0;
     // Each article's place in the order too, to put alsoId in its own.
-    QString columns = QString::fromLatin1(articleColumns).arg("i.content");
-    columns.insert(columns.indexOf(QLatin1String(" FROM items i")),
-                   QStringLiteral(", COALESCE(i.published_at, i.created_at), %1")
-                       .arg(match.isEmpty() ? QLatin1String("0") : QLatin1String("s.score")));
+    // The ordered list leaves the text out, so a sort reads none of it;
+    // each article's is read on its own, only when it is looked at.
+    const auto withPlace = [&match](const char *content) {
+        QString columns = QString::fromLatin1(articleColumns).arg(QLatin1String(content));
+        columns.insert(columns.indexOf(QLatin1String(" FROM items i")),
+                       QStringLiteral(", COALESCE(i.published_at, i.created_at), %1")
+                           .arg(match.isEmpty() ? QLatin1String("0") : QLatin1String("s.score")));
+        return columns;
+    };
+    const QString columns = withPlace("i.content");
     struct Place {
         double score = 0;
         qint64 date = 0;
@@ -1427,15 +1434,24 @@ QList<Article> Store::articlesByWords(const ArticleFilter &filter, const QString
         values << match;
     QList<Article> result;
     QList<Place> places;
+    QString sql = withPlace("NULL") + searchJoin + " WHERE 1" + filterSql(rest, values);
+    // Looked up on its own below, so it never counts against maxScanned.
+    if (filter.alsoId) {
+        sql += " AND i.id <> ?";
+        values << filter.alsoId;
+    }
     QSqlQuery query(m_db);
     query.setForwardOnly(true);
-    query.prepare(columns + searchJoin + " WHERE 1" + filterSql(rest, values) + orderSql(filter, !match.isEmpty()));
+    query.prepare(sql + orderSql(filter, !match.isEmpty()));
     for (const QVariant &value : std::as_const(values))
         query.addBindValue(value);
     if (!query.exec()) {
         fail(query.lastError().text());
         return {};
     }
+    QSqlQuery body(m_db);
+    body.setForwardOnly(true);
+    body.prepare(QStringLiteral("SELECT content FROM items WHERE id = ?"));
     QList<qint64> scanned;
     while ((filter.limit <= 0 || result.size() < filter.limit) && query.next()) {
         if (filter.maxScanned > 0 && scanned.size() >= filter.maxScanned) {
@@ -1451,8 +1467,15 @@ QList<Article> Store::articlesByWords(const ArticleFilter &filter, const QString
             wordsReadHook();
 #endif
         Article article = articleFrom(query);
-        // Looked up on its own below, so it never makes the list read on.
-        if (article.id == filter.alsoId || !matchesWords(filter, article))
+        body.addBindValue(article.id);
+        if (!body.exec()) {
+            fail(body.lastError().text());
+            return {};
+        }
+        if (body.next())
+            article.content = body.value(0).toString();
+        body.finish();
+        if (!matchesWords(filter, article))
             continue;
         if (!filter.withContent)
             article.content.clear();
@@ -1473,7 +1496,7 @@ QList<Article> Store::articlesByWords(const ArticleFilter &filter, const QString
     if (!match.isEmpty())
         values << match;
     values << filter.alsoId;
-    QString sql = columns + searchJoin + " WHERE i.id = ? AND " NOT_HIDDEN("i.");
+    sql = columns + searchJoin + " WHERE i.id = ? AND " NOT_HIDDEN("i.");
     if (filter.feedId) {
         sql += " AND i.feed_id = ?";
         values << filter.feedId;
@@ -1681,13 +1704,17 @@ int Store::markReadByWords(const ArticleFilter &filter, qint64 upToId, const QSt
             return fail(query.lastError().text()), -1;
     }
     // Each article as it is now, which the words are looked for in as
-    // articles() looks for them.
+    // articles() looks for them, still held to all the view's other rules.
     QSqlQuery text(m_db);
     text.setForwardOnly(true);
-    text.prepare(QStringLiteral("SELECT read_at, title, summary, author, content, address FROM items"
-                                " WHERE id = ? AND is_read = 0 AND " NOT_HIDDEN("")));
-    // Whether the article `id` is still unread, shown, and holds the words.
+    text.prepare(QStringLiteral("SELECT i.read_at, i.title, i.summary, i.author, i.content, i.address"
+                                " FROM items AS i")
+                 + where + QStringLiteral(" AND i.id = ?"));
+    // Whether the article `id` is still in the view and holds the words.
     const auto holds = [&](qint64 id, std::optional<qint64> *readAt) {
+        text.addBindValue(upToId);
+        for (const QVariant &value : values)
+            text.addBindValue(value);
         text.addBindValue(id);
         if (!text.exec())
             return std::optional<bool>{};
@@ -1716,8 +1743,8 @@ int Store::markReadByWords(const ArticleFilter &filter, qint64 upToId, const QSt
     if (filterWriteHook)
         filterWriteHook();
 #endif
-    // Then marked in one short transaction, each only if it is still
-    // unread, shown, and holds the words, as a refresh may have changed its
+    // Then marked in one short transaction, each only if it is still in
+    // the view and holds the words, as a refresh may have changed its
     // text since, its read time before read there, so the list is exactly
     // what was marked.
     QList<ReadChange> found;

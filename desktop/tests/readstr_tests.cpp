@@ -7787,7 +7787,7 @@ private slots:
         Store::wordsReadHook = [&read] { ++read; };
         const auto unhook = qScopeGuard([] { Store::wordsReadHook = {}; });
         QCOMPARE(titles(filter), (QStringList{"Second A", "Older"}));
-        QCOMPARE(read, 3);
+        QCOMPARE(read, 2);
         // Nor does one that is gone, or that a rule hides.
         read = 0;
         filter.alsoId = 1000000;
@@ -7826,6 +7826,28 @@ private slots:
         filter.limit = 1;
         QCOMPARE(titlesOf(store.articles(filter, &capped)), QStringList{"Second A"});
         QVERIFY(!capped);
+        // The open article, looked up on its own, is not one of them.
+        filter.oldestFirst = true;
+        filter.maxScanned = 1;
+        filter.alsoId = oldest;
+        QCOMPARE(titlesOf(store.articles(filter, &capped)), (QStringList{"Oldest", "Second B"}));
+        QVERIFY(!capped);
+        // Each text is read only for an article the scan reaches.
+        int bodies = 0;
+        Store::wordsReadHook = [&bodies] { ++bodies; };
+        filter = {};
+        filter.includeWords = {"o"};
+        filter.limit = 0;
+        filter.maxScanned = 3;
+        QCOMPARE(titlesOf(store.articles(filter, &capped)), (QStringList{"Second A", "Older"}));
+        QVERIFY(capped);
+        QCOMPARE(bodies, 3);
+        bodies = 0;
+        filter.query = "second";
+        filter.maxScanned = 1;
+        store.articles(filter, &capped);
+        QCOMPARE(bodies, 1);
+        Store::wordsReadHook = {};
         // As for Unread: the open article stays though it is read.
         filter = {};
         filter.includeWords = {"second"};
@@ -7975,6 +7997,55 @@ private slots:
         QCOMPARE(titles(filter), (QStringList{"Second A", "Second B"}));
         filter.alsoId = articleIdOf(store, "second-often");
         QCOMPARE(titles(filter), (QStringList{"Second second second", "Second A", "Second B"}));
+
+        // A word an inline tag runs through is still one word, in the list
+        // and the mark, but blocks part words.
+        allUnread();
+        QCOMPARE(rawExec(Paths::databaseFile(),
+                         "UPDATE items SET content = '<p>pro<b>gram</b>ming</p><p>end</p><p>less</p>'"
+                         " WHERE guid = 'older'"),
+                 QString());
+        filter = {};
+        filter.includeWords = {"programming"};
+        QCOMPARE(titles(filter), QStringList{"Older promo"});
+        filter.includeWords = {"endless"};
+        QVERIFY(titles(filter).isEmpty());
+        filter.includeWords = {"programming"};
+        QCOMPARE(store.markRead(filter, store.counts()->lastId), 1);
+        QVERIFY(readStates(store).value("older").first);
+
+        // One that leaves the view's other rules between the words being
+        // looked for and the mark, unstarred or out of the search, is not
+        // marked.
+        allUnread();
+        const qint64 secondA = articleIdOf(store, "second-a"), secondB = articleIdOf(store, "second-b");
+        QVERIFY(store.setStarred(secondA, true) && store.setStarred(secondB, true));
+        filter = {};
+        filter.starredOnly = true;
+        filter.includeWords = {"second"};
+        Store::filterWriteHook = [] {
+            rawExec(Paths::databaseFile(), "UPDATE items SET is_starred = 0 WHERE guid = 'second-b'");
+        };
+        changes.clear();
+        QCOMPARE(store.markRead(filter, store.counts()->lastId, &changes), 1);
+        QCOMPARE(changes.size(), 1);
+        QCOMPARE(changes.value(0).id, secondA);
+        states = readStates(store);
+        QVERIFY(states.value("second-a").first && !states.value("second-b").first);
+        allUnread();
+        filter = {};
+        filter.query = "second";
+        filter.includeWords = {"second"};
+        Store::filterWriteHook = [secondB] {
+            rawExec(Paths::databaseFile(), QString("DELETE FROM items_fts WHERE rowid = %1").arg(secondB));
+        };
+        changes.clear();
+        QCOMPARE(store.markRead(filter, store.counts()->lastId, &changes), 2);
+        Store::filterWriteHook = nullptr;
+        QCOMPARE(QSet<qint64>({changes.value(0).id, changes.value(1).id}),
+                 QSet<qint64>({secondA, articleIdOf(store, "second-often")}));
+        states = readStates(store);
+        QVERIFY(states.value("second-a").first && !states.value("second-b").first);
     }
 
     void sourceModelListsSavedViews()
