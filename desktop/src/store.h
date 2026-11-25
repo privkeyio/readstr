@@ -260,12 +260,21 @@ public:
     bool applyFilterRules(const std::function<bool()> &superseded = {}, bool *ran = nullptr);
     // Marks read the unread articles the rule `ruleId` marks read (a hide
     // wins), as the user would, reading the rules and the text as they are
-    // then rather than the flags. Returns how many changed, or -1.
-    int markReadByFilter(const QString &ruleId);
+    // then rather than the flags. Like applyFilterRules(), it reads and
+    // works out with no transaction open and writes in short batches, each
+    // only while the rules are the ones it started with and to articles
+    // still unread and as read; it stops when they are not, or when
+    // `stopped` returns true. Returns how many changed, or -1; `marked`
+    // says how many did either way.
+    int markReadByFilter(const QString &ruleId, const std::function<bool()> &stopped = {}, int *marked = nullptr);
 #ifdef READSTR_TESTS
     // Only in the test build: called by applyFilterRules() between two
     // batches, with what it checks for being superseded, on its thread.
     static inline std::function<void(const std::function<bool()> &stopped)> filterBatchHook;
+    // Only in the test build: called by applyFilterRules() and
+    // markReadByFilter() once a batch is read and worked out, before it is
+    // written, on their thread.
+    static inline std::function<void()> filterWriteHook;
 #endif
 
     // Runs `work` in one transaction that commits when it returns true and

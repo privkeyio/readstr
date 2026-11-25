@@ -3553,6 +3553,154 @@ private slots:
         QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1"), 0);
     }
 
+    // Marking read goes in batches, each written only while the rules are
+    // the ones it started with, to articles still unread, shown, and as read
+    // (a NULL read the same as an empty string, as saveItems() reads it).
+    void storeMarksReadByFilterInBatches()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        QList<ParsedItem> items;
+        for (int i = 0; i < 1200; ++i) {
+            ParsedItem item;
+            item.guid = QString::number(i);
+            item.title = (i % 100 ? "weekly " : "weekly spam ") + QString::number(i);
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 1200);
+        using namespace KeywordFilter;
+        const Rule spam = filterRule("spam", Target::Title);
+        const Rule weekly = filterRule("weekly", Target::Title, Type::Word, Action::MarkRead);
+        QVERIFY(store.setFilterRules({spam, weekly}));
+        int batches = 0;
+        Store::filterWriteHook = [&batches] { ++batches; };
+        const auto unhook = qScopeGuard([] { Store::filterWriteHook = nullptr; });
+        QCOMPARE(store.markReadByFilter(weekly.id), 1188);
+        QCOMPARE(batches, 3);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1 AND read_at IS NOT NULL"), 1188);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1 AND title LIKE '%spam%'"), 0);
+        // Stopped, it marks nothing more.
+        QCOMPARE(rawExec(path, "UPDATE items SET is_read = 0, read_at = NULL, author = NULL"), QString());
+        QCOMPARE(store.markReadByFilter(weekly.id, [] { return true; }), 0);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1"), 0);
+
+        // Between reading the first batch and writing it, one article's
+        // author goes from NULL to empty, one's title changes so that it is
+        // hidden, and one is read; before the second, the rule goes.
+        Store other;
+        QVERIFY(other.open(path));
+        batches = 0;
+        QString error;
+        bool removed = false, removing = false;
+        Store::filterWriteHook = [&] {
+            // The other store's pass calls it too.
+            if (removing)
+                return;
+            if (++batches == 1) {
+                for (const char *sql : {"UPDATE items SET author = '' WHERE guid = '1'",
+                                        "UPDATE items SET title = 'weekly spam 2' WHERE guid = '2'",
+                                        "UPDATE items SET is_read = 1 WHERE guid = '3'"})
+                    error += rawExec(path, sql);
+            } else {
+                removing = true;
+                removed = other.setFilterRules({spam});
+                removing = false;
+            }
+        };
+        int marked = -1;
+        QCOMPARE(store.markReadByFilter(weekly.id, {}, &marked), 493);
+        QCOMPARE(marked, 493);
+        QCOMPARE(error, QString());
+        QVERIFY(removed);
+        QCOMPARE(batches, 2);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1"), 494);
+        QCOMPARE(rawCount(path, "SELECT is_read FROM items WHERE guid = '1'"), 1);
+        QCOMPARE(rawCount(path, "SELECT is_read FROM items WHERE guid = '2'"), 0);
+        QCOMPARE(rawCount(path, "SELECT read_at IS NULL FROM items WHERE guid = '3'"), 1);
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1 AND CAST(guid AS INTEGER) >= 500"), 0);
+        // Gone, it marks nothing at all.
+        Store::filterWriteHook = nullptr;
+        QCOMPARE(store.markReadByFilter(weekly.id), 0);
+    }
+
+    // A pass writes the flags of an item whose text a save made NULL from
+    // empty, as saveItems() takes that for no change and keeps the flags it
+    // had, but not those of one whose text did change.
+    void storeRefiltersAnItemWhoseTextWentFromNullToEmpty()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        QList<ParsedItem> items;
+        for (const char *guid : {"a", "b"}) {
+            ParsedItem item;
+            item.guid = guid;
+            item.title = QString("spam ") + guid;
+            item.summary = "words";
+            items << item;
+        }
+        QCOMPARE(store.saveItems(feed, items), 2);
+        QCOMPARE(rawExec(path, "UPDATE items SET author = NULL, content = NULL, url = NULL"), QString());
+        // Saved, with the pass left for later.
+        using namespace KeywordFilter;
+        QVERIFY(store.setFilterRules({filterRule("spam", Target::Any)}, [] { return true; }));
+        QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM filter_state WHERE applied IS NULL"), 1);
+        QString error;
+        Store::filterWriteHook = [&] {
+            for (const char *sql : {"UPDATE items SET author = '', content = '', url = '' WHERE guid = 'a'",
+                                    "UPDATE items SET author = '', summary = 'words!' WHERE guid = 'b'"})
+                error += rawExec(path, sql);
+        };
+        const auto unhook = qScopeGuard([] { Store::filterWriteHook = nullptr; });
+        QVERIFY2(store.applyFilterRules(), qPrintable(store.lastError()));
+        QCOMPARE(error, QString());
+        QCOMPARE(rawCount(path, "SELECT filter_flags FROM items WHERE guid = 'a'"), 1);
+        QCOMPARE(rawCount(path, "SELECT filter_flags FROM items WHERE guid = 'b'"), 0);
+    }
+
+    // A Nostr long-form article with no summary of its own takes the start
+    // of its text as the reader shows it, so a rule meets no link address
+    // the reader hides; one stored with the start of its Markdown as written
+    // reads the same when the rules change. A summary of its own still counts.
+    void storeFiltersALongFormArticleByTheSummaryItShows()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY2(store.open(path), qPrintable(store.lastError()));
+        const qint64 feed = store.addFeed("https://a.invalid/feed", "A");
+        using namespace KeywordFilter;
+        QVERIFY(store.setFilterRules({filterRule("needle", Target::Content)}));
+        const QString markdown = "Read [the story](https://a.invalid/needle).";
+        QList<NostrEvent> events;
+        for (const QJsonObject &json :
+             {signedEvent(30023, markdown, {{"d", "link"}}, 1700000000),
+              signedEvent(30023, "Nothing here.", {{"d", "own"}, {"summary", "A needle, said the author"}}, 1700000100)})
+            events << *NostrEvent::fromJson(json);
+        const QList<ParsedItem> items = NostrSource::longForm(events, "Ada");
+        QCOMPARE(items.size(), 2);
+        QCOMPARE(items.at(1).summary, QString("Read the story."));
+        QCOMPARE(items.at(0).summary, QString("A needle, said the author"));
+        QCOMPARE(store.saveItems(feed, items), 1);
+        const QString link = "SELECT filter_flags FROM items WHERE address LIKE '%:link'";
+        const QString own = "SELECT filter_flags FROM items WHERE address LIKE '%:own'";
+        QCOMPARE(rawCount(path, link), 0);
+        QCOMPARE(rawCount(path, own), 1);
+        QCOMPARE(rawExec(path, QString("UPDATE items SET summary = '%1' WHERE address LIKE '%:link'")
+                                   .arg(FeedParser::summarize(FeedParser::cleanText(markdown)))),
+                 QString());
+        QVERIFY(store.setFilterRules({filterRule("needle", Target::Content, Type::Contains, Action::Highlight)}));
+        QCOMPARE(rawCount(path, own), 2);
+        QVERIFY(store.setFilterRules({filterRule("needle", Target::Content)}));
+        QCOMPARE(rawCount(path, link), 0);
+        QCOMPARE(rawCount(path, own), 1);
+    }
+
     // A pass that fails after some batches were written still shows them.
     void backendReloadsAfterAFilterPassFailsPartWay()
     {
@@ -4202,6 +4350,9 @@ private slots:
                     QThread::msleep(1);
             };
             const auto unhook = qScopeGuard([] { Store::filterBatchHook = nullptr; });
+            // Even when a check fails, the worker stops and is joined before
+            // the hook and what it holds go.
+            const auto join = qScopeGuard([&backend] { backend.reset(); });
             QVERIFY(backend->saveFilterRule(-1, needle));
             QVERIFY(reached.tryAcquire(1, 60000));
             QCOMPARE(rawCount(path, applied), 1);

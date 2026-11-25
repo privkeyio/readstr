@@ -2625,16 +2625,20 @@ void Backend::markFilterMatchesRead(const QString &ruleId) {
         return;
     const QString failure = tr("Cannot mark the matching articles read: %1");
     writeOnWorker(
-        [ruleId, readsPending = readsPublishedFor()](Store &store) {
-            const int marked = store.markReadByFilter(ruleId);
+        [ruleId, readsPending = readsPublishedFor(), quitting = m_quitting](Store &store) {
+            // Some batches may be written before one fails.
+            int marked = 0;
+            const int result = store.markReadByFilter(ruleId, [quitting] { return quitting->load(); }, &marked);
             if (marked > 0)
                 markPending(store, readsPending, Sync::readStatusKind);
-            return marked;
+            return result;
         },
         failure,
         [this, failure](const WriteResult &result) {
             if (!result.error.isEmpty()) {
                 setStatus(failure.arg(result.error), true);
+                reloadCounts();
+                loadArticles();
                 return;
             }
             setStatus(tr("Marked %n articles read", nullptr, result.changed));

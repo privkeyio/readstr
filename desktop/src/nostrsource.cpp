@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "fetcher.h"
+#include "markdown.h"
 #include "nip19.h"
 #include "sanitizer.h"
 
@@ -127,8 +128,10 @@ QList<ParsedItem> longForm(const QList<NostrEvent> &events, const QString &autho
         item.author = author;
         item.content = event->content;
         const QString summary = FeedParser::cleanText(event->tag(QStringLiteral("summary")).left(4000));
-        item.summary = FeedParser::summarize(summary.isEmpty() ? FeedParser::cleanText(event->content.left(4000))
-                                                               : summary);
+        // With no summary of its own, the start of its text as the reader
+        // shows it, so no link address or Markdown punctuation is in it.
+        item.summary = FeedParser::summarize(
+            summary.isEmpty() ? FeedParser::cleanText(Markdown::plainText(event->content)) : summary);
         item.published = publishedAt(*event);
         const QString naddr = Nip19::naddr(longFormKind, event->pubkey, d);
         if (!naddr.isEmpty())

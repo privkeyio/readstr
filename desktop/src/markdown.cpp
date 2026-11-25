@@ -6,6 +6,7 @@
 #include <QTextDocument>
 #include <algorithm>
 
+#include "feedparser.h"
 #include "nip19.h"
 #include "sanitizer.h"
 
@@ -203,5 +204,11 @@ QString toRichText(const QString &markdown, const Sanitizer::Images &images) {
     const QString html = Sanitizer::toRichText(document.toHtml(), QUrl(), options).trimmed();
     // The sanitizer ends in the same ellipsis when it cut the HTML short.
     return cut && !html.endsWith(ellipsis) ? html + ellipsis : html;
+}
+
+QString plainText(const QString &markdown) {
+    QString text = FeedParser::plainText(toRichText(markdown), FeedParser::InlineTags::Join);
+    text.remove(QChar(0x200B));
+    return text;
 }
 }

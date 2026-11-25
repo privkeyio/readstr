@@ -34,6 +34,9 @@ inline constexpr int maxTableColumns = 64;
 inline constexpr int maxTableCells = 10000;
 
 QString toRichText(const QString &markdown, const Sanitizer::Images &images = {});
+// The words of `markdown` as toRichText() shows them, without its markup,
+// link addresses, or the sanitizer's breaks in long words.
+QString plainText(const QString &markdown);
 // Whether QTextDocument lays `markdown` out quickly: its list items, table
 // rows, columns, and cells are within the caps.
 bool withinCaps(const QString &markdown);
