@@ -555,6 +555,8 @@ field.
 | `Ctrl+R` | Refresh all feeds |
 | `Ctrl+N` | Add a feed (its address, a site's, or a Nostr npub) |
 | `Ctrl+Shift+A` | Mark everything in the view read |
+| `Ctrl+Z` | Undo the last change: marking read or unread, starring, marking the view or a rule's matches read, unsubscribing, or changing the filter rules |
+| `Ctrl+Shift+Z` | Redo what was undone |
 | `Ctrl+O` | Import OPML |
 | `Ctrl+Shift+E` | Export OPML |
 | `Ctrl+F` | Search the articles |
@@ -562,6 +564,26 @@ field.
 | `?` | Show or hide the shortcuts |
 | `Esc` | Close the shortcuts, or clear the search |
 | `Q`, `Ctrl+Q` | Quit |
+
+### Undo
+
+`Ctrl+Z` keeps the last 100 changes while the window is open, and about
+64 MiB of what they need to be undone: past that, the oldest unsubscribes
+and markings of many articles go first. A feed of more than 32 MiB or 20,000
+articles is unsubscribed with no undo, and so are markings of more than
+about 550,000 articles read, which the status bar says. `Ctrl+Z` and
+`Ctrl+Shift+Z` work in the Filters dialog too, except while typing in its
+pattern field, which keeps them for its own text.
+
+An undo is a change like any other, published as one, so it does not take
+back what other devices already pulled. Undoing a mark read that was
+published marks the articles unread here and publishes that, but another
+device keeps them read, and a read status it publishes before it pulls this
+one's marks them read here again on the next pull. Undoing an
+unsubscribe subscribes again, but a device that published a subscription list
+carrying the feed's deleted mark before it pulled this one's new list can
+keep the feed off the lists this machine publishes after it pulls that one,
+though the feed stays in the library.
 
 ## License
 

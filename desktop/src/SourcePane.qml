@@ -88,6 +88,8 @@ Rectangle {
                     }
                     MenuItem { text: qsTr("Refresh all feeds"); enabled: !backend.refreshing; onTriggered: backend.refreshAll() }
                     MenuItem { text: qsTr("Mark everything in the view read"); onTriggered: backend.markViewRead() }
+                    MenuItem { text: qsTr("Undo"); enabled: backend.canUndo; onTriggered: backend.undo() }
+                    MenuItem { text: qsTr("Redo"); enabled: backend.canRedo; onTriggered: backend.redo() }
                     MenuSeparator {}
                     MenuItem { text: qsTr("Import OPML…"); onTriggered: backend.importOpml() }
                     MenuItem { text: qsTr("Export OPML…"); onTriggered: backend.exportOpml() }

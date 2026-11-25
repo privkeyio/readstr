@@ -152,10 +152,27 @@ class Backend : public QObject {
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool statusError READ statusError NOTIFY statusChanged)
 
+    // Whether undo() and redo() have something to undo or redo.
+    Q_PROPERTY(bool canUndo READ canUndo NOTIFY undoChanged)
+    Q_PROPERTY(bool canRedo READ canRedo NOTIFY undoChanged)
+
 public:
     // The window shows at most this many articles per view, newest first.
     static constexpr int viewLimit = 2000;
     static constexpr int autoRefreshMinutes = 30;
+    // The most actions undo() keeps, the oldest going first.
+    static constexpr int maxUndo = 100;
+    // About how much memory the undo and redo history may hold in all, the
+    // feeds unsubscribed and the read changes it keeps to undo with: past
+    // it, the oldest of those go first. A feed of more than snapshotBytes,
+    // or snapshotItems articles, is unsubscribed with no undo, which also
+    // keeps its restore, one transaction, short.
+    static constexpr qsizetype undoBytes = 64 * 1024 * 1024;
+    static constexpr qsizetype snapshotBytes = 32 * 1024 * 1024;
+    static constexpr int snapshotItems = 20000;
+    // What the history counts for each article a read change lists. A
+    // marking of more than snapshotBytes' worth is done with no undo.
+    static constexpr qsizetype readChangeBytes = 60;
 
     // `picker` answers the OPML dialogs; without one they report that.
     explicit Backend(FilePicker *picker = nullptr, QObject *parent = nullptr);
@@ -228,6 +245,9 @@ public:
 
     QString status() const { return m_status; }
     bool statusError() const { return m_statusError; }
+
+    bool canUndo() const { return !m_undo.isEmpty(); }
+    bool canRedo() const { return !m_redo.isEmpty(); }
 
     Q_INVOKABLE void selectSource(int row);
     Q_INVOKABLE void moveSource(int step);
@@ -320,6 +340,13 @@ public:
     // Refreshes now and then every autoRefreshMinutes, give or take 10%,
     // for as long as the window is open.
     Q_INVOKABLE void startAutoRefresh();
+    // Undoes the last action that can be undone (toggling read or starred,
+    // marking the view or a rule's matches read, unsubscribing, changing
+    // the filter rules), or redoes the last one undone, through the same
+    // writes and publishing as the action, saying in the status bar what
+    // was undone or redone. A new action clears what could be redone.
+    Q_INVOKABLE void undo();
+    Q_INVOKABLE void redo();
 
     void importFrom(const QUrl &url);
     void exportTo(const QUrl &url);
@@ -351,6 +378,12 @@ public:
     void setImageLimits(const Thumbnails::Limits &limits) { m_images->setLimits(limits); }
     void setFetchLimits(const Fetcher::Limits &limits) { m_fetcher->setLimits(limits); }
     void setRelayLimits(const RelayPool::Limits &limits) { m_relays->setLimits(limits); }
+    // Lowers undoBytes, snapshotBytes, and snapshotItems, so tests reach them.
+    void setUndoBudget(qsizetype history, qsizetype snapshot, int items) {
+        m_undoBytes = history;
+        m_snapshotBytes = snapshot;
+        m_snapshotItems = items;
+    }
     // How long a change waits for more before it is published: a read, which
     // comes in bursts and resends the whole list, longer, as on the web;
     // but never more than `maxWaitMs` after the first change waiting.
@@ -384,6 +417,7 @@ signals:
     void publishChanged();
     void filtersChanged();
     void statusChanged();
+    void undoChanged();
 
 private:
     // Runs `work` on the worker thread with its Store, then `done` with the
@@ -394,6 +428,20 @@ private:
     struct WriteResult {
         int changed = 0;
         QString error;
+        // Not run, as an earlier write of the same undo command failed.
+        bool skipped = false;
+    };
+    // What the worker and this thread share about an undo command.
+    struct UndoState {
+        // Set once the action, or an undo or redo of it, failed or left
+        // nothing to undo: the writes of it queued after that skip, and the
+        // command is forgotten without a word.
+        std::atomic<bool> failed = false;
+        // About how much memory what it keeps to undo with takes.
+        std::atomic<qsizetype> bytes = 0;
+        // Set, here, by an undo that failed in a way a later try may not,
+        // so the command goes back to be undone again.
+        bool retry = false;
     };
     // A write the user asked for; `work` returns how many rows it changed,
     // or -1 with the reason in the Store's lastError(). `failure` describes
@@ -402,26 +450,112 @@ private:
         enum State { Queued, Saved, Failed };
         std::function<int(Store &)> work;
         QString failure;
+        // The undo command it is a step of, if any.
+        std::shared_ptr<UndoState> undo;
         // Set on the worker before `state`, read once it has stopped.
         QString error;
         std::atomic<int> state = Queued;
     };
+    // Runs `write` on `store`, on the worker or, at closing, here: skipped
+    // once write.undo->failed is set, which it sets when `work` fails.
+    static WriteResult runWrite(UserWrite &write, Store &store);
+    // With `undo`, skips `work` once undo->failed is set, and sets it when
+    // `work` fails.
     void writeOnWorker(std::function<int(Store &)> work, const QString &failure,
-                       std::function<void(const WriteResult &)> done);
+                       std::function<void(const WriteResult &)> done,
+                       const std::shared_ptr<UndoState> &undo = {});
     // Flags shown before the worker has saved them.
     struct PendingFlags {
         bool read = false;
         bool starred = false;
         int writes = 0;
+        // `read` is an undo's guess, made before the worker read what the
+        // article held, so M waits for the flag as saved instead.
+        bool readGuessed = false;
+        // M was pressed while `read` was a guess.
+        bool toggleRead = false;
     };
+    // Tells an action, or its undo or redo, whether its write was saved.
+    using Finished = std::function<void(bool ok)>;
+    // An action the user can undo: what it did, as the status bar says it
+    // after "Undid:" or "Redid:", and how to undo it (`undo` true) or do it
+    // again. That runs through the worker like the action, says in the
+    // status bar why it failed, if it did, and then calls the Finished.
+    struct UndoCommand {
+        std::function<QString()> label;
+        std::function<void(bool undo, const Finished &finished)> apply;
+        std::shared_ptr<UndoState> state = std::make_shared<UndoState>();
+        // Whether its undo can fail in a way a later try may not, as a
+        // restore can, which holds the history still until it is done.
+        bool mayRetry = false;
+    };
+    // Keeps the command of an action just asked for, which clears what
+    // could be redone.
+    void pushUndo(const std::shared_ptr<UndoCommand> &command);
+    // Forgets a command whose action, undo, or redo failed or changed
+    // nothing, as there is nothing left that it could reverse.
+    void dropUndo(const std::shared_ptr<UndoCommand> &command);
+    // A Finished that drops `command` when the action's write failed.
+    Finished dropUndoOnFailure(const std::shared_ptr<UndoCommand> &command);
+    // Keeps the command of marking articles read, which an undo reverses
+    // whatever came since: `changes` the articles the worker marks, and
+    // `count` how many, once it is done.
+    std::shared_ptr<UndoCommand> pushReadsUndo(const std::shared_ptr<const QList<ReadChange>> &changes,
+                                               const std::shared_ptr<const qsizetype> &count);
+    // Once the marking is done, forgets its command if it marked nothing or
+    // more than maxReadChanges(), which the store says in `tooLarge`, or
+    // else counts it in the history's bytes. Returns whether it was too
+    // large to undo.
+    bool keepReadsUndo(const std::shared_ptr<UndoCommand> &command, qsizetype count, bool tooLarge);
+    // Forgets the oldest commands that keep something to undo with, undo's
+    // before redo's, until the history is within m_undoBytes.
+    void trimUndo();
+    void undoOrRedo(bool undo);
+    static QString undoFailure(bool undo);
+
     void applyPending(Article &article) const;
-    void saveFlags(const Article &before, bool read, bool starred, const QString &failure);
+    // `writeRead`, when set, writes the read flag in place of setRead(), as
+    // an undo does to put back the read time too. `finished` is called once
+    // the write is done, or at once when there is nothing to write.
+    // A write that is the read time's own, as an undo's is, is made even
+    // when the flag is as asked already. `writeStar`, when set, writes the
+    // starred flag in place of setStarred().
+    void saveFlags(const Article &before, bool read, bool starred, const QString &failure,
+                   const std::function<bool(Store &)> &writeRead = {}, const Finished &finished = {},
+                   const std::shared_ptr<UndoState> &undo = {}, const std::function<bool(Store &)> &writeStar = {});
     void showFlags(qint64 id, bool read, bool starred);
+    // Article `id` with the flags the window shows for it, or, once it is
+    // gone, one with only its id and the flags opposite to `read` and
+    // `starred`, so that the write giving it those fails as for any
+    // missing article.
+    Article flagsOf(qint64 id, bool read, bool starred);
+    // Gives article `id` the read flag and the read time `change` recorded
+    // from before it, with `undo`, or from after it. `change` is filled in
+    // on the worker, so it is read here only once `captured` is set, and
+    // until then `read` is shown, a guess with `undo`.
+    void restoreRead(qint64 id, bool read, const std::shared_ptr<const ReadChange> &change, bool captured,
+                     bool undo, const std::shared_ptr<UndoState> &state, const Finished &finished);
+    void restoreStar(qint64 id, bool starred, bool undo, const std::shared_ptr<UndoState> &state,
+                     const Finished &finished);
+    // Gives every article of `changes` its read state from before them, or
+    // from after them, marking the read status to publish as marking read
+    // does.
+    void restoreReads(const std::shared_ptr<const QList<ReadChange>> &changes, bool undo,
+                      const std::shared_ptr<UndoState> &state, const Finished &finished);
+    // Deletes the feed, keeping what it deletes in `snapshot` for an undo,
+    // within the snapshot budget, and puts it back from there.
+    void removeSubscription(qint64 feedId, const QString &title, const std::shared_ptr<FeedSnapshot> &snapshot,
+                            const std::shared_ptr<UndoState> &state, const Finished &finished);
+    void restoreSubscription(qint64 feedId, const std::shared_ptr<const FeedSnapshot> &snapshot,
+                             const std::shared_ptr<UndoState> &state, const Finished &finished);
 
     void setStatus(const QString &message, bool error = false);
     void loadFilterRules();
     // Saves m_filterRules, then shows the library as they leave it.
-    void saveFilterRules();
+    void saveFilterRules(const Finished &finished = {}, const std::shared_ptr<UndoState> &undo = {});
+    // Saves m_filterRules, changed by the user from `before`, as an action
+    // undo() can undo.
+    void changeFilterRules(const QList<KeywordFilter::Rule> &before, std::function<QString()> label);
     void reloadLibrary();
     void reloadCounts();
     void loadArticles();
@@ -441,7 +575,6 @@ private:
     // itself right after.
     bool updateImages(bool announce = true);
     void clearLocalImages();
-    void setFlags(bool read, bool starred);
     // A local file path for a file: URL, or empty for anything else
     // (another host's file: URL included).
     static QString localPath(const QUrl &url);
@@ -602,8 +735,10 @@ private:
     // refresh racing its unsubscribe, which is no news to anyone. A failed
     // delete takes its id out again.
     QSet<qint64> m_unsubscribed;
-    // Feeds whose delete the worker has not done yet, hidden meanwhile.
-    QSet<qint64> m_removing;
+    // Feeds whose delete the worker has not done yet, hidden meanwhile, with
+    // how many deletes are waiting: an unsubscribe, its undo, and its redo
+    // can all be queued, and the feed stays hidden until the last is done.
+    QHash<qint64, int> m_removing;
     bool m_fetchNewFeeds = false;
     // A refresh of every feed pulls the sync events once it is done, so
     // their read GUIDs find the articles it brought.
@@ -718,4 +853,21 @@ private:
 
     QString m_status;
     bool m_statusError = false;
+
+    // The actions undo() undoes, newest last, at most maxUndo, and those it
+    // undid, which redo() does again, the last undone last.
+    QList<std::shared_ptr<UndoCommand>> m_undo;
+    QList<std::shared_ptr<UndoCommand>> m_redo;
+    qsizetype m_undoBytes = undoBytes;
+    qsizetype m_snapshotBytes = snapshotBytes;
+    int m_snapshotItems = snapshotItems;
+    // The finishes of filter rule saves skipped for a later one, which say
+    // whether that one saved them, as it saves their changes too.
+    QList<Finished> m_filterSavesWaiting;
+    // The undo of an unsubscribe the worker has not done yet, if any.
+    std::shared_ptr<UndoCommand> m_restoring;
+    // How many actions pushUndo() has kept, so a restore that failed for
+    // now goes back under those asked for since.
+    quint64 m_pushes = 0;
+    qsizetype maxReadChanges() const { return m_snapshotBytes / readChangeBytes; }
 };

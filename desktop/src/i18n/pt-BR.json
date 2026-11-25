@@ -192,5 +192,21 @@
   "Enter a word, a phrase, or a pattern": "Digite uma palavra, uma frase ou um padrão",
   "Regular expressions here cannot use lookarounds or backreferences": "As expressões regulares aqui não podem usar lookarounds nem retrorreferências",
   "This rule marks new articles read as they arrive. Mark the articles already in the library that it matches read too?": "Esta regra marca os artigos novos como lidos conforme eles chegam. Marcar também como lidos os artigos que já estão na biblioteca e que correspondem a ela?",
-  "Rules hide, highlight, or mark read the articles whose title, text, or author match. They stay on this computer and are never synced.": "As regras ocultam, destacam ou marcam como lidos os artigos cujo título, texto ou autor correspondam. Elas ficam neste computador e nunca são sincronizadas."
+  "Rules hide, highlight, or mark read the articles whose title, text, or author match. They stay on this computer and are never synced.": "As regras ocultam, destacam ou marcam como lidos os artigos cujo título, texto ou autor correspondam. Elas ficam neste computador e nunca são sincronizadas.",
+  "Undo": "Desfazer",
+  "Undo the last change": "Desfazer a última alteração",
+  "Redo what was undone": "Refazer o que foi desfeito",
+  "Nothing to undo": "Nada para desfazer",
+  "Nothing left to undo: those articles are gone": "Nada mais para desfazer: esses artigos não existem mais",
+  "Undid: %1": "Desfeito: %1",
+  "Cannot undo: %1": "Não é possível desfazer: %1",
+  "marked an article unread": "artigo marcado como não lido",
+  "unsubscribed from %1": "assinatura de %1 cancelada",
+  "Unsubscribed from %1 (too large to undo)": "Assinatura de %1 cancelada (grande demais para desfazer)",
+  "Marked %n articles read (too large to undo)": {
+    "one": "%n artigo marcado como lido (demais para desfazer)",
+    "many": "%n de artigos marcados como lidos (demais para desfazer)",
+    "other": "%n artigos marcados como lidos (demais para desfazer)"
+  },
+  "Still undoing: %1": "Ainda desfazendo: %1"
 }

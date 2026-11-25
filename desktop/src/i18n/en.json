@@ -34,5 +34,13 @@
   "%n feeds are left out of the subscription list, as their addresses are too long": {
     "one": "%n feed is left out of the subscription list, as its address is too long",
     "other": "%n feeds are left out of the subscription list, as their addresses are too long"
+  },
+  "marked %n articles read": {
+    "one": "marked %n article read",
+    "other": "marked %n articles read"
+  },
+  "Marked %n articles read (too large to undo)": {
+    "one": "Marked %n article read (too large to undo)",
+    "other": "Marked %n articles read (too large to undo)"
   }
 }

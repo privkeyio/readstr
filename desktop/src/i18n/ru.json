@@ -313,5 +313,39 @@
   "Regular expressions here cannot use lookarounds or backreferences": "Регулярные выражения здесь не могут использовать опережающие и ретроспективные проверки или обратные ссылки",
   "Cannot save the filter rules: %1": "Не удаётся сохранить правила фильтров: %1",
   "Cannot apply the filter rules: %1": "Не удаётся применить правила фильтрации: %1",
-  "Cannot mark the matching articles read: %1": "Не удаётся отметить подходящие статьи прочитанными: %1"
+  "Cannot mark the matching articles read: %1": "Не удаётся отметить подходящие статьи прочитанными: %1",
+  "Undo": "Отменить",
+  "Redo": "Повторить",
+  "Undo the last change": "Отменить последнее изменение",
+  "Redo what was undone": "Повторить отменённое",
+  "Nothing to undo": "Нечего отменять",
+  "Nothing to redo": "Нечего повторять",
+  "Nothing left to undo: those articles are gone": "Нечего больше отменять: этих статей уже нет",
+  "Nothing left to redo: those articles are gone": "Нечего больше повторять: этих статей уже нет",
+  "Undid: %1": "Отменено: %1",
+  "Redid: %1": "Повторено: %1",
+  "Cannot undo: %1": "Не удаётся отменить: %1",
+  "Cannot redo: %1": "Не удаётся повторить: %1",
+  "marked an article read": "отметка статьи как прочитанной",
+  "marked an article unread": "отметка статьи как непрочитанной",
+  "starred an article": "добавление статьи в избранное",
+  "unstarred an article": "удаление статьи из избранного",
+  "marked %n articles read": {
+    "one": "отметка %n статьи как прочитанной",
+    "few": "отметка %n статей как прочитанных",
+    "many": "отметка %n статей как прочитанных",
+    "other": "отметка %n статьи как прочитанной"
+  },
+  "unsubscribed from %1": "отписка от %1",
+  "added a filter rule": "добавление правила фильтра",
+  "changed a filter rule": "изменение правила фильтра",
+  "removed a filter rule": "удаление правила фильтра",
+  "Unsubscribed from %1 (too large to undo)": "Вы отписались от %1 (слишком много данных, чтобы отменить)",
+  "Marked %n articles read (too large to undo)": {
+    "one": "%n статья отмечена как прочитанная (слишком много, чтобы отменить)",
+    "few": "%n статьи отмечены как прочитанные (слишком много, чтобы отменить)",
+    "many": "%n статей отмечено как прочитанные (слишком много, чтобы отменить)",
+    "other": "%n статьи отмечены как прочитанные (слишком много, чтобы отменить)"
+  },
+  "Still undoing: %1": "Ещё отменяется: %1"
 }

@@ -9,6 +9,7 @@
 #include <QStringList>
 #include <QVariant>
 #include <functional>
+#include <limits>
 #include <optional>
 
 #include "feedparser.h"
@@ -63,6 +64,34 @@ struct Article {
     QString feedUrl;
     // A keyword filter rule highlights it.
     bool highlighted = false;
+};
+
+// An article's read flag and when it was marked read, null when it was not
+// or the library kept no time for it.
+struct ReadState {
+    bool read = false;
+    std::optional<qint64> readAt;
+};
+
+// What a write did to one article's read state, so that it can be undone,
+// or done again, exactly.
+struct ReadChange {
+    qint64 id = 0;
+    ReadState before, after;
+};
+
+// A feed as removeFeed() deleted it: its row and its items' rows, read and
+// starred flags and read times included, column by column, and the name of
+// its category, so that restoreFeed() can put it back under the same ids.
+struct FeedSnapshot {
+    qint64 id = 0;
+    QString category;
+    QStringList feedColumns;
+    QVariantList feed;
+    QStringList itemColumns;
+    QList<QVariantList> items;
+    // About how much memory it takes: its text and a little for each value.
+    qsizetype bytes = 0;
 };
 
 // The npub the library syncs with. Empty when none is set.
@@ -160,7 +189,21 @@ public:
     // URLs that differ only in scheme, host case, a trailing slash, or query
     // order count as the same feed, as in the web app.
     qint64 addFeed(const QString &url, const QString &title, const QString &category = {}, bool *created = nullptr);
-    bool removeFeed(qint64 id);
+    // With `snapshot`, keeps what it deletes there first, in the same
+    // transaction, unless that is more than `maxBytes` or `maxItems`
+    // articles: the feed is deleted all the same, and `snapshot` left empty.
+    bool removeFeed(qint64 id, FeedSnapshot *snapshot = nullptr,
+                    qsizetype maxBytes = std::numeric_limits<qsizetype>::max(),
+                    int maxItems = std::numeric_limits<int>::max());
+    // Puts a feed removeFeed() deleted back, with its items as they were,
+    // as a subscription made now: its created_at is now, so a subscription
+    // list published since, marking it deleted, does not keep it off the
+    // next one. The filter rules as they are now decide what its items
+    // hide and highlight, and an article the last synced reads list has is
+    // read, as when a refresh brings it. Fails when the feed's URL is
+    // subscribed again, or `snapshot` holds no feed, setting `lasting`, as
+    // no later try changes that.
+    bool restoreFeed(const FeedSnapshot &snapshot, bool *lasting = nullptr);
     bool updateFeedDetails(qint64 id, const ParsedFeed &parsed);
     // A Nostr author's profile as the feed's details, when `revision` (its
     // created_at) is newer than the profile they came from.
@@ -190,9 +233,28 @@ public:
     bool setRead(qint64 articleId, bool read);
     // Marks every unread article the filter matches (its limit aside) read,
     // up to `upToId`, so articles that arrived after the view was listed stay
-    // unread. Returns how many changed, or -1 on failure.
-    int markRead(const ArticleFilter &filter, qint64 upToId);
+    // unread. Returns how many changed, or -1 on failure; `changes` gets
+    // each article it marked, with its read state before and after, unless
+    // that is more than `maxChanges`: then it gets none, the articles are
+    // marked all the same, and `overflow` is set.
+    int markRead(const ArticleFilter &filter, qint64 upToId, QList<ReadChange> *changes = nullptr,
+                 qsizetype maxChanges = std::numeric_limits<qsizetype>::max(), bool *overflow = nullptr);
     bool setStarred(qint64 articleId, bool starred);
+    // As setRead(), with `change` getting the article's read state before
+    // and after, read in the same transaction as the write.
+    bool setRead(qint64 articleId, bool read, ReadChange *change);
+    // As setStarred(), with `was` getting whether the article was starred,
+    // read in the same transaction as the write.
+    bool setStarred(qint64 articleId, bool starred, bool *was);
+    // Null, with lastError() set, when there is no such article.
+    std::optional<ReadState> readState(qint64 articleId);
+    // Gives the article its read flag and read time as `state` has them;
+    // fails when there is no such article.
+    bool setReadState(qint64 articleId, const ReadState &state);
+    // Gives each article of `changes` its read state from before the
+    // change, with `undo`, or from after it, in one transaction, skipping
+    // any that are gone. Returns how many it found, or -1 on failure.
+    int restoreReadStates(const QList<ReadChange> &changes, bool undo);
 
     // Empty, with lastError() set, when it cannot be read.
     SyncAccount syncAccount();
@@ -265,8 +327,13 @@ public:
     // only while the rules are the ones it started with and to articles
     // still unread and as read; it stops when they are not, or when
     // `stopped` returns true. Returns how many changed, or -1; `marked`
-    // says how many did either way.
-    int markReadByFilter(const QString &ruleId, const std::function<bool()> &stopped = {}, int *marked = nullptr);
+    // says how many did either way, and `changes` which they were, with
+    // their read state before and after, batch by committed batch. Past
+    // `maxChanges` of those, `changes` is emptied and gets no more, the
+    // marking goes on, and `overflow` is set.
+    int markReadByFilter(const QString &ruleId, const std::function<bool()> &stopped = {}, int *marked = nullptr,
+                         QList<ReadChange> *changes = nullptr,
+                         qsizetype maxChanges = std::numeric_limits<qsizetype>::max(), bool *overflow = nullptr);
 #ifdef READSTR_TESTS
     // Only in the test build: called by applyFilterRules() between two
     // batches, with what it checks for being superseded, on its thread.
