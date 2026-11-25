@@ -708,9 +708,11 @@ void Backend::saveFlags(const Article &before, bool read, bool starred, const QS
             if (finished)
                 finished(result.error.isEmpty() && !result.skipped);
             const auto pending = m_pendingFlags.find(id);
+            bool toggle = false;
             if (pending != m_pendingFlags.end()) {
                 if (--pending->writes > 0)
                     return;
+                toggle = pending->toggleRead;
                 m_pendingFlags.erase(pending);
             }
             // The library has the flags asked for now, or the old ones back
@@ -724,6 +726,10 @@ void Backend::saveFlags(const Article &before, bool read, bool starred, const QS
                 return;
             }
             reloadCounts();
+            // M pressed while an undo's guess was shown toggles the flag the
+            // library has.
+            if (toggle && m_article.id == id)
+                toggleRead();
         },
         undo);
 }
@@ -732,19 +738,33 @@ void Backend::toggleRead() {
     if (!m_storeOpen || !m_article.id)
         return;
     const qint64 id = m_article.id;
+    const auto pending = m_pendingFlags.find(id);
+    if (pending != m_pendingFlags.end() && pending->readGuessed) {
+        pending->toggleRead = !pending->toggleRead;
+        return;
+    }
     const bool read = !m_article.read;
     // The read times before and after, which only the worker knows.
     auto change = std::make_shared<ReadChange>(ReadChange{id, {!read, std::nullopt}, {read, std::nullopt}});
+    // Set here once the worker has filled in `change`.
+    auto captured = std::make_shared<bool>(false);
     auto command = std::make_shared<UndoCommand>();
     command->label = [read] { return read ? tr("marked an article read") : tr("marked an article unread"); };
-    command->apply = [this, id, read, change, state = command->state](bool undo, const Finished &finished) {
-        restoreRead(id, undo ? !read : read, change, undo, state, finished);
+    command->apply = [this, id, read, change, captured, state = command->state](bool undo,
+                                                                               const Finished &finished) {
+        restoreRead(id, undo ? !read : read, change, *captured, undo, state, finished);
     };
     pushUndo(command);
     saveFlags(
         m_article, read, m_article.starred, tr("Cannot change the article: %1"),
         [change](Store &store) { return store.setRead(change->id, change->after.read, change.get()); },
-        dropUndoOnFailure(command), command->state);
+        [this, command, captured](bool ok) {
+            if (ok)
+                *captured = true;
+            else
+                dropUndo(command);
+        },
+        command->state);
 }
 
 void Backend::toggleStar() {
@@ -790,13 +810,19 @@ Article Backend::flagsOf(qint64 id, bool read, bool starred) {
     return *article;
 }
 
-void Backend::restoreRead(qint64 id, bool read, const std::shared_ptr<const ReadChange> &change, bool undo,
-                          const std::shared_ptr<UndoState> &state, const Finished &finished) {
+void Backend::restoreRead(qint64 id, bool read, const std::shared_ptr<const ReadChange> &change, bool captured,
+                          bool undo, const std::shared_ptr<UndoState> &state, const Finished &finished) {
+    // Another window may have changed the flag before the action read it.
+    if (captured)
+        read = (undo ? change->before : change->after).read;
     const Article before = flagsOf(id, read, false);
     saveFlags(
         before, read, before.starred, undoFailure(undo),
         [change, undo](Store &store) { return store.setReadState(change->id, undo ? change->before : change->after); },
         finished, state);
+    const auto pending = m_pendingFlags.find(id);
+    if (!captured && undo && pending != m_pendingFlags.end())
+        pending->readGuessed = true;
 }
 
 void Backend::restoreStar(qint64 id, bool starred, bool undo, const std::shared_ptr<UndoState> &state,
@@ -1027,9 +1053,12 @@ void Backend::markViewRead() {
     auto overflow = std::make_shared<bool>(false);
     const auto command = pushReadsUndo(changes, count);
     writeOnWorker(
-        [filter, upToId, changes, overflow, maxChanges = maxReadChanges(),
-         readsPending = readsPublishedFor()](Store &store) {
+        [filter, upToId, changes, overflow, maxChanges = maxReadChanges(), readsPending = readsPublishedFor(),
+         state = command->state](Store &store) {
             const int marked = store.markRead(filter, upToId, changes.get(), maxChanges, overflow.get());
+            // An undo queued meanwhile has nothing to put back, and skips.
+            if (*overflow)
+                state->failed = true;
             if (marked > 0)
                 markPending(store, readsPending, Sync::readStatusKind);
             return marked;
@@ -3024,12 +3053,15 @@ void Backend::markFilterMatchesRead(const QString &ruleId) {
     const auto command = pushReadsUndo(changes, count);
     writeOnWorker(
         [ruleId, changes, overflow, maxChanges = maxReadChanges(), readsPending = readsPublishedFor(),
-         quitting = m_quitting](Store &store) {
+         quitting = m_quitting, state = command->state](Store &store) {
             // Some batches may be written before one fails.
             int marked = 0;
             const int result =
                 store.markReadByFilter(ruleId, [quitting] { return quitting->load(); }, &marked, changes.get(),
                                        maxChanges, overflow.get());
+            // An undo queued meanwhile has nothing to put back, and skips.
+            if (*overflow)
+                state->failed = true;
             if (marked > 0)
                 markPending(store, readsPending, Sync::readStatusKind);
             return result;

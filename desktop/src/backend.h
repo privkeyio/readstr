@@ -469,6 +469,11 @@ private:
         bool read = false;
         bool starred = false;
         int writes = 0;
+        // `read` is an undo's guess, made before the worker read what the
+        // article held, so M waits for the flag as saved instead.
+        bool readGuessed = false;
+        // M was pressed while `read` was a guess.
+        bool toggleRead = false;
     };
     // Tells an action, or its undo or redo, whether its write was saved.
     using Finished = std::function<void(bool ok)>;
@@ -524,11 +529,12 @@ private:
     // `starred`, so that the write giving it those fails as for any
     // missing article.
     Article flagsOf(qint64 id, bool read, bool starred);
-    // Gives article `id` the read flag `read` and the read time `change`
-    // recorded from before it, with `undo`, or from after it. `change` is
-    // filled in on the worker, so it is only read there.
-    void restoreRead(qint64 id, bool read, const std::shared_ptr<const ReadChange> &change, bool undo,
-                     const std::shared_ptr<UndoState> &state, const Finished &finished);
+    // Gives article `id` the read flag and the read time `change` recorded
+    // from before it, with `undo`, or from after it. `change` is filled in
+    // on the worker, so it is read here only once `captured` is set, and
+    // until then `read` is shown, a guess with `undo`.
+    void restoreRead(qint64 id, bool read, const std::shared_ptr<const ReadChange> &change, bool captured,
+                     bool undo, const std::shared_ptr<UndoState> &state, const Finished &finished);
     void restoreStar(qint64 id, bool starred, bool undo, const std::shared_ptr<UndoState> &state,
                      const Finished &finished);
     // Gives every article of `changes` its read state from before them, or

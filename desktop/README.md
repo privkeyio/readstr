@@ -571,7 +571,9 @@ field.
 64 MiB of what they need to be undone: past that, the oldest unsubscribes
 and markings of many articles go first. A feed of more than 32 MiB or 20,000
 articles is unsubscribed with no undo, and so are markings of more than
-about 550,000 articles read, which the status bar says.
+about 550,000 articles read, which the status bar says. `Ctrl+Z` and
+`Ctrl+Shift+Z` work in the Filters dialog too, except while typing in its
+pattern field, which keeps them for its own text.
 
 An undo is a change like any other, published as one, so it does not take
 back what other devices already pulled. Undoing a mark read that was

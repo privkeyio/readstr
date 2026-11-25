@@ -3471,6 +3471,83 @@ private slots:
         backend.undo();
         QTRY_COMPARE(backend.status(), QString("Undid: starred an article"));
         QVERIFY(!backend.canUndo());
+
+        // An undo asked for before the marking's result reaches the window
+        // skips, rather than saying the articles are gone.
+        QCOMPARE(rawExec(Paths::databaseFile(), "UPDATE items SET is_read = 0, read_at = NULL"), QString());
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::All));
+        backend.markViewRead();
+        backend.undo();
+        QTRY_VERIFY(backend.status().endsWith("articles read (too large to undo)"));
+        QTest::qWait(200);
+        QVERIFY2(backend.status().endsWith("articles read (too large to undo)"), qPrintable(backend.status()));
+        QVERIFY(!backend.statusError());
+        QVERIFY(!backend.canUndo());
+        QVERIFY(!backend.canRedo());
+        QCOMPARE(rawCount(Paths::databaseFile(), "SELECT COUNT(*) FROM items WHERE is_read = 0"), 0);
+    }
+
+    // An undo of M shows the read flag the article had before it, which
+    // another window may have changed unseen, once the worker has read it,
+    // and another M toggles that flag; an M pressed before an undo's flag
+    // is known waits for it. The read time comes back either way.
+    void backendUndoesMWithTheFlagTheLibraryHad()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        const QString path = Paths::databaseFile();
+        Store store;
+        QVERIFY(store.open());
+        const qint64 id = articleIdOf(store, "older");
+        const auto state = [&store, id] { return store.readState(id).value_or(ReadState{}); };
+
+        Backend backend;
+        const auto unreadCount = [&backend] {
+            return backend.sources()->row(backend.sources()->rowOf(SourceModel::Kind::Unread)).count;
+        };
+        const int unreadBefore = unreadCount();
+        backend.selectArticle(backend.articles()->rowOf(id));
+        QCOMPARE(backend.articleId(), id);
+        QTRY_VERIFY(state().read);
+        QTRY_COMPARE(unreadCount(), unreadBefore - 1);
+        // Marked unread here, then read in another window unseen.
+        backend.toggleRead();
+        QVERIFY(!backend.articleRead());
+        QTRY_COMPARE(unreadCount(), unreadBefore);
+        QCOMPARE(rawExec(path, QStringLiteral("UPDATE items SET is_read = 1, read_at = 1000 WHERE id = %1").arg(id)),
+                 QString());
+
+        // Captured before the undo.
+        backend.toggleRead();
+        QVERIFY(backend.articleRead());
+        QTRY_COMPARE(unreadCount(), unreadBefore - 1);
+        QVERIFY(state().read && state().readAt != std::optional<qint64>(1000));
+        backend.undo();
+        QVERIFY(backend.articleRead());
+        QTRY_COMPARE(backend.status(), QString("Undid: marked an article read"));
+        QVERIFY(backend.articleRead());
+        QVERIFY(state().read);
+        QCOMPARE(state().readAt, std::optional<qint64>(1000));
+        backend.toggleRead();
+        QVERIFY(!backend.articleRead());
+        QTRY_VERIFY(!state().read);
+        QTRY_COMPARE(unreadCount(), unreadBefore);
+
+        // Undone before the worker read it, and toggled again at once.
+        QCOMPARE(rawExec(path, QStringLiteral("UPDATE items SET is_read = 1, read_at = 2000 WHERE id = %1").arg(id)),
+                 QString());
+        backend.toggleRead();
+        backend.undo();
+        backend.toggleRead();
+        QTRY_VERIFY(!state().read);
+        QTRY_VERIFY(!backend.articleRead());
+        QVERIFY(backend.canUndo());
+        backend.undo();
+        QTRY_VERIFY(state().read);
+        QTRY_COMPARE(state().readAt, std::optional<qint64>(2000));
+        QTRY_VERIFY(backend.articleRead());
     }
 
     // A filter rule change whose save a later one skipped, which then
@@ -3807,8 +3884,12 @@ private slots:
         QCOMPARE(rawExec(path, "DELETE FROM items WHERE guid = 'oldest'"), QString());
         backend.undo();
         QTRY_COMPARE(backend.status(), QString("Undid: marked 4 articles read"));
-        auto states = readStates(store);
-        QVERIFY(!states.value("newest").first && !states.value("older").first && !states.value("second-a").first);
+        const auto states = readStates(store);
+        for (const char *guid : {"newest", "older", "second-a"}) {
+            QVERIFY2(states.contains(guid), guid);
+            QVERIFY2(!states.value(guid).first, guid);
+        }
+        QVERIFY(!states.contains("oldest"));
         QVERIFY(backend.canRedo());
         backend.redo();
         QTRY_COMPARE(backend.status(), QString("Redid: marked 4 articles read"));
@@ -4012,8 +4093,8 @@ private slots:
         const QString read = "SELECT COUNT(*) FROM items WHERE is_read = 1";
         Store store;
         QVERIFY(store.open());
-        Backend backend;
-        backend.selectArticle(0);
+        auto backend = std::make_unique<Backend>();
+        backend->selectArticle(0);
         QTRY_COMPARE(rawCount(path, read), 1);
         QCOMPARE(rawExec(path, "UPDATE items SET is_read = 0, read_at = NULL WHERE is_read = 1"), QString());
 
@@ -4025,22 +4106,24 @@ private slots:
                               " BEGIN SELECT RAISE(ABORT, 'refused'); END");
         };
         const auto unhook = qScopeGuard([] { Store::filterWriteHook = nullptr; });
-        backend.markFilterMatchesRead(ruleId);
-        QTRY_VERIFY(backend.status().startsWith("Cannot mark the matching articles read:"));
-        QVERIFY(backend.statusError());
+        // The worker is joined before the hook, and what it holds, go.
+        const auto join = qScopeGuard([&backend] { backend.reset(); });
+        backend->markFilterMatchesRead(ruleId);
+        QTRY_VERIFY(backend->status().startsWith("Cannot mark the matching articles read:"));
+        QVERIFY(backend->statusError());
         QCOMPARE(batches.load(), 2);
         QCOMPARE(rawCount(path, read), 500);
         QCOMPARE(rawExec(path, "DROP TRIGGER refuse"), QString());
-        QVERIFY(backend.canUndo());
+        QVERIFY(backend->canUndo());
 
-        backend.undo();
-        QTRY_COMPARE(backend.status(), QString("Undid: marked 500 articles read"));
+        backend->undo();
+        QTRY_COMPARE(backend->status(), QString("Undid: marked 500 articles read"));
         QCOMPARE(rawCount(path, read), 0);
         QCOMPARE(rawCount(path, "SELECT read_at FROM items WHERE guid = '7'"), 42);
         QCOMPARE(rawCount(path, "SELECT read_at FROM items WHERE guid = '900'"), 99);
         QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE read_at IS NOT NULL"), 2);
-        backend.redo();
-        QTRY_COMPARE(backend.status(), QString("Redid: marked 500 articles read"));
+        backend->redo();
+        QTRY_COMPARE(backend->status(), QString("Redid: marked 500 articles read"));
         QCOMPARE(rawCount(path, read), 500);
         QCOMPARE(rawCount(path, "SELECT COUNT(*) FROM items WHERE is_read = 1 AND CAST(guid AS INTEGER) >= 500"), 0);
         QCOMPARE(rawCount(path, "SELECT read_at FROM items WHERE guid = '900'"), 99);
@@ -5535,6 +5618,110 @@ private slots:
         QVERIFY(store.open());
         QTRY_COMPARE(store.filterRules()->size(), 2);
         QCOMPARE(store.filterRules()->at(1).action, KeywordFilter::Action::MarkRead);
+    }
+
+    // In the Filters dialog, Ctrl+Z and Ctrl+Shift+Z undo and redo a rule
+    // change while a button has the keyboard, but not in the pattern field,
+    // which keeps them for its typing, nor under a dialog over it; a rule the
+    // form edits that an undo takes away is no longer edited.
+    void filtersDialogUndoesWithCtrlZ()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        write(dir.path() + "/language", "en");
+        QTest::failOnWarning(QRegularExpression("Binding loop|qrc:/"));
+        LoadedWindow loaded(dir.path() + "/language");
+        QVERIFY(loaded.window);
+        QVERIFY(QTest::qWaitForWindowExposed(loaded.window));
+        Backend &backend = *loaded.backend;
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "spam"}, {"target", "any"}, {"type", "contains"},
+                                           {"action", "hide"}}));
+
+        QObject *dialog = loaded.window->findChild<QObject *>("filtersDialog");
+        QVERIFY(dialog);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        auto *pattern = loaded.window->findChild<QQuickItem *>("filterPattern");
+        QVERIFY(pattern);
+        QTRY_VERIFY(pattern->hasActiveFocus());
+        const auto find = [&loaded](const QString &name) -> QQuickItem * {
+            QList<QQuickItem *> items{loaded.window->contentItem()};
+            while (!items.isEmpty()) {
+                QQuickItem *item = items.takeLast();
+                if (item->objectName() == name && item->isVisible())
+                    return item;
+                items << item->childItems();
+            }
+            return nullptr;
+        };
+        const auto patterns = [&backend] {
+            QStringList list;
+            for (const QVariant &rule : backend.filterRules())
+                list << rule.toMap().value("pattern").toString();
+            return list;
+        };
+        const auto shown = [dialog] { return dialog->property("rules").toList().size(); };
+        QObject *undoShortcut = loaded.window->findChild<QObject *>("filterUndoShortcut");
+        QVERIFY(undoShortcut);
+        QQuickItem *save = find("filterSave");
+        QVERIFY(save);
+
+        QTRY_VERIFY(find("filterDelete0"));
+        QVERIFY(QMetaObject::invokeMethod(find("filterDelete0"), "clicked"));
+        QCOMPARE(patterns(), QStringList());
+        QCOMPARE(shown(), 0);
+        save->forceActiveFocus();
+        QTRY_VERIFY(save->hasActiveFocus());
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(patterns(), QStringList{"spam"});
+        QCOMPARE(shown(), 1);
+        QTRY_COMPARE(backend.status(), QString("Undid: removed a filter rule"));
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QCOMPARE(patterns(), QStringList());
+        QTRY_COMPARE(backend.status(), QString("Redid: removed a filter rule"));
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(patterns(), QStringList{"spam"});
+        QTRY_COMPARE(backend.status(), QString("Undid: removed a filter rule"));
+
+        // The field's own undo, and the rules stay.
+        pattern->forceActiveFocus();
+        QTRY_VERIFY(pattern->hasActiveFocus());
+        QVERIFY(!undoShortcut->property("enabled").toBool());
+        QTest::keyClick(loaded.window, 'x');
+        QCOMPARE(pattern->property("text").toString(), QString("x"));
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(pattern->property("text").toString(), QString());
+        QTest::qWait(100);
+        QCOMPARE(patterns(), QStringList{"spam"});
+        QCOMPARE(backend.status(), QString("Undid: removed a filter rule"));
+
+        // Off under the dialog that asks about marking read.
+        save->forceActiveFocus();
+        QTRY_VERIFY(undoShortcut->property("enabled").toBool());
+        QObject *apply = loaded.window->findChild<QObject *>("filterApplyDialog");
+        QVERIFY(apply);
+        QVERIFY(QMetaObject::invokeMethod(apply, "open"));
+        QTRY_VERIFY(apply->property("opened").toBool());
+        QVERIFY(!undoShortcut->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(apply, "close"));
+        QTRY_VERIFY(!apply->property("visible").toBool());
+
+        // Undoing the rule's adding while the form edits it stops editing.
+        QTRY_VERIFY(find("filterEdit0"));
+        QVERIFY(QMetaObject::invokeMethod(find("filterEdit0"), "clicked"));
+        QCOMPARE(dialog->property("editing").toInt(), 0);
+        QCOMPARE(pattern->property("text").toString(), QString("spam"));
+        save->forceActiveFocus();
+        QTRY_VERIFY(save->hasActiveFocus());
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(patterns(), QStringList());
+        QCOMPARE(dialog->property("editing").toInt(), -1);
+        QCOMPARE(dialog->property("editingId").toString(), QString());
+        QCOMPARE(pattern->property("text").toString(), QString());
+        QTRY_COMPARE(backend.status(), QString("Undid: added a filter rule"));
+        QVERIFY(dialog->property("visible").toBool());
     }
 
     // A library from before filters opens with none, every article shown.

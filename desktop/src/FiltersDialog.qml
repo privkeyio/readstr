@@ -192,6 +192,17 @@ Dialog {
         }
     }
 
+    // The window's Ctrl+Z and Ctrl+Shift+Z are off while the dialog is open,
+    // so these undo and redo a rule change here, except while a text field
+    // keeps them for its own typing or something covers the dialog.
+    readonly property bool undoKeysFree: {
+        const item = content.Window.activeFocusItem
+        return opened && !applyDialog.visible && !targetBox.popup.visible && !typeBox.popup.visible
+            && !actionBox.popup.visible && !(item instanceof TextInput) && !(item instanceof TextEdit)
+    }
+    Shortcut { objectName: "filterUndoShortcut"; sequences: ["Ctrl+Z"]; context: Qt.ApplicationShortcut; enabled: dialog.undoKeysFree; onActivated: backend.undo() }
+    Shortcut { objectName: "filterRedoShortcut"; sequences: ["Ctrl+Shift+Z"]; context: Qt.ApplicationShortcut; enabled: dialog.undoKeysFree; onActivated: backend.redo() }
+
     // Enter presses a button as Space does.
     component KeyButton: Button {
         flat: true
@@ -201,6 +212,7 @@ Dialog {
     }
 
     contentItem: ColumnLayout {
+        id: content
         spacing: 8
 
         Label {
