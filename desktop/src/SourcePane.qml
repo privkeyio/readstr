@@ -3,14 +3,15 @@ import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Layouts
 
-// All articles, Unread, and Starred, then the saved views synced from the
-// web app, when there are any, then the tags the feeds carry, when there are
-// any, then the feeds by category, each category with the color and icon the
-// web app gave it, with unread counts, a mark on Nostr authors, and the last
-// refresh error of each feed (or, for a Nostr author, a quieter note when
-// the refresh missed something).
+// All articles, Unread, and Starred, then the saved views, made here or
+// synced from the web app, when there are any, then the tags the feeds
+// carry, when there are any, then the feeds by category, each category with
+// the color and icon the web app gave it, with unread counts, a mark on
+// Nostr authors, and the last refresh error of each feed (or, for a Nostr
+// author, a quieter note when the refresh missed something).
 // A view with rules that cannot be applied here says so, and one whose
-// source cannot be told here is shown disabled.
+// source cannot be told here is shown disabled. A right click on a view,
+// even a disabled one, edits, moves, or deletes it.
 Rectangle {
     id: pane
 
@@ -29,7 +30,7 @@ Rectangle {
     }
 
     property bool active: false
-    readonly property bool menuOpen: appMenu.visible || feedMenu.visible
+    readonly property bool menuOpen: appMenu.visible || feedMenu.visible || viewMenu.visible
     readonly property color errorColor: Material.color(Material.Red, Material.theme === Material.Light ? Material.Shade700 : Material.Shade300)
 
     // Qt Quick Controls menus take their width from the background alone and
@@ -52,6 +53,10 @@ Rectangle {
     signal syncRequested()
     signal settingsRequested()
     signal filtersRequested()
+    signal newViewRequested()
+    signal saveSourceRequested()
+    signal editViewRequested(string viewId)
+    signal deleteViewRequested(string viewId, string viewName)
 
     color: Qt.tint(theme.background, Qt.alpha(theme.foreground, 0.03))
 
@@ -114,6 +119,8 @@ Rectangle {
                     MenuItem { text: qsTr("Export OPML…"); onTriggered: backend.exportOpml() }
                     MenuItem { text: qsTr("Sync with Nostr…"); onTriggered: pane.syncRequested() }
                     MenuItem { text: qsTr("Filters…"); onTriggered: pane.filtersRequested() }
+                    MenuItem { text: qsTr("New view…"); enabled: backend.viewCount < backend.maxViews; onTriggered: pane.newViewRequested() }
+                    MenuItem { text: qsTr("Save this source as a view…"); enabled: backend.canSaveSourceAsView && backend.viewCount < backend.maxViews; onTriggered: pane.saveSourceRequested() }
                     MenuSeparator {}
                     MenuItem { text: qsTr("Settings…"); onTriggered: pane.settingsRequested() }
                     MenuItem { text: qsTr("Keyboard shortcuts"); onTriggered: pane.helpRequested() }
@@ -339,16 +346,22 @@ Rectangle {
 
                 MouseArea {
                     anchors.fill: parent
-                    enabled: row.selectable
+                    enabled: row.selectable || row.kind === "view"
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
                     onClicked: (mouse) => {
-                        backend.selectSource(row.index)
-                        pane.activated()
+                        if (row.selectable) {
+                            backend.selectSource(row.index)
+                            pane.activated()
+                        }
                         if (mouse.button === Qt.RightButton && row.kind === "feed") {
                             feedMenu.feedId = row.feedId
                             feedMenu.feedTitle = row.title
                             feedMenu.nostr = row.nostr
                             feedMenu.popup(row, mouse.x, mouse.y)
+                        } else if (mouse.button === Qt.RightButton && row.kind === "view") {
+                            viewMenu.viewId = row.viewId
+                            viewMenu.viewName = row.title
+                            viewMenu.popup(row, mouse.x, mouse.y)
                         }
                     }
                 }
@@ -375,5 +388,24 @@ Rectangle {
         MenuItem { text: qsTr("Open profile"); visible: feedMenu.nostr; height: visible ? implicitHeight : 0; onTriggered: backend.openProfile(feedMenu.feedId) }
         MenuItem { text: qsTr("Copy npub"); visible: feedMenu.nostr; height: visible ? implicitHeight : 0; onTriggered: backend.copyNpub(feedMenu.feedId) }
         MenuItem { text: qsTr("Unsubscribe…"); onTriggered: pane.unsubscribeRequested(feedMenu.feedId, feedMenu.feedTitle) }
+    }
+
+    Menu {
+        id: viewMenu
+        property string viewId: ""
+        property string viewName: ""
+        objectName: "viewMenu"
+        implicitWidth: pane.menuWidth(viewMenu)
+        Material.roundedScale: theme.radius
+        background: Rectangle {
+            radius: Math.min(4, theme.radius)
+            color: Qt.tint(theme.background, Qt.alpha(theme.foreground, 0.08))
+            border.color: Qt.alpha(theme.foreground, 0.15)
+            border.width: 1
+        }
+        MenuItem { objectName: "viewMenuEdit"; text: qsTr("Edit…"); onTriggered: pane.editViewRequested(viewMenu.viewId) }
+        MenuItem { objectName: "viewMenuUp"; text: qsTr("Move up"); onTriggered: backend.moveView(viewMenu.viewId, -1) }
+        MenuItem { objectName: "viewMenuDown"; text: qsTr("Move down"); onTriggered: backend.moveView(viewMenu.viewId, 1) }
+        MenuItem { objectName: "viewMenuDelete"; text: qsTr("Delete…"); onTriggered: pane.deleteViewRequested(viewMenu.viewId, viewMenu.viewName) }
     }
 }

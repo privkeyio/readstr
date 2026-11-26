@@ -1,6 +1,7 @@
 #include "backend.h"
 
 #include <QClipboard>
+#include <QCollator>
 #include <QDesktopServices>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -326,6 +327,7 @@ bool Backend::loadViews() {
     if (same)
         return false;
     m_views = views;
+    emit viewsChanged();
     return true;
 }
 
@@ -1617,10 +1619,23 @@ void Backend::reloadSyncAccount() {
     m_syncAccount.publishConfirmed = account.publishConfirmed || confirmed;
     if (changed) {
         resetPublish();
+        // Undone or redone now, a change to the views would put back the
+        // last account's views, or delete this one's, and mark that to go
+        // out under this account. The rest of the history is the library's
+        // own, whichever account is set, so it stays.
+        const auto ofViews = [](const std::shared_ptr<UndoCommand> &command) {
+            if (command->savedViews)
+                command->state->failed = true;
+            return command->savedViews;
+        };
+        if ((m_undo.removeIf(ofViews) + m_redo.removeIf(ofViews)) > 0)
+            emit undoChanged();
         // What was changed here and not published before the last quit goes
-        // out with the first publish.
+        // out with the first publish: views edited here too, even when a
+        // publish built before their last edit cleared their kind's mark.
         for (int kind : {Sync::subscriptionsKind, Sync::readStatusKind, Sync::viewsKind})
-            if ((account.publishPending & publishBit(kind))
+            if (((account.publishPending & publishBit(kind))
+                 || (kind == Sync::viewsKind && (account.publishPending & viewsEditedBit)))
                 && (kind != Sync::readStatusKind || account.publishReads))
                 m_publishKinds << kind;
         resetSigning();
@@ -2314,13 +2329,18 @@ void Backend::loadSigner() {
     });
 }
 
-bool Backend::setSyncNpub(const QString &text) {
+bool Backend::syncNpubDropsViews(const QString &text) {
+    const auto account = Sync::account(text);
+    return account && m_storeOpen && m_store.savedViewsOfAnother(account->pubkey).value_or(false);
+}
+
+bool Backend::setSyncNpub(const QString &text, bool dropViews) {
     const auto account = Sync::account(text);
     if (!account || !m_storeOpen)
         return false;
     writeOnWorker(
-        [account = *account](Store &store) {
-            return store.setSyncAccount(account.npub, account.pubkey, account.relays) ? 1 : -1;
+        [account = *account, dropViews](Store &store) {
+            return store.setSyncAccount(account.npub, account.pubkey, account.relays, dropViews) ? 1 : -1;
         },
         tr("Cannot sync with %1: %2").arg(Nip19::shortNpub(account->npub, account->npub)),
         [this, npub = account->npub](const WriteResult &result) {
@@ -2329,6 +2349,8 @@ bool Backend::setSyncNpub(const QString &text) {
                 return;
             }
             reloadSyncAccount();
+            // Another account's saved views may be gone from the library now.
+            reloadLibrary();
             sync();
         });
     return true;
@@ -2502,6 +2524,8 @@ struct Backend::PublishRun {
     // When the drafts were built: a feed subscribed after this is newer
     // than the list published from them.
     qint64 builtAt = 0;
+    // The edits to the saved views the drafts carry (Sync::Drafts::viewsEdits).
+    qint64 viewsEdits = -1;
 };
 
 namespace {
@@ -2685,11 +2709,11 @@ void Backend::continuePublish(const Sync::Outcome &outcome) {
             // Replacing what cannot be read here would lose it.
             run->failed << kind;
             run->errors << unreadable(kind);
-        } else if (kind == Sync::readStatusKind && !outcome.settled) {
-            // As on the web: another device's reads may sit on a relay that
-            // did not answer.
+        } else if (const QString why = Sync::unsettledHold(outcome, kind); !why.isEmpty()) {
+            // Another device's reads or views may sit on a relay that did
+            // not answer, or answered only in part.
             run->failed << kind;
-            run->errors << tr("not every relay answered, so the read status is not replaced");
+            run->errors << why;
         } else {
             ready << kind;
         }
@@ -2710,6 +2734,7 @@ void Backend::continuePublish(const Sync::Outcome &outcome) {
                 return publishDone(run);
             }
             run->events = drafts.events;
+            run->viewsEdits = drafts.viewsEdits;
             run->settled << drafts.unchanged;
             run->failed << drafts.failed << drafts.waiting;
             run->errors << drafts.errors;
@@ -2767,11 +2792,12 @@ void Backend::publishNext(const std::shared_ptr<PublishRun> &run) {
                 return self->publishNext(run);
             }
             self->onWorker<WriteResult>(
-                [pubkey = run->account.pubkey, event, builtAt = run->builtAt](Store &store) {
+                [pubkey = run->account.pubkey, event, builtAt = run->builtAt,
+                 viewsEdits = run->viewsEdits](Store &store) {
                     WriteResult written;
                     bool superseded = false;
-                    written.error =
-                        Sync::recordPublished(store, pubkey, event, builtAt, &superseded, &written.reload);
+                    written.error = Sync::recordPublished(store, pubkey, event, builtAt, &superseded,
+                                                          &written.reload, viewsEdits);
                     written.changed = superseded ? 1 : 0;
                     return written;
                 },
@@ -3202,4 +3228,257 @@ void Backend::markFilterMatchesRead(const QString &ruleId) {
             reloadCounts();
             loadArticles();
         });
+}
+
+namespace {
+// The spelling of the tag `row` lists that a view can list too, the one
+// that shows when the feeds carry it, or empty when none can be.
+QString viewTagOf(const SourceModel::Row &row) {
+    if (row.tags.contains(row.tag) && SavedViews::viewableTag(row.tag))
+        return row.tag;
+    for (const QString &tag : row.tags)
+        if (SavedViews::viewableTag(tag))
+            return tag;
+    return {};
+}
+}
+
+bool Backend::canSaveSourceAsView() const {
+    const SourceModel::Row row = m_sources.row(m_sourceIndex);
+    return row.kind == SourceModel::Kind::All || row.kind == SourceModel::Kind::Unread
+           || row.kind == SourceModel::Kind::Starred
+           || (row.kind == SourceModel::Kind::Tag && !viewTagOf(row).isEmpty());
+}
+
+namespace {
+QVariantMap formOf(const SavedViews::Draft &draft, bool sourceEditable) {
+    return {{"name", draft.name},
+            {"icon", draft.icon},
+            {"source", draft.source},
+            {"tags", draft.tags},
+            {"readState", draft.readState},
+            {"sort", draft.sort},
+            {"include", draft.include.join(QStringLiteral(", "))},
+            {"exclude", draft.exclude.join(QStringLiteral(", "))},
+            {"sourceEditable", sourceEditable}};
+}
+
+// A new view of all articles, as the dialog starts one.
+SavedViews::Draft newViewDraft() {
+    SavedViews::Draft draft;
+    draft.source = QStringLiteral("all");
+    return draft;
+}
+}
+
+QVariantMap Backend::viewForm(const QString &id) const {
+    if (id.isEmpty())
+        return formOf(newViewDraft(), true);
+    const SavedView *view = savedView(id);
+    return view ? formOf(SavedViews::draftOf(*view), SavedViews::sourceEditable(*view)) : QVariantMap();
+}
+
+QVariantMap Backend::sourceViewForm() const {
+    SavedViews::Draft draft = newViewDraft();
+    const SourceModel::Row row = m_sources.row(m_sourceIndex);
+    switch (row.kind) {
+    case SourceModel::Kind::All:
+        draft.name = tr("All articles");
+        break;
+    case SourceModel::Kind::Unread:
+        draft.name = tr("Unread");
+        draft.readState = QStringLiteral("unread");
+        break;
+    case SourceModel::Kind::Starred:
+        draft.name = tr("Starred");
+        draft.source = QStringLiteral("favorites");
+        break;
+    case SourceModel::Kind::Tag: {
+        // A view of tags needs every one of them, so it takes one spelling,
+        // the one that shows, when the feeds carry it and a view can list it.
+        const QString tag = viewTagOf(row);
+        if (tag.isEmpty())
+            return {};
+        draft.name = row.title.left(SavedViews::maxNameLength);
+        draft.source = QStringLiteral("tags");
+        draft.tags = {tag};
+        break;
+    }
+    default:
+        return {};
+    }
+    return formOf(draft, true);
+}
+
+QStringList Backend::viewTags() const {
+    QSet<QString> seen;
+    for (const QStringList &tags : m_feedTags)
+        for (const QString &tag : tags)
+            if (SavedViews::viewableTag(tag))
+                seen.insert(tag);
+    QStringList tags(seen.cbegin(), seen.cend());
+    QCollator collator;
+    collator.setCaseSensitivity(Qt::CaseInsensitive);
+    std::sort(tags.begin(), tags.end(), [&collator](const QString &a, const QString &b) {
+        const int order = collator.compare(a, b);
+        return order != 0 ? order < 0 : a < b;
+    });
+    return tags;
+}
+
+namespace {
+// The form's fields a view holds, all of them, so the dialog sets each.
+QVariantMap fieldsOf(const QVariantMap &form) {
+    QVariantMap fields;
+    for (const char *key : {"name", "icon", "source", "tags", "readState", "sort", "include", "exclude"})
+        fields.insert(QString::fromLatin1(key), form.value(QString::fromLatin1(key)));
+    return fields;
+}
+}
+
+QString Backend::viewProblem(const QString &id, const QVariantMap &form) const {
+    const SavedView *base = id.isEmpty() ? nullptr : savedView(id);
+    if (!id.isEmpty() && !base)
+        return tr("The view is gone");
+    if (!base)
+        if (const QString why = SavedViews::full(m_views); !why.isEmpty())
+            return why;
+    QString error;
+    SavedViews::build(SavedViews::edited(base, fieldsOf(form)), base, &error);
+    return error;
+}
+
+bool Backend::saveView(const QString &id, const QVariantMap &form) {
+    if (!m_storeOpen || !viewProblem(id, form).isEmpty())
+        return false;
+    const SavedView *base = id.isEmpty() ? nullptr : savedView(id);
+    const std::optional<SavedView> built = SavedViews::build(SavedViews::edited(base, fieldsOf(form)), base, nullptr);
+    if (!built)
+        return false;
+    const SavedView view = *built;
+    const QString name = SavedViews::name(view);
+    if (base) {
+        // Saved as it was: nothing to write, publish, or undo.
+        if (base->view == view.view && base->exclude == view.exclude)
+            return true;
+        // Each way only over the view it was worked out from, so neither
+        // the edit nor its undo overwrites what a pull or `readstr views`
+        // changed in between.
+        const SavedView before = *base;
+        changeViewsUndoably([name] { return tr("edited the view %1").arg(name); },
+                            [view, before](QList<SavedView> &views) {
+                                return SavedViews::replace(views, view, &before);
+                            },
+                            [before, view](QList<SavedView> &views) {
+                                return SavedViews::replace(views, before, &view);
+                            },
+                            tr("Cannot save the view: %1"), [this, name] { setStatus(tr("Saved the view %1").arg(name)); });
+        return true;
+    }
+    changeViewsUndoably([name] { return tr("created the view %1").arg(name); },
+                        [view](QList<SavedView> &views) { return SavedViews::add(views, view); },
+                        [view](QList<SavedView> &views) { return SavedViews::remove(views, view.id, &view); },
+                        tr("Cannot save the view: %1"), [this, name, id = view.id] {
+                            setStatus(tr("Created the view %1").arg(name));
+                            // As the web app makes the view it saves the active one.
+                            if (const int row = m_sources.rowOfView(id); m_sources.isSelectable(row))
+                                selectSource(row);
+                        });
+    return true;
+}
+
+void Backend::deleteView(const QString &id) {
+    const SavedView *found = m_storeOpen ? savedView(id) : nullptr;
+    if (!found)
+        return;
+    const SavedView before = *found;
+    const qsizetype index = SavedViews::indexOf(m_views, id);
+    const QString name = SavedViews::name(before);
+    changeViewsUndoably([name] { return tr("deleted the view %1").arg(name); },
+                        [id, before](QList<SavedView> &views) { return SavedViews::remove(views, id, &before); },
+                        // A pull that brought the view back in between has
+                        // undone the delete already.
+                        [before, index](QList<SavedView> &views) {
+                            if (SavedViews::indexOf(views, before.id) >= 0)
+                                return QString();
+                            return SavedViews::add(views, before, index);
+                        },
+                        tr("Cannot delete the view: %1"),
+                        [this, name] { setStatus(tr("Deleted the view %1").arg(name)); });
+}
+
+void Backend::moveView(const QString &id, int step) {
+    const qsizetype from = SavedViews::indexOf(m_views, id);
+    if (!m_storeOpen || from < 0)
+        return;
+    const qsizetype to = qBound<qsizetype>(0, from + step, m_views.size() - 1);
+    if (to == from)
+        return;
+    const QString name = SavedViews::name(m_views.at(from));
+    changeViewsUndoably([name] { return tr("moved the view %1").arg(name); },
+                        [id, to](QList<SavedView> &views) { return SavedViews::move(views, id, to); },
+                        [id, from](QList<SavedView> &views) { return SavedViews::move(views, id, from); },
+                        tr("Cannot move the view: %1"));
+}
+
+void Backend::stepView(int step) {
+    QList<int> rows;
+    for (int i = 0; i < m_sources.count(); ++i)
+        if (m_sources.row(i).kind == SourceModel::Kind::View && m_sources.isSelectable(i))
+            rows << i;
+    if (rows.isEmpty() || step == 0)
+        return;
+    const int count = int(rows.size()), at = int(rows.indexOf(m_sourceIndex));
+    int next;
+    if (at >= 0)
+        next = ((at + step) % count + count) % count;
+    else if (step > 0)
+        next = 0;
+    else
+        next = count - 1;
+    if (rows.at(next) != m_sourceIndex)
+        selectSource(rows.at(next));
+}
+
+void Backend::changeViews(std::function<QString(QList<SavedView> &)> change, const QString &failure,
+                          const Finished &finished, const std::shared_ptr<UndoState> &undo) {
+    // Why `change` refused, as a view gone meanwhile: written on the worker,
+    // read here once its write is done.
+    auto problem = std::make_shared<QString>();
+    writeOnWorker(
+        [change = std::move(change), problem](Store &store) { return SavedViews::save(store, change, problem.get()); },
+        failure,
+        [this, failure, finished, problem](const WriteResult &result) {
+            if (!result.error.isEmpty())
+                setStatus(failure.arg(result.error), true);
+            else if (!problem->isEmpty())
+                setStatus(failure.arg(*problem), true);
+            else if (!result.skipped)
+                schedulePublish(Sync::viewsKind);
+            reloadLibrary();
+            finished(result.error.isEmpty() && problem->isEmpty() && !result.skipped);
+        },
+        undo);
+}
+
+void Backend::changeViewsUndoably(std::function<QString()> label, const ViewChange &change, const ViewChange &reverse,
+                                  const QString &failure, std::function<void()> done) {
+    auto command = std::make_shared<UndoCommand>();
+    command->label = std::move(label);
+    command->savedViews = true;
+    command->apply = [this, change, reverse, state = command->state](bool undo, const Finished &finished) {
+        // A view changed since cannot be tried again: the command goes.
+        ViewChange step = [step = undo ? reverse : change](QList<SavedView> &views) {
+            const QString why = step(views);
+            return why == SavedViews::changedMeanwhile() ? tr("the view has changed since") : why;
+        };
+        changeViews(std::move(step), undoFailure(undo), finished, state);
+    };
+    pushUndo(command);
+    changeViews(change, failure, [this, command, done = std::move(done)](bool ok) {
+        if (!ok)
+            return dropUndo(command);
+        if (done)
+            done();
+    }, command->state);
 }

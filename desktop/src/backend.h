@@ -23,6 +23,7 @@
 #include "nip19.h"
 #include "relaypool.h"
 #include "sanitizer.h"
+#include "savedviews.h"
 #include "settings.h"
 #include "remotesigner.h"
 #include "signer.h"
@@ -157,6 +158,17 @@ class Backend : public QObject {
     Q_PROPERTY(int maxFilterRules READ maxFilterRules CONSTANT)
     Q_PROPERTY(int maxFilterPatternLength READ maxFilterPatternLength CONSTANT)
 
+    // How many saved views there are, and the web app's caps on them and
+    // on their names and icons (SavedViews::build()).
+    Q_PROPERTY(int viewCount READ viewCount NOTIFY viewsChanged)
+    Q_PROPERTY(int maxViews READ maxViews CONSTANT)
+    Q_PROPERTY(int maxViewNameLength READ maxViewNameLength CONSTANT)
+    Q_PROPERTY(int maxViewIconLength READ maxViewIconLength CONSTANT)
+    // Whether the source selected is one a view can list too (All articles,
+    // Unread, Starred, or a tag), so it can be saved as one, as the web
+    // app's "+" saves its current filter.
+    Q_PROPERTY(bool canSaveSourceAsView READ canSaveSourceAsView NOTIFY sourceChanged)
+
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool statusError READ statusError NOTIFY statusChanged)
 
@@ -267,6 +279,12 @@ public:
     static int maxFilterRules() { return KeywordFilter::maxRules; }
     static int maxFilterPatternLength() { return KeywordFilter::maxPatternLength; }
 
+    int viewCount() const { return int(m_views.size()); }
+    static int maxViews() { return Sync::maxViews; }
+    static int maxViewNameLength() { return SavedViews::maxNameLength; }
+    static int maxViewIconLength() { return SavedViews::maxIconLength; }
+    bool canSaveSourceAsView() const;
+
     QString status() const { return m_status; }
     bool statusError() const { return m_statusError; }
 
@@ -296,8 +314,14 @@ public:
     Q_INVOKABLE void refreshAll();
     Q_INVOKABLE void refreshFeed(qint64 feedId);
     // Syncs with the npub or nprofile `text` from now on and pulls at once;
-    // false, changing nothing, when it is neither.
-    Q_INVOKABLE bool setSyncNpub(const QString &text);
+    // false, changing nothing, when it is neither. Saved views of another
+    // account (syncNpubDropsViews()) make it fail unless `dropViews`, which
+    // deletes them.
+    Q_INVOKABLE bool setSyncNpub(const QString &text, bool dropViews = false);
+    // Whether syncing with `text` would delete saved views pulled or edited
+    // under another account, even one no longer set, with their mute words
+    // and edits not published yet, which the window asks about first.
+    Q_INVOKABLE bool syncNpubDropsViews(const QString &text);
     // Forgets the sync account and, with `removeKey`, then deletes its
     // signing key from the keyring, saying in the status bar if that fails.
     Q_INVOKABLE void stopSync(bool removeKey = false);
@@ -361,14 +385,42 @@ public:
     // Marks read the unread articles already in the library that the
     // mark-read rule `ruleId` matches, as the user would.
     Q_INVOKABLE void markFilterMatchesRead(const QString &ruleId);
+    // The view dialog's form for the saved view `id`, or for a new one when
+    // `id` is empty: name, icon, source ("all", "favorites", "tags", or a
+    // feed's or category's, which only the web app can set), tags, readState,
+    // sort, include and exclude (the keywords and the mute words, each a
+    // comma-separated list), and sourceEditable. Empty when there is no such
+    // view.
+    Q_INVOKABLE QVariantMap viewForm(const QString &id) const;
+    // A new view's form for the source selected (canSaveSourceAsView), named
+    // after it.
+    Q_INVOKABLE QVariantMap sourceViewForm() const;
+    // The tags the feeds carry, each spelling once, by name.
+    Q_INVOKABLE QStringList viewTags() const;
+    // Why `form` cannot be saved as the view `id` (a new one for empty), or
+    // empty when it can.
+    Q_INVOKABLE QString viewProblem(const QString &id, const QVariantMap &form) const;
+    // Saves `form` as the view `id`, or as a new view for empty, which is
+    // then selected. False, changing nothing, when viewProblem() finds
+    // fault with it. Each change to the views, saved in one transaction with
+    // the mark to publish them, goes out as kind 30406 without the mute
+    // words, and undo() can undo it.
+    Q_INVOKABLE bool saveView(const QString &id, const QVariantMap &form);
+    Q_INVOKABLE void deleteView(const QString &id);
+    // Moves the view `id` `step` places, within the list.
+    Q_INVOKABLE void moveView(const QString &id, int step);
+    // Selects the next view that can be selected, `step` 1, or the one
+    // before, -1, round the list, or from outside them the first or last.
+    Q_INVOKABLE void stepView(int step);
     // Refreshes now and then every autoRefreshMinutes, give or take 10%,
     // for as long as the window is open.
     Q_INVOKABLE void startAutoRefresh();
     // Undoes the last action that can be undone (toggling read or starred,
     // marking the view or a rule's matches read, unsubscribing, changing
-    // the filter rules), or redoes the last one undone, through the same
-    // writes and publishing as the action, saying in the status bar what
-    // was undone or redone. A new action clears what could be redone.
+    // the filter rules or the saved views), or redoes the last one undone,
+    // through the same writes and publishing as the action, saying in the
+    // status bar what was undone or redone. A new action clears what could
+    // be redone.
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
 
@@ -443,6 +495,7 @@ signals:
     void filtersChanged();
     void statusChanged();
     void undoChanged();
+    void viewsChanged();
 
 private:
     // Runs `work` on the worker thread with its Store, then `done` with the
@@ -516,6 +569,9 @@ private:
         // Whether its undo can fail in a way a later try may not, as a
         // restore can, which holds the history still until it is done.
         bool mayRetry = false;
+        // Whether it changes the saved views, which belong to the sync
+        // account they were made under (reloadSyncAccount()).
+        bool savedViews = false;
     };
     // Keeps the command of an action just asked for, which clears what
     // could be redone.
@@ -587,10 +643,21 @@ private:
     void reloadLibrary();
     void reloadCounts();
     // Reads the saved views again; true when they changed. Editing views
-    // (readstr-gp3.6.2) writes them through the worker and then reloads
-    // the library, which shows them and moves the selection off a view
-    // that is gone, as a sync pull does.
+    // writes them through the worker (changeViews()) and then reloads the
+    // library, which shows them and moves the selection off a view that is
+    // gone, as a sync pull does.
     bool loadViews();
+    // Changes the saved views on the worker (SavedViews::save()), saying in
+    // the status bar why it could not, with `failure`, then publishes them
+    // and shows them, and calls `finished`.
+    void changeViews(std::function<QString(QList<SavedView> &)> change, const QString &failure,
+                     const Finished &finished, const std::shared_ptr<UndoState> &undo);
+    // Changes the views as `change` does, or does again (`undo` false) or
+    // undoes as `reverse` does, as an action undo() can undo, labelled with
+    // `label`. `done` follows the action's own change once it is saved.
+    using ViewChange = std::function<QString(QList<SavedView> &)>;
+    void changeViewsUndoably(std::function<QString()> label, const ViewChange &change, const ViewChange &reverse,
+                             const QString &failure, std::function<void()> done = {});
     // The saved view `id`, or null when there is none.
     const SavedView *savedView(const QString &id) const;
     void loadArticles();

@@ -114,9 +114,11 @@ struct Outcome {
 // and never removes a subscription or a read mark: subscriptions are only
 // added, articles only marked read, and saved views added or updated,
 // keeping their mute words (keywords.exclude), which never come from a
-// relay. Like the web app's mergeViewLists, the merged views are cut to
-// maxViews with the remote ones first, so a full remote list drops the
-// views only here, and their mute words with them. A truncated result still
+// relay, and removed only when the list the relays held before had them as
+// they are here (mergeViews()). Like the web app's mergeViewLists, the
+// merged views are cut to maxViews with the remote ones first, so a full
+// remote list drops the views only here, and their mute words with them.
+// A truncated result still
 // applies, but counts as a problem and is not recorded as the last sync, and
 // neither is one with a payload refused, though the kinds that fit apply.
 // beforeWrites runs after the first freshness check and before any write;
@@ -125,6 +127,24 @@ struct Outcome {
 // one applied (just now or before) is kept, for publishing to build on.
 Outcome apply(Store &store, const SyncAccount &account, const NostrResult &result,
               const std::function<void()> &beforeWrites = {});
+// Why `kind` must not be published after the pull of `outcome`, or empty:
+// one that not every relay answered in full may have missed a newer read
+// status or saved views from another device, which publishing would
+// replace, as on the web.
+QString unsettledHold(const Outcome &outcome, int kind);
+
+// Kind 30406's content as the web app's viewListSchema and normalizeViews
+// take it: null when it does not fit, else at most maxViews views, each
+// through the web app's sanitizeView (less keywords.exclude), numbered
+// again from 0 in their order.
+std::optional<QList<SavedView>> parseViews(const QString &content);
+// The web app's mergeViewLists: the remote views first, keeping each one's
+// local mute words, then the local ones the remote lacks, since deletions
+// do not sync, cut to maxViews. A local one `previous`, the list the relays
+// held before `remote`, holds as it is here, less its place, was deleted in
+// the web app and is left out; one changed or made here stays.
+QList<SavedView> mergeViews(const QList<SavedView> &local, const QList<SavedView> &remote,
+                            const QList<SavedView> &previous = {});
 
 // The d tag of one of the three kinds, or null.
 const char *dTag(int kind);
@@ -186,8 +206,10 @@ struct Drafts {
     QList<NostrEvent> events;
     // Kinds left out with nothing to publish: a read status with no read the
     // last one lacks, or that the account no longer publishes, or saved
-    // views when any list of them is known (the desktop cannot edit views,
-    // so it publishes them only when no relay holds a list any more).
+    // views not edited here (viewsEditedBit) when any list of them is known:
+    // publishing those over it would only bring back views deleted in the
+    // web app, since deletions do not sync, so they go out unedited only
+    // when no relay holds a list any more.
     QList<int> unchanged;
     // Kinds that cannot be published now, and why.
     QList<int> failed;
@@ -198,6 +220,9 @@ struct Drafts {
     QList<int> waiting;
     QStringList notes;
     QString error;
+    // SyncAccount::viewsEdits when the saved views were drafted, for
+    // recordPublished(); -1 when they were not.
+    qint64 viewsEdits = -1;
 };
 // Unsigned events of `kinds` from the library, each dated past the newest
 // version seen of it: its watermark, or what `seen` (Outcome::newest) says
@@ -205,14 +230,16 @@ struct Drafts {
 Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, const QHash<int, qint64> &seen,
               qint64 now);
 // Records `event`, published, as the newest of its kind: its watermark,
-// its content to build the next one on, and for a read status its GUIDs as
-// the last list (marking nothing read). Empty on success, else why not.
+// its content to build the next one on, for a read status its GUIDs as the
+// last list (marking nothing read), and for saved views that they went out
+// as edited (viewsEditedBit) when `viewsEdits`, Drafts::viewsEdits, says
+// no edit came after the draft. Empty on success, else why not.
 // `superseded` says whether a newer version applied meanwhile won instead,
 // so what this one carried may be missing from what the relays hold, and
 // `mirrored` whether a subscription list changed the feeds' tags or a
 // category's color or icon here, which the window then shows.
 QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &event, qint64 builtAt,
-                        bool *superseded = nullptr, bool *mirrored = nullptr);
+                        bool *superseded = nullptr, bool *mirrored = nullptr, qint64 viewsEdits = -1);
 #ifdef READSTR_TESTS
 // Only in the test build: called by apply() once it has found the list it
 // mirrors still the one applied, and by recordPublished() once it has

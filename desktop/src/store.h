@@ -131,10 +131,20 @@ struct SyncAccount {
     // The kinds changed here and not published yet (publishBit()), kept
     // across restarts.
     int publishPending = 0;
+    // How many times the saved views were edited here for this account
+    // (Store::markViewsEdited()), so a publish can tell whether the views it
+    // carried are still the views as edited (Sync::recordPublished()).
+    qint64 viewsEdits = 0;
 };
 
 // The bit of `kind` in SyncAccount::publishPending, 0 for an unknown kind.
 int publishBit(int kind);
+// Also in SyncAccount::publishPending: the saved views were edited here
+// since they last went out. Unlike the views' own bit, which "Publish now"
+// sets too, it lets the views be published over a list the relays hold
+// (Sync::drafts()), and only a publish built after the last edit clears it
+// (SyncAccount::viewsEdits, Sync::recordPublished()).
+inline constexpr int viewsEditedBit = 8;
 
 // The content of the newest event of a d tag the relays are known to hold,
 // its id, and when it was stored here (seconds since the epoch).
@@ -324,10 +334,19 @@ public:
     // Empty, with lastError() set, when it cannot be read.
     SyncAccount syncAccount();
     // Sets the sync account. Another npub than the current one starts
-    // afresh, forgetting what was applied for the last.
-    bool setSyncAccount(const QString &npub, const QString &pubkey, const QStringList &relays);
+    // afresh, forgetting what was applied for the last. The saved views
+    // become `pubkey`'s; when they are another account's
+    // (savedViewsOfAnother()), it fails unless `dropOtherViews`, which
+    // deletes them, mute words and unpublished edits included.
+    bool setSyncAccount(const QString &npub, const QString &pubkey, const QStringList &relays,
+                        bool dropOtherViews = false);
+    // Whether there are saved views pulled or edited under an account other
+    // than `pubkey`, even one no longer set; null on failure. Views made
+    // before any account was set are nobody's.
+    std::optional<bool> savedViewsOfAnother(const QString &pubkey);
     // Forgets the account and what was pulled for it; subscriptions, read
-    // marks, and saved views stay.
+    // marks, and saved views stay, still those of the account (Store::
+    // savedViewsOfAnother()).
     bool clearSyncAccount();
     // Moves the d tag's watermark up to the event `createdAt` and
     // `eventId`, never down, in NostrEvent::isNewerThan's order.
@@ -364,6 +383,11 @@ public:
     // Meant for inside transaction(), like applyReadGuids(), so a failure
     // part way rolls the delete back with the rest.
     bool replaceSavedViews(const QList<SavedView> &views);
+    // Marks the saved views, edited here, to publish for the sync account
+    // `pubkey` (publishBit() and viewsEditedBit), and counts the edit
+    // (SyncAccount::viewsEdits); fails when the account set is another.
+    // Meant for the transaction that edits them (SavedViews::save()).
+    bool markViewsEdited(const QString &pubkey);
 
     // The keyword filter rules, in order. They stay in this library and
     // are never published. An entry that is not a rule this version would

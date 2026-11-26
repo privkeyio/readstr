@@ -19,11 +19,26 @@ Dialog {
     property bool invalid: false
     // Asking whether "Stop syncing" also removes the stored signing key.
     property bool confirmingStop: false
+    // Asking whether another npub may delete the saved views of the last
+    // one, which nothing brings back.
+    property bool confirmingDrop: false
+    readonly property bool asking: confirmingStop || confirmingDrop
 
     function submit() {
         if (field.text.trim() === "")
             return
-        if (backend.setSyncNpub(field.text))
+        if (backend.syncNpubDropsViews(field.text)) {
+            confirmingDrop = true
+            scroller.ScrollBar.vertical.position = 0
+            keepViewsButton.forceActiveFocus()
+            return
+        }
+        syncWith(false)
+    }
+
+    function syncWith(dropViews) {
+        confirmingDrop = false
+        if (backend.setSyncNpub(field.text, dropViews))
             close()
         else
             invalid = true
@@ -110,6 +125,7 @@ Dialog {
         field.text = backend.syncNpub
         invalid = false
         confirmingStop = false
+        confirmingDrop = false
         clearKey()
         backend.checkSigningKey()
         field.forceActiveFocus()
@@ -117,6 +133,7 @@ Dialog {
     onClosed: {
         clearKey()
         confirmingStop = false
+        confirmingDrop = false
     }
 
     // The form scrolls within a dialog no taller than the window, as the
@@ -134,7 +151,7 @@ Dialog {
 
             ColumnLayout {
                 Layout.fillWidth: true
-                visible: !dialog.confirmingStop
+                visible: !dialog.asking
                 spacing: 12
 
                 Label {
@@ -550,6 +567,49 @@ Dialog {
                     }
                 }
             }
+
+            // Asked in place of the form, as for "Stop syncing". Keeping the
+            // views is the default, focused first, as removing them cannot
+            // be undone.
+            ColumnLayout {
+                objectName: "dropViewsConfirmation"
+                Layout.fillWidth: true
+                visible: dialog.confirmingDrop
+                spacing: 12
+
+                Label {
+                    Layout.fillWidth: true
+                    text: qsTr("The saved views here came from another npub. Syncing with this one removes them from this computer, with their mute words and any edits not published yet, and that cannot be undone.")
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                }
+
+                RowLayout {
+                    Layout.alignment: Qt.AlignRight
+                    spacing: 8
+
+                    Button {
+                        id: keepViewsButton
+                        objectName: "keepViewsButton"
+                        text: qsTr("Keep them")
+                        flat: true
+                        highlighted: true
+                        Material.roundedScale: theme.radius
+                        Keys.onReturnPressed: clicked()
+                        Keys.onEnterPressed: clicked()
+                        onClicked: dialog.confirmingDrop = false
+                    }
+                    Button {
+                        objectName: "dropViewsButton"
+                        text: qsTr("Remove the views")
+                        flat: true
+                        Material.roundedScale: theme.radius
+                        Keys.onReturnPressed: clicked()
+                        Keys.onEnterPressed: clicked()
+                        onClicked: dialog.syncWith(true)
+                    }
+                }
+            }
         }
     }
 
@@ -560,7 +620,7 @@ Dialog {
             text: qsTr("Stop syncing")
             flat: true
             focusPolicy: Qt.NoFocus
-            visible: backend.syncNpub !== "" && !dialog.confirmingStop
+            visible: backend.syncNpub !== "" && !dialog.asking
             Material.roundedScale: theme.radius
             onClicked: dialog.askToStop()
         }
@@ -575,7 +635,7 @@ Dialog {
             text: qsTr("Sync")
             flat: true
             focusPolicy: Qt.NoFocus
-            visible: !dialog.confirmingStop
+            visible: !dialog.asking
             enabled: field.text.trim() !== "" && !backend.syncing
             Material.roundedScale: theme.radius
             onClicked: dialog.submit()

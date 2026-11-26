@@ -37,15 +37,16 @@ Run `build/readstr` (or `build/readstr open`) to open the window.
 
 ## The window
 
-Sources on the left (All articles, Unread, Starred, the saved views synced
-from the web app, the tags your feeds carry, then your feeds by category,
+Sources on the left (All articles, Unread, Starred, the saved views, synced
+from the web app or made here, the tags your feeds carry, then your feeds by category,
 each category with the color and icon the web app gave it, with unread
 counts and a feed's last refresh error under it),
 the articles of the selected source in the middle, newest first, and the
 article itself on the right. Selecting an article marks it read. Right-click
 a feed to refresh it or unsubscribe (and, for a Nostr author, to open their
-profile on njump.me or copy their npub); the `⋮` menu has refresh, mark the
-view read, OPML import and export, Sync with Nostr, and Filters.
+profile on njump.me or copy their npub), or a saved view to edit, move, or
+delete it; the `⋮` menu has refresh, mark the view read, OPML import and
+export, Sync with Nostr, Filters, and new saved views.
 
 `Ctrl+F` searches the articles of the selected source: their titles, authors,
 summaries, and text (as the reader shows it, so markup and link addresses
@@ -164,8 +165,37 @@ app's sidebar mode (`organizationMode`) picks no articles. When the view
 selected is gone, changes, or turns to a feed or a category, after a
 pull (or `readstr sync`, once the window next reads the library), the list
 follows: All articles is selected again, or the view lists what its rules
-now pick. Views are read only here for now:
-create, rename, reorder, and delete them in the web app.
+now pick.
+
+Make a view with "New view…" in the `⋮` menu or `Ctrl+Shift+N`, or save the
+source selected as one with "Save this source as a view…" (All articles,
+Unread, Starred, or a tag, as the web app's `+` saves its current filter).
+The dialog takes a name (up to 60 characters), an optional icon (up to 8),
+what it lists (all articles, starred ones, or the feeds that carry every tag
+ticked, with `Up`, `Down`, and `Space` in the list of the library's tags),
+all, unread, or read articles, newest or oldest first, and keywords and
+mute words, each a comma-separated list (up to 50 of 200 characters each),
+as the web app takes them; a view of one feed or one category, which the
+desktop cannot tell apart yet, cannot be made here. At most 50 views are
+kept. A right click on a view, or `F2` on the one selected, edits it in the
+same dialog; a view of one feed or one category made in the web app keeps
+that source as it is ("Feed (set on the web)") while its name, icon, read
+state, order, keywords, and mute words change. The rest of a view pulled
+from the relays stays too, but that is only the fields the web app's
+sanitizeView keeps (its sidebar mode among them): a pull drops any other
+field, so one a later web app adds does not survive here. A tag over 200
+characters, which a feed can carry, is not offered, since the web app cuts
+a view's tags to 200. `Alt+Up` and `Alt+Down`, or the menu, move the view
+selected, `Delete` deletes it after asking, and `V` and `Shift+V` step from
+view to view. Each change is saved with the mark to publish it in one
+transaction, goes out as kind 30406 (see Publishing), and `Ctrl+Z` undoes
+it. The mute words stay on this machine: they are never published, and a
+pull keeps them. Deleting a view here does not delete it in the web app,
+since deletions do not sync, as on the web. An edit made from a view that
+changed meanwhile (a pull, or `readstr views` in a terminal) is refused with
+"The view changed; try again", and so is undoing one, so neither puts back
+an older copy; undoing a delete after a pull brought the view back does
+nothing more.
 
 ### Tags and category colors
 
@@ -342,7 +372,17 @@ publishes nothing, so a feed unsubscribed here comes back with the next newer
 subscription list the web app publishes, which still has it. (Like the web app, an empty library
 takes the subscription list whatever its age.) `readstr sync logout` or
 "Stop syncing" forgets the npub and what was pulled for it; your
-subscriptions, read marks, and saved views stay.
+subscriptions, read marks, and saved views stay. The saved views stay the
+npub's they were pulled or edited under, even after you stop: the next npub
+would publish them as its own with its first view edit, so setting a
+different one, directly or after "Stop syncing", first asks whether to
+remove them from this computer, with their mute words and any edits not
+published yet, which nothing brings back. Keeping them leaves the npub as
+it was. `readstr sync login` refuses instead, unless given `--drop-views`.
+The same npub again keeps them, and views made before any npub was set
+become the first one's. Undo and redo forget changes to the saved views
+when the npub changes, so they never put one account's views back under
+another.
 
 ### Publishing
 
@@ -387,12 +427,21 @@ changes are kept, and they go out with that first "Publish now".
   publishing at once, even a list already waiting to go out, but leaves the
   last list published on the relays.
 - The saved views (kind 30406) without their mute words, which never leave
-  this machine. Readstr cannot edit views, so it publishes them only when
-  you ask ("Publish now") and no list of them has ever been pulled,
-  applied, or published for the account, as when the relays lost it;
-  publishing over a
-  list would bring back views deleted in the web app, since deletions do not
-  sync.
+  this machine, 2 seconds after you make, edit, move, or delete one here,
+  or undo that, merged first with any newer list the pull before it brings
+  (the web app's views first, then those only here, as the web app merges
+  them). A view the last list held and the newer one lacks was deleted in
+  the web app, so the pull drops it here too, unless it was made or changed
+  here since, and the next edit does not bring it back there. They wait
+  when not every relay answered the pull, which may have missed a newer
+  list, or while the list applied last is not cached yet, until the next
+  pull. Views not changed here go out only when you ask ("Publish now")
+  and no list of them has ever been pulled, applied, or published for the
+  account, as when the relays lost it: publishing them over a list would
+  bring back views deleted in the web app, since deletions do not sync. A
+  view deleted here stays in the web app, and comes back here only when the
+  web app publishes a list that still holds it. A change made with no npub
+  set is not published once one is, unless no list is known for it.
 
 Before publishing, Readstr pulls, so an event another device published
 meanwhile is merged first and never replaced unseen, and a new event is
@@ -425,6 +474,9 @@ those that take `--json` print one line of JSON whose shape is stable (below).
 | `readstr articles [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]` | List articles, newest first (50 unless `--limit`; `--limit 0` for all); `--view` lists a saved view's, in its order, naming on stderr the rules left out; exits 1 for a view of a feed or a category, which cannot be identified here yet, or with `--unread` for a view of read articles |
 | `readstr search QUERY [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]` | Search titles, authors, summaries, and text, best match first, as `Ctrl+F` does; exits 1 for a query with no letters or digits or over 256 characters |
 | `readstr views [--json]` | List the saved views in the web app's order, with the rules that cannot be applied here, and those that list nothing here |
+| `readstr views add NAME [--icon ICON] [--source all\|starred\|tags] [--tags LIST] [--read all\|unread\|read] [--sort newest\|oldest] [--include LIST] [--mute LIST]` | Make a saved view, as the window's dialog does; lists are comma-separated, and `--tags` alone makes a view of tags |
+| `readstr views edit ID [--name NAME] [the options of add]` | Change only what the options name; a view of a feed or a category keeps its source |
+| `readstr views delete ID`, `readstr views move ID up\|down` | Delete a saved view, or move it one place |
 | `readstr subscribe URL\|NPUB [--json]` | Subscribe to a feed URL, find the feed behind a page URL, or follow a Nostr author (npub or nprofile) |
 | `readstr unsubscribe ID` | Remove a feed and its articles |
 | `readstr refresh [--feed ID] [--json]` | Fetch every feed (or one) now; exits 1 if any failed |
@@ -432,7 +484,7 @@ those that take `--json` print one line of JSON whose shape is stable (below).
 | `readstr star ID...`, `unstar ID...` | Star or unstar articles |
 | `readstr import FILE.opml [--json]` | Add the feeds in an OPML file; folders become categories |
 | `readstr export [FILE]` | Write the subscriptions as OPML to FILE, or to stdout |
-| `readstr sync login NPUB` | Sync with an npub or nprofile from now on (public key only) |
+| `readstr sync login NPUB [--drop-views]` | Sync with an npub or nprofile from now on (public key only); exits 1 when the saved views belong to another npub, unless `--drop-views` removes them, mute words and unpublished edits included |
 | `readstr sync logout` | Stop syncing and forget what was pulled for the npub |
 | `readstr sync [--json]` | Pull and merge the web app's sync events now; exits 1 if anything failed or was refused |
 | `readstr filters [--json]` | List the keyword filter rules in the order they apply (add and edit them in the window) |
@@ -628,12 +680,16 @@ field.
 | `Ctrl+R` | Refresh all feeds |
 | `Ctrl+N` | Add a feed (its address, a site's, or a Nostr npub) |
 | `Ctrl+Shift+A` | Mark everything in the view read |
-| `Ctrl+Z` | Undo the last change: marking read or unread, starring, marking the view or a rule's matches read, unsubscribing, or changing the filter rules |
+| `V`, `Shift+V` | Next or previous saved view |
+| `Ctrl+Shift+N` | Create a saved view |
+| `F2` | Edit the selected saved view |
+| `Alt+Up`, `Alt+Down` | Move the selected saved view up or down |
+| `Ctrl+Z` | Undo the last change: marking read or unread, starring, marking the view or a rule's matches read, unsubscribing, changing the filter rules, or making, editing, moving, or deleting a saved view |
 | `Ctrl+Shift+Z` | Redo what was undone |
 | `Ctrl+O` | Import OPML |
 | `Ctrl+Shift+E` | Export OPML |
 | `Ctrl+F` | Search the articles |
-| `Delete` | Unsubscribe from the selected feed (asks first) |
+| `Delete` | Unsubscribe from the selected feed, or delete the selected saved view (asks first) |
 | `?` | Show or hide the shortcuts |
 | `Esc` | Close the shortcuts, or clear the search |
 | `Q`, `Ctrl+Q` | Quit |
