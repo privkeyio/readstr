@@ -146,6 +146,9 @@ QJsonObject feedJson(const Feed &feed) {
             {"siteUrl", nullable(feed.siteUrl)},
             {"description", nullable(feed.description)},
             {"category", nullable(feed.category)},
+            {"categoryColor", nullable(feed.categoryColor)},
+            {"categoryIcon", nullable(feed.categoryIcon)},
+            {"tags", QJsonArray::fromStringList(feed.tags)},
             {"unread", feed.unread},
             {"total", feed.total},
             {"lastFetchedAt", nullable(feed.lastFetchedAt)},
@@ -191,6 +194,8 @@ int feeds(const QString &command, const QStringList &arguments, QTextStream &out
             << printable(feed.url);
         if (!feed.category.isEmpty())
             out << "  [" << printable(feed.category) << "]";
+        for (const QString &tag : feed.tags)
+            out << "  #" << printable(tag);
         if (!feed.lastError.isEmpty())
             out << "  (error: " << printable(feed.lastError) << ")";
         out << "\n";
@@ -248,7 +253,7 @@ int articles(const QString &command, const QStringList &arguments, QTextStream &
         const SavedViews::Evaluation evaluation = SavedViews::evaluate(*view);
         if (evaluation.unknownSource)
             return fail(command,
-                        QStringLiteral("the saved view '%1' targets a feed, category, or tags that cannot be "
+                        QStringLiteral("the saved view '%1' targets a feed or category that cannot be "
                                        "identified here yet")
                             .arg(printable(id)),
                         err);
@@ -265,6 +270,7 @@ int articles(const QString &command, const QStringList &arguments, QTextStream &
         filter.oldestFirst = evaluation.filter.oldestFirst;
         filter.includeWords = evaluation.filter.includeWords;
         filter.excludeWords = evaluation.filter.excludeWords;
+        filter.tags = evaluation.filter.tags;
     }
     const QList<Article> list = store.articles(filter);
     if (!store.lastError().isEmpty())
@@ -718,12 +724,15 @@ int views(const QString &command, const QStringList &arguments, QTextStream &out
     for (const SavedView &view : list) {
         const QJsonObject source = view.view.value("source").toObject();
         out << printable(view.id) << "  " << printable(SavedViews::name(view)) << "  "
-            << printable(source.value("kind").toString("all")) << ", "
+            << printable(source.value("kind").toString("all"));
+        const SavedViews::Evaluation evaluation = SavedViews::evaluate(view);
+        if (!evaluation.filter.tags.isEmpty())
+            out << " (" << printable(evaluation.filter.tags.join(", ")) << ")";
+        out << ", "
             << printable(view.view.value("readState").toString("all")) << ", "
             << printable(view.view.value("sort").toString("newest"));
-        const SavedViews::Evaluation evaluation = SavedViews::evaluate(view);
         if (evaluation.unknownSource)
-            out << "  (lists nothing here: its feed, category, or tags cannot be identified yet)";
+            out << "  (lists nothing here: its feed or category cannot be identified yet)";
         else if (!evaluation.unsupported.isEmpty())
             out << "  (not supported here: " << printable(evaluation.unsupported.join(", ")) << ")";
         out << "\n";

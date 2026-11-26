@@ -327,10 +327,11 @@
   },
   "Still undoing: %1": "Fortryder stadig: %1",
   "Views": "Visninger",
+  "Tags": "Tags",
   "Partial": "Delvis",
   "Some rules of this view are not supported here, so they are left out: %1": "Nogle af visningens regler understøttes ikke her, så de udelades: %1",
   "No articles in this view": "Ingen artikler i denne visning",
   "Cannot read the saved views: %1": "Kan ikke læse de gemte visninger: %1",
   "Showing keyword matches among this view's first %1 articles": "Viser søgeordsmatch blandt visningens første %1 artikler",
-  "This view targets a feed, category, or tags that this app can't identify yet": "Denne visning gælder et feed, en kategori eller tags, som denne app ikke kan genkende endnu"
+  "This view targets a feed or category that this app can't identify yet": "Denne visning gælder et feed eller en kategori, som denne app ikke kan genkende endnu"
 }

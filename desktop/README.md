@@ -38,8 +38,9 @@ Run `build/readstr` (or `build/readstr open`) to open the window.
 ## The window
 
 Sources on the left (All articles, Unread, Starred, the saved views synced
-from the web app, then your feeds by category, with unread counts and a
-feed's last refresh error under it),
+from the web app, the tags your feeds carry, then your feeds by category,
+each category with the color and icon the web app gave it, with unread
+counts and a feed's last refresh error under it),
 the articles of the selected source in the middle, newest first, and the
 article itself on the right. Selecting an article marks it read. Right-click
 a feed to refresh it or unsubscribe (and, for a Nostr author, to open their
@@ -151,19 +152,39 @@ reads them all). A search searches within the
 view, and `Ctrl+Shift+A` marks what it lists read, within the same
 articles, which `Ctrl+Z` undoes.
 
-A view of one feed, one category, or some tags names them by the web app's
-own ids, which no feed here has, and Readstr keeps no tags yet, so which
-articles it means cannot be told here. Such a view is listed greyed out,
+A view of tags lists the articles of the feeds that carry every one of its
+tags, as in the web app (see Tags). A view of one feed or one category names
+it by the web app's own ids, which no feed here has, so which articles it
+means cannot be told here. Such a view is listed greyed out,
 with a tip that says so, and cannot be selected: a click does nothing and
 `Up` and `Down` step past it. A view with only other rules this version
 does not know (a field a later web app adds) lists what the rules it knows
 pick: its row says **Partial**, and the tip names what is left out. The web
 app's sidebar mode (`organizationMode`) picks no articles. When the view
-selected is gone, changes, or turns to a feed, category, or tags, after a
+selected is gone, changes, or turns to a feed or a category, after a
 pull (or `readstr sync`, once the window next reads the library), the list
 follows: All articles is selected again, or the view lists what its rules
 now pick. Views are read only here for now:
 create, rename, reorder, and delete them in the web app.
+
+### Tags and category colors
+
+The tags the web app gives your feeds, and the color and icon of each
+category, come with the subscription list on a sync pull (see Sync with the
+web app). Each tag a feed carries is listed under **Tags** in the sources,
+by name, with the unread count of its feeds; the section is not there while
+no feed has one. Selecting a tag lists the articles of the feeds that carry
+it. Tags that would look the same, such as one with an invisible zero-width
+space, are listed once, and select the feeds that carry any of them. At most
+500 tags are listed, those carried by the most feeds. A category's heading
+shows its color as a dot and its icon before its name. Both are shown as the
+last subscription list applied has them, pulled or published here, so a
+newer list from the web app updates them, and a feed or category the list
+says nothing of has none. A color is shown only as `#rgb` or `#rrggbb`, and
+an icon only when it is 16 UTF-16 code units or fewer (a letter or a simple
+emoji takes one or two, so about 8 emoji at most); anything else is left
+out. They are read only here for now: edit them in the
+web app.
 
 ## Nostr
 
@@ -300,7 +321,8 @@ Merging is close to the web app's and never removes anything here:
   left out and counted as unsupported, since whoever holds the npub's key
   picks these; OPML import still takes them. A category becomes the feed's
   category. New feeds are fetched by the next refresh (the window fetches
-  them at once).
+  them at once). Every feed here takes the tags the list gives it, and every
+  category its color and icon (see Tags and category colors).
 - Read GUIDs mark the matching articles read in every feed, and are kept for
   articles that arrive later, which come in read. An article is never
   marked unread by a sync.
@@ -331,7 +353,8 @@ changes are kept, and they go out with that first "Publish now".
 - The subscription list (kind 30404), 2 seconds after you subscribe,
   unsubscribe, or import an OPML file (a burst of changes goes out once).
   Each feed keeps the tags and category color and icon the last list gave
-  it, which Readstr does not keep itself; a feed in that list that Readstr
+  it, carried on from that list as it was, since Readstr shows them but
+  cannot edit them; a feed in that list that Readstr
   cannot follow (one on the local network, or neither a web feed nor an
   npub) stays in the list, and one it could follow but you unsubscribed
   goes into `deleted`. A feed another device unsubscribed from (in that
@@ -394,8 +417,8 @@ those that take `--json` print one line of JSON whose shape is stable (below).
 
 | Command | What it does |
 |---|---|
-| `readstr feeds [--json]` | List subscriptions with unread and total counts |
-| `readstr articles [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]` | List articles, newest first (50 unless `--limit`; `--limit 0` for all); `--view` lists a saved view's, in its order, naming on stderr the rules left out; exits 1 for a view of a feed, category, or tags, which cannot be identified here yet, or with `--unread` for a view of read articles |
+| `readstr feeds [--json]` | List subscriptions with unread and total counts, their categories, and their tags |
+| `readstr articles [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]` | List articles, newest first (50 unless `--limit`; `--limit 0` for all); `--view` lists a saved view's, in its order, naming on stderr the rules left out; exits 1 for a view of a feed or a category, which cannot be identified here yet, or with `--unread` for a view of read articles |
 | `readstr search QUERY [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]` | Search titles, authors, summaries, and text, best match first, as `Ctrl+F` does; exits 1 for a query with no letters or digits or over 256 characters |
 | `readstr views [--json]` | List the saved views in the web app's order, with the rules that cannot be applied here, and those that list nothing here |
 | `readstr subscribe URL\|NPUB [--json]` | Subscribe to a feed URL, find the feed behind a page URL, or follow a Nostr author (npub or nprofile) |
@@ -441,8 +464,8 @@ ISO 8601 (`2026-11-19T20:57:14Z`), and anything unknown is `null`.
 ```jsonc
 // readstr feeds --json
 [{"id": 1, "url": "https://hnrss.org/frontpage", "title": "Hacker News: Front Page",
-  "siteUrl": "https://news.ycombinator.com/", "description": "…", "category": null,
-  "unread": 20, "total": 20, "lastFetchedAt": "2026-11-19T21:30:00Z", "lastError": null}]
+  "siteUrl": "https://news.ycombinator.com/", "description": "…", "category": "News",
+  "categoryColor": "#3b82f6", "categoryIcon": "📰", "tags": ["tech"], "unread": 20, "total": 20, "lastFetchedAt": "2026-11-19T21:30:00Z", "lastError": null}]
 
 // readstr articles --json, and readstr search QUERY --json (best match first)
 [{"id": 1, "feedId": 1, "feedTitle": "Hacker News: Front Page", "guid": "…",

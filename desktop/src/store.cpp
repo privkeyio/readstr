@@ -216,6 +216,16 @@ const QList<QStringList> migrations = {
         // save put back the very rules the pass started with.
         "ALTER TABLE filter_state ADD COLUMN saves INTEGER NOT NULL DEFAULT 0",
     },
+    {
+        // What the last subscription list applied (kind 30404) says of each
+        // feed's tags, a JSON array or NULL for none, and of each category's
+        // color and icon, checked before they are written. A column of the
+        // feed rather than a table of its own, so a feed unsubscribed and
+        // put back by undo (removeFeed()'s snapshot) keeps its tags.
+        "ALTER TABLE feeds ADD COLUMN tags TEXT",
+        "ALTER TABLE categories ADD COLUMN color TEXT",
+        "ALTER TABLE categories ADD COLUMN icon TEXT",
+    },
 };
 
 // The condition that leaves out an item a filter rule hides.
@@ -357,7 +367,8 @@ const char feedColumns[] =
     "SELECT f.id, f.url, f.title, f.site_url, f.description, c.name, f.etag, f.last_modified, f.last_error,"
     " f.last_fetched_at, f.relay_hints, f.complete_at,"
     " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id AND i.is_read = 0 AND " NOT_HIDDEN("i.") "),"
-    " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id AND " NOT_HIDDEN("i.") "), f.incomplete, f.created_at"
+    " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id AND " NOT_HIDDEN("i.") "), f.incomplete, f.created_at,"
+    " f.tags, c.color, c.icon"
     " FROM feeds f LEFT JOIN categories c ON c.id = f.category_id";
 
 Feed feedFrom(const QSqlQuery &query) {
@@ -380,6 +391,9 @@ Feed feedFrom(const QSqlQuery &query) {
     feed.total = query.value(13).toInt();
     feed.incomplete = query.value(14).toBool();
     feed.createdAt = QDateTime::fromSecsSinceEpoch(query.value(15).toLongLong(), QTimeZone::UTC);
+    feed.tags = QJsonDocument::fromJson(query.value(16).toString().toUtf8()).toVariant().toStringList();
+    feed.categoryColor = query.value(17).toString();
+    feed.categoryIcon = query.value(18).toString();
     return feed;
 }
 
@@ -1056,6 +1070,50 @@ bool Store::setRelayHints(qint64 id, const QStringList &relays) {
     return query.exec() || fail(query.lastError().text());
 }
 
+bool Store::setFeedTags(qint64 id, const QStringList &tags) {
+    QSqlQuery query(m_db);
+    QVariant value(QMetaType::fromType<QString>());
+    if (!tags.isEmpty())
+        value = QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(tags)).toJson(QJsonDocument::Compact));
+    query.prepare(QStringLiteral("UPDATE feeds SET tags = ? WHERE id = ?"));
+    query.addBindValue(value);
+    query.addBindValue(id);
+    return query.exec() || fail(query.lastError().text());
+}
+
+bool Store::replaceCategoryStyles(const QHash<QString, CategoryStyle> &styles, bool *wrote) {
+    if (wrote)
+        *wrote = false;
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("SELECT id, name, color, icon FROM categories")))
+        return fail(query.lastError().text());
+    QHash<qint64, CategoryStyle> changed;
+    while (query.next()) {
+        // An OPML import keeps a name as its file had it, which a list names
+        // cleaned, as a sync import files it.
+        const CategoryStyle style = styles.value(FeedParser::cleanText(query.value(1).toString()));
+        if (style.color != query.value(2).toString() || style.icon != query.value(3).toString())
+            changed.insert(query.value(0).toLongLong(), style);
+    }
+    if (query.lastError().isValid())
+        return fail(query.lastError().text());
+    query.finish();
+    const auto orNull = [](const QString &text) {
+        return text.isEmpty() ? QVariant(QMetaType::fromType<QString>()) : QVariant(text);
+    };
+    query.prepare(QStringLiteral("UPDATE categories SET color = ?, icon = ? WHERE id = ?"));
+    for (auto it = changed.cbegin(); it != changed.cend(); ++it) {
+        query.addBindValue(orNull(it->color));
+        query.addBindValue(orNull(it->icon));
+        query.addBindValue(it.key());
+        if (!query.exec())
+            return fail(query.lastError().text());
+    }
+    if (wrote)
+        *wrote = !changed.isEmpty();
+    return true;
+}
+
 bool Store::recordComplete(qint64 id, const QDateTime &time) {
     QSqlQuery query(m_db);
     query.prepare(QStringLiteral("UPDATE feeds SET complete_at = ? WHERE id = ?"));
@@ -1310,14 +1368,40 @@ Article articleFrom(const QSqlQuery &query) {
     return article;
 }
 
-// The WHERE conditions a filter adds, after "WHERE 1". An item a filter
-// rule hides is never in a view.
-QString filterSql(const ArticleFilter &filter, QVariantList &values) {
-    QString sql = QStringLiteral(" AND " NOT_HIDDEN("i."));
+// The conditions that keep a list to the filter's feeds, its feedId and
+// its tags, which the open article (alsoId) is held to as well.
+QString scopeSql(const ArticleFilter &filter, QVariantList &values) {
+    QString sql;
     if (filter.feedId) {
         sql += " AND i.feed_id = ?";
         values << filter.feedId;
     }
+    if (!filter.tags.isEmpty()) {
+        // One feed lookup for the list, rather than one for each article,
+        // which reads each feed's tags once against the tags wanted, bound
+        // as one JSON array so no count of them meets SQLite's cap on
+        // parameters. A feed carries every tag when as many of its distinct
+        // tags are among them as they are distinct, which a tag it or the
+        // filter lists twice does not change; json_each() gives NULL tags no
+        // rows.
+        QStringList tags = filter.tags;
+        tags.removeDuplicates();
+        sql += " AND i.feed_id IN (SELECT f.id FROM feeds f, json_each(f.tags) t"
+               " WHERE t.value IN (SELECT value FROM json_each(?))";
+        values << QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(tags)).toJson(QJsonDocument::Compact));
+        if (!filter.anyTag && tags.size() > 1) {
+            sql += " GROUP BY f.id HAVING COUNT(DISTINCT t.value) = ?";
+            values << tags.size();
+        }
+        sql += ')';
+    }
+    return sql;
+}
+
+// The WHERE conditions a filter adds, after "WHERE 1". An item a filter
+// rule hides is never in a view.
+QString filterSql(const ArticleFilter &filter, QVariantList &values) {
+    QString sql = QStringLiteral(" AND " NOT_HIDDEN("i.")) + scopeSql(filter, values);
     QStringList only;
     if (filter.unreadOnly)
         only << QStringLiteral("i.is_read = 0");
@@ -1496,11 +1580,7 @@ QList<Article> Store::articlesByWords(const ArticleFilter &filter, const QString
     if (!match.isEmpty())
         values << match;
     values << filter.alsoId;
-    sql = columns + searchJoin + " WHERE i.id = ? AND " NOT_HIDDEN("i.");
-    if (filter.feedId) {
-        sql += " AND i.feed_id = ?";
-        values << filter.feedId;
-    }
+    sql = columns + searchJoin + " WHERE i.id = ? AND " NOT_HIDDEN("i.") + scopeSql(filter, values);
     query.prepare(sql);
     for (const QVariant &value : std::as_const(values))
         query.addBindValue(value);
@@ -1557,11 +1637,7 @@ QList<Article> Store::articles(const ArticleFilter &filter, bool *scanCapped, QL
                + filterSql(rest, values) + " AND i.id <> ?" + order
                + " LIMIT ?) UNION SELECT i.id FROM items i WHERE i.id = ? AND " NOT_HIDDEN("i.");
         values << filter.alsoId << (filter.limit > 0 ? filter.limit : -1) << filter.alsoId;
-        if (filter.feedId) {
-            sql += " AND i.feed_id = ?";
-            values << filter.feedId;
-        }
-        sql += ')' + order;
+        sql += scopeSql(filter, values) + ')' + order;
     }
 
     QList<Article> result;

@@ -455,6 +455,9 @@ private:
         QString error;
         // Not run, as an earlier write of the same undo command failed.
         bool skipped = false;
+        // The library's feeds or categories changed, so the sources are read
+        // again.
+        bool reload = false;
     };
     // What the worker and this thread share about an undo command.
     struct UndoState {

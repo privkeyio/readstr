@@ -329,9 +329,13 @@ ArticleFilter Backend::currentFilter() const {
         filter.starredOnly = true;
     else if (row.kind == SourceModel::Kind::Feed)
         filter.feedId = row.feedId;
-    else if (row.kind == SourceModel::Kind::View)
+    else if (row.kind == SourceModel::Kind::Tag) {
+        filter.tags = row.tags;
+        filter.anyTag = true;
+    } else if (row.kind == SourceModel::Kind::View)
         if (const SavedView *view = savedView(row.viewId)) {
             const ArticleFilter rules = SavedViews::evaluate(*view).filter;
+            filter.tags = rules.tags;
             filter.unreadOnly = rules.unreadOnly;
             filter.starredOnly = rules.starredOnly;
             filter.readOnly = rules.readOnly;
@@ -2723,7 +2727,8 @@ void Backend::publishNext(const std::shared_ptr<PublishRun> &run) {
                 [pubkey = run->account.pubkey, event, builtAt = run->builtAt](Store &store) {
                     WriteResult written;
                     bool superseded = false;
-                    written.error = Sync::recordPublished(store, pubkey, event, builtAt, &superseded);
+                    written.error =
+                        Sync::recordPublished(store, pubkey, event, builtAt, &superseded, &written.reload);
                     written.changed = superseded ? 1 : 0;
                     return written;
                 },
@@ -2740,6 +2745,10 @@ void Backend::publishNext(const std::shared_ptr<PublishRun> &run) {
                         run->settled << event.kind;
                     if (!written.error.isEmpty())
                         run->errors << tr("published, but cannot record it: %1").arg(written.error);
+                    // The tags and category styles the list carried on, when
+                    // the library lacked them, show without waiting for a pull.
+                    if (written.reload)
+                        self->reloadLibrary();
                     self->publishNext(run);
                 });
         }, stillWanted);

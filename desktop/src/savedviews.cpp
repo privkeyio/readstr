@@ -16,7 +16,13 @@ QStringList strings(const QJsonValue &value) {
     for (const QJsonValue &item : value.toArray()) {
         if (out.size() >= maxWords)
             break;
-        if (const QString text = item.toString().left(maxWordLength); !text.isEmpty())
+        // Cut by UTF-16 units, as the web app's slice() cuts, but never
+        // through a surrogate pair: half of one is no character, and SQLite,
+        // which matches a view's tags, is never given it intact.
+        QString text = item.toString().left(maxWordLength);
+        if (text.size() == maxWordLength && text.back().isHighSurrogate())
+            text.chop(1);
+        if (!text.isEmpty())
             out << text;
     }
     return out;
@@ -48,8 +54,8 @@ Evaluation evaluate(const SavedView &saved) {
         unknown("source.feedId");
     else if (kind == QLatin1String("category") && !source.value("categoryId").toString().isEmpty())
         unknown("source.categoryId");
-    else if (kind == QLatin1String("tags") && !strings(source.value("tags")).isEmpty())
-        unknown("source.tags");
+    else if (kind == QLatin1String("tags"))
+        result.filter.tags = strings(source.value("tags"));
     else if (!QStringList{"all", "feed", "category", "tags"}.contains(kind))
         result.unsupported << QStringLiteral("source.kind");
 
@@ -91,7 +97,7 @@ bool listsSame(const SavedView &a, const SavedView &b) {
     const ArticleFilter &x = first.filter, &y = second.filter;
     return first.unknownSource == second.unknownSource && x.unreadOnly == y.unreadOnly
            && x.starredOnly == y.starredOnly && x.readOnly == y.readOnly && x.oldestFirst == y.oldestFirst
-           && x.includeWords == y.includeWords && x.excludeWords == y.excludeWords;
+           && x.includeWords == y.includeWords && x.excludeWords == y.excludeWords && x.tags == y.tags;
 }
 
 QString name(const SavedView &view) {

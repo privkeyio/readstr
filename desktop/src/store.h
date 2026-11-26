@@ -37,6 +37,11 @@ struct Feed {
     bool incomplete = false;
     // When it was subscribed to on this machine.
     QDateTime createdAt = {};
+    // Its tags, and its category's color (Sync::safeColor()) and icon
+    // (Sync::safeIcon()), as the last subscription list applied gave them.
+    QStringList tags = {};
+    QString categoryColor = {};
+    QString categoryIcon = {};
 };
 
 struct Article {
@@ -92,6 +97,12 @@ struct FeedSnapshot {
     QList<QVariantList> items;
     // About how much memory it takes: its text and a little for each value.
     qsizetype bytes = 0;
+};
+
+// A category's color and icon, empty for none.
+struct CategoryStyle {
+    QString color;
+    QString icon;
 };
 
 // The npub the library syncs with. Empty when none is set.
@@ -174,6 +185,14 @@ struct ArticleFilter {
     // (articles()' `scannedIds`), so it marks no further than the list
     // looked, whatever arrived or was read since.
     QList<qint64> scannedIds = {};
+    // Only the articles of feeds that carry every one of these tags, as the
+    // web app's tag filter has it (Prisma's hasEvery), so a view of tags no
+    // feed carries lists nothing. alsoId is listed only within them.
+    QStringList tags = {};
+    // Any one of `tags` will do rather than every one: a tag in the sources
+    // pane stands for every spelling of it that shows the same
+    // (SourceModel::Row::tags).
+    bool anyTag = false;
 };
 
 struct LibraryCounts {
@@ -231,6 +250,14 @@ public:
     // created_at) is newer than the profile they came from.
     bool updateProfile(qint64 id, const ParsedFeed &profile, qint64 revision, const QString &eventId);
     bool setRelayHints(qint64 id, const QStringList &relays);
+    // The feed's tags as a subscription list carries them; none clears them.
+    bool setFeedTags(qint64 id, const QStringList &tags);
+    // Gives each category the color and icon `styles` has for its name as
+    // FeedParser::cleanText() leaves it, and the others none, writing only
+    // those that change, and says in `wrote` whether any did. Neither is
+    // checked here: callers pass them through Sync::safeColor() and
+    // Sync::safeIcon().
+    bool replaceCategoryStyles(const QHash<QString, CategoryStyle> &styles, bool *wrote = nullptr);
     // Every relay answered a refresh that started at `time`.
     bool recordComplete(qint64 id, const QDateTime &time);
     // Whether the Nostr refresh just saved missed something (Feed::incomplete).

@@ -45,6 +45,18 @@ inline constexpr int maxViews = 50;
 inline constexpr qsizetype maxPublishedReadContent = 60000;
 inline constexpr qsizetype readContentReserve = 1024;
 
+// A category icon longer than this, in UTF-16 units, is not shown.
+inline constexpr int maxIconLength = 16;
+
+// A category's color from a subscription list as the sidebar may draw it:
+// "#rrggbb", from "#rgb" or "#rrggbb" in either case, and empty for anything
+// else, so no color name, rgba(), or markup reaches the window.
+QString safeColor(const QString &color);
+// A category's icon from a subscription list as text to show: cleaned as a
+// feed's title is, and empty when that leaves more than maxIconLength
+// units, rather than cut, which could split an emoji.
+QString safeIcon(const QString &icon);
+
 // The account for an npub or nprofile (with or without "nostr:"), with the
 // nprofile's relay hints, or null.
 std::optional<SyncAccount> account(const QString &text);
@@ -78,6 +90,10 @@ struct Outcome {
     QString error;
 };
 // Merges what the relays returned for query(account) into the library.
+// The subscription list applied, just now or before, also gives each feed
+// here its tags and each category its color and icon, as a publish from
+// here carries them on (subscriptionsContent()); one published here gives
+// them when the relays send it back.
 // Each kind applies only when its event is newer than the last one applied
 // (the subscription list also when there are no feeds yet, as on the web),
 // and never removes a subscription or a read mark: subscriptions are only
@@ -127,7 +143,8 @@ QStringList publishedReadGuids(const QStringList &local, const QStringList &remo
 
 // Kind 30404's content: this library's feeds, and from `remote`, the last
 // list the relays held (which may be empty), each listed feed's tags and its
-// category's color and icon, which the desktop does not keep, the feeds it
+// category's color and icon, which the desktop shows but cannot edit, so they
+// come from that list as it was rather than from the library, the feeds it
 // lists that this machine cannot follow (on the local network, or not a
 // web feed or npub), so they are not dropped, and its `deleted`. A feed it
 // lists that this machine could follow but does not was unsubscribed here,
@@ -173,7 +190,15 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
 // its content to build the next one on, and for a read status its GUIDs as
 // the last list (marking nothing read). Empty on success, else why not.
 // `superseded` says whether a newer version applied meanwhile won instead,
-// so what this one carried may be missing from what the relays hold.
+// so what this one carried may be missing from what the relays hold, and
+// `mirrored` whether a subscription list changed the feeds' tags or a
+// category's color or icon here, which the window then shows.
 QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &event, qint64 builtAt,
-                        bool *superseded = nullptr);
+                        bool *superseded = nullptr, bool *mirrored = nullptr);
+#ifdef READSTR_TESTS
+// Only in the test build: called by apply() once it has found the list it
+// mirrors still the one applied, before the transaction that checks so again
+// and mirrors it, on its thread.
+inline std::function<void()> mirrorHook;
+#endif
 }

@@ -16,6 +16,40 @@
 #include "nostrevent.h"
 
 namespace Sync {
+namespace {
+// Whether `text` holds half of a surrogate pair on its own, as a relay's
+// JSON can ("\ud800"). Qt binds such a string to SQLite as broken UTF-8, so
+// once stored it would never read back as itself, nor match as a tag.
+bool hasLoneSurrogate(const QString &text) {
+    for (qsizetype i = 0; i < text.size(); ++i) {
+        if (text.at(i).isHighSurrogate() && i + 1 < text.size() && text.at(i + 1).isLowSurrogate())
+            ++i;
+        else if (text.at(i).isSurrogate())
+            return true;
+    }
+    return false;
+}
+}
+
+QString safeColor(const QString &color) {
+    if ((color.size() != 4 && color.size() != 7) || color.at(0) != QLatin1Char('#'))
+        return {};
+    QString out(1, QLatin1Char('#'));
+    for (qsizetype i = 1; i < color.size(); ++i) {
+        const QChar digit = color.at(i).toLower();
+        if (!(digit >= QLatin1Char('0') && digit <= QLatin1Char('9'))
+            && !(digit >= QLatin1Char('a') && digit <= QLatin1Char('f')))
+            return {};
+        out += color.size() == 4 ? QString(2, digit) : QString(digit);
+    }
+    return out;
+}
+
+QString safeIcon(const QString &icon) {
+    const QString text = FeedParser::cleanText(icon);
+    return text.size() <= maxIconLength && !hasLoneSurrogate(text) ? text : QString();
+}
+
 std::optional<SyncAccount> account(const QString &text) {
     const auto profile = Nip19::decodeProfile(text.trimmed());
     if (!profile)
@@ -105,6 +139,8 @@ struct SubscriptionList {
     QStringList nostr;
     // Feed (as listed) to category name.
     QHash<QString, QString> categories;
+    // The whole list, which fits the schema, for mirrorList().
+    QJsonObject object;
 };
 
 std::optional<SubscriptionList> parseSubscriptions(const QString &content) {
@@ -140,6 +176,7 @@ std::optional<SubscriptionList> parseSubscriptions(const QString &content) {
             list.categories.insert(it.key(), category.value("name").toString());
         }
     }
+    list.object = *object;
     return list;
 }
 
@@ -326,6 +363,118 @@ bool isFresh(const SyncAccount &account, const char *dTag, const NostrEvent &eve
     return event.isNewerThan(last);
 }
 
+// A feed as the subscription list names it, so a local feed and an entry of
+// the list compare: a web feed by Store::urlKey, an author by their npub.
+QString webKey(const QString &url) { return QStringLiteral("web ") + Store::urlKey(url); }
+
+std::optional<QString> authorKey(const QString &entry) {
+    const auto profile = Nip19::decodeProfile(entry.trimmed());
+    if (!profile)
+        return std::nullopt;
+    return QStringLiteral("npub ") + Nip19::npub(profile->pubkey);
+}
+
+// The tags of a feed in the list, when they fit the web app's schema.
+std::optional<QJsonArray> tagsFitting(const QJsonValue &value) {
+    if (!stringArray(value, maxTagsPerFeed, 256))
+        return std::nullopt;
+    return value.toArray();
+}
+
+// Each tag or category entry of a list's map under both keys its name may
+// be, as the list does not say which kind of feed it is about; one lookup
+// per map, as the two may spell the same feed differently.
+QHash<QString, QString> entriesOf(const QJsonObject &map) {
+    QHash<QString, QString> entryOf;
+    for (auto it = map.begin(); it != map.end(); ++it) {
+        entryOf.insert(webKey(it.key()), it.key());
+        if (const auto key = authorKey(it.key()))
+            entryOf.insert(*key, it.key());
+    }
+    return entryOf;
+}
+
+// A category's color and icon, when they fit the web app's schema.
+QJsonObject categoryStyle(const QJsonObject &category) {
+    QJsonObject style;
+    if (isString(category.value("color"), 64))
+        style.insert("color", category.value("color"));
+    if (isString(category.value("icon"), 256))
+        style.insert("icon", category.value("icon"));
+    return style;
+}
+
+// The category entries of a list's map by name as the import files a feed
+// under it (FeedParser::cleanText()), so a name the web app spells with two
+// spaces, a control character, or a bidirectional override still finds its
+// entry once the library holds it cleaned. For each name, the first entry,
+// by feed, with a color or an icon that fits the schema, else the first of
+// that name. mirrorList() shows that entry's style and
+// subscriptionsContent() carries it on, so the sidebar and a publish from
+// here always agree on it.
+QHash<QString, QJsonObject> stylesByName(const QJsonObject &categories) {
+    QHash<QString, QJsonObject> byName;
+    for (auto it = categories.begin(); it != categories.end(); ++it) {
+        const QJsonObject category = it.value().toObject();
+        if (!isString(category.value("name"), 256))
+            continue;
+        const QString name = FeedParser::cleanText(category.value("name").toString());
+        if (name.isEmpty())
+            continue;
+        const auto found = byName.constFind(name);
+        if (found == byName.cend() || (categoryStyle(*found).isEmpty() && !categoryStyle(category).isEmpty()))
+            byName.insert(name, category);
+    }
+    return byName;
+}
+
+// Gives every feed here the tags the list (one parseSubscriptions() took)
+// has for it, found as subscriptionsContent() finds them, and every
+// category the color and icon stylesByName() picks for its name, so the
+// sidebar shows what a publish from here builds on. A feed or a category
+// the list says nothing of has none: they only ever come from a list. A tag
+// that is blank or listed twice is shown once or not at all, and one with a
+// lone surrogate not at all; a color or an icon that is not safe to show is
+// left out. Only what differs is written, and `wrote` says whether anything
+// was.
+bool mirrorList(Store &store, const QJsonObject &list, bool *wrote = nullptr) {
+    if (wrote)
+        *wrote = false;
+    const QJsonObject tagMap = list.value("tags").toObject();
+    const QHash<QString, QString> tagEntryOf = entriesOf(tagMap);
+    const QHash<QString, QJsonObject> byName = stylesByName(list.value("categories").toObject());
+    QHash<QString, CategoryStyle> styles;
+    for (auto it = byName.cbegin(); it != byName.cend(); ++it) {
+        const CategoryStyle style{safeColor(it->value("color").toString()), safeIcon(it->value("icon").toString())};
+        if (!style.color.isEmpty() || !style.icon.isEmpty())
+            styles.insert(it.key(), style);
+    }
+    const QList<Feed> feeds = store.feeds();
+    if (!store.lastError().isEmpty())
+        return false;
+    for (const Feed &feed : feeds) {
+        const QString key = Library::isNostrFeed(feed) ? QStringLiteral("npub ") + feed.url : webKey(feed.url);
+        QStringList tags;
+        for (const QJsonValue &value : tagMap.value(tagEntryOf.value(key)).toArray()) {
+            const QString tag = value.toString();
+            if (!tag.trimmed().isEmpty() && !hasLoneSurrogate(tag) && !tags.contains(tag))
+                tags << tag;
+        }
+        if (tags != feed.tags) {
+            if (!store.setFeedTags(feed.id, tags))
+                return false;
+            if (wrote)
+                *wrote = true;
+        }
+    }
+    bool restyled = false;
+    if (!store.replaceCategoryStyles(styles, &restyled))
+        return false;
+    if (wrote && restyled)
+        *wrote = true;
+    return true;
+}
+
 QString tr(const char *text, int n = -1) { return QCoreApplication::translate("Sync", text, nullptr, n); }
 }
 
@@ -408,6 +557,7 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
         return true;
     };
 
+    std::optional<SubscriptionList> listed;
     if (subscriptions) {
         const QList<Feed> feeds = store.feeds();
         if (!store.lastError().isEmpty())
@@ -420,7 +570,8 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
         if (changed)
             return npubChanged();
         if (fresh) {
-            if (const auto list = parseSubscriptions(subscriptions->content)) {
+            listed = parseSubscriptions(subscriptions->content);
+            if (const auto &list = listed) {
                 // The web app adds what is missing and never applies the
                 // `deleted` list, so neither does this.
                 QList<Opml::Outline> outlines;
@@ -463,6 +614,41 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
                 // Not marked applied, as on the web, so every sync says so
                 // until a list that fits replaces it.
                 refuse(subscriptionsKind);
+            }
+        }
+    }
+
+    // The tags and the category colors and icons of the list applied, just
+    // now or before, which a library from before they were kept lacks, and
+    // which one published here gives when the relays send it back. Checked
+    // under the write, so a newer list applied meanwhile is never mirrored
+    // over.
+    if (subscriptions && !outcome.refused.contains(subscriptionsKind)) {
+        const SyncAccount now = store.syncAccount();
+        if (!store.lastError().isEmpty())
+            return storeFailed();
+        const QString tag = QString::fromLatin1(subscriptionsTag);
+        if (now.pubkey == account.pubkey && now.appliedIds.value(tag) == subscriptions->id) {
+            if (!listed)
+                listed = parseSubscriptions(subscriptions->content);
+            if (listed) {
+#ifdef READSTR_TESTS
+                if (mirrorHook)
+                    mirrorHook();
+#endif
+                const bool mirrored = store.transaction([&] {
+                    const SyncAccount after = store.syncAccount();
+                    if (!store.lastError().isEmpty())
+                        return false;
+                    changed = after.pubkey != account.pubkey;
+                    if (changed || after.appliedIds.value(tag) != subscriptions->id)
+                        return true;
+                    return mirrorList(store, listed->object);
+                });
+                if (!mirrored)
+                    return storeFailed();
+                if (changed)
+                    return npubChanged();
             }
         }
     }
@@ -667,37 +853,9 @@ QString compact(const QJsonObject &object) {
 // The UTF-8 bytes `text` takes in an event, escaped as its content.
 qsizetype eventBytes(const QString &text) { return NostrEvent::jsonString(text).size() - 2; }
 
-// A feed as the subscription list names it, so a local feed and an entry of
-// the list compare: a web feed by Store::urlKey, an author by their npub.
-QString webKey(const QString &url) { return QStringLiteral("web ") + Store::urlKey(url); }
-
-std::optional<QString> authorKey(const QString &entry) {
-    const auto profile = Nip19::decodeProfile(entry.trimmed());
-    if (!profile)
-        return std::nullopt;
-    return QStringLiteral("npub ") + Nip19::npub(profile->pubkey);
-}
-
 // A URL with a user name or password, which never goes into the public list,
 // even when the last list carried it.
 bool hasUserInfo(const QString &entry) { return !QUrl(entry).userInfo().isEmpty(); }
-
-// The tags of a feed in the list, when they fit the web app's schema.
-std::optional<QJsonArray> tagsFitting(const QJsonValue &value) {
-    if (!stringArray(value, maxTagsPerFeed, 256))
-        return std::nullopt;
-    return value.toArray();
-}
-
-// A category's color and icon, when they fit the web app's schema.
-QJsonObject categoryStyle(const QJsonObject &category) {
-    QJsonObject style;
-    if (isString(category.value("color"), 64))
-        style.insert("color", category.value("color"));
-    if (isString(category.value("icon"), 256))
-        style.insert("icon", category.value("icon"));
-    return style;
-}
 }
 
 std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QString &remote, qint64 remoteStoredAt,
@@ -705,28 +863,8 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
     const QJsonObject list = parseObject(remote).value_or(QJsonObject{});
     const QJsonObject remoteTags = list.value("tags").toObject(),
                       remoteCategories = list.value("categories").toObject();
-    // Each tag and category entry under both keys its name may be, as the
-    // list does not say which kind of feed it is about; one lookup per map,
-    // as the two may spell the same feed differently.
-    const auto entriesOf = [](const QJsonObject &map) {
-        QHash<QString, QString> entryOf;
-        for (auto it = map.begin(); it != map.end(); ++it) {
-            entryOf.insert(webKey(it.key()), it.key());
-            if (const auto key = authorKey(it.key()))
-                entryOf.insert(*key, it.key());
-        }
-        return entryOf;
-    };
     const QHash<QString, QString> tagEntryOf = entriesOf(remoteTags), categoryEntryOf = entriesOf(remoteCategories);
-    // A category's color and icon, by name, from whichever feed has them.
-    QHash<QString, QJsonObject> styles;
-    for (auto it = remoteCategories.begin(); it != remoteCategories.end(); ++it) {
-        const QJsonObject category = it.value().toObject();
-        const QString name = category.value("name").toString();
-        const QJsonObject style = categoryStyle(category);
-        if (!name.isEmpty() && !style.isEmpty() && !styles.contains(name))
-            styles.insert(name, style);
-    }
+    const QHash<QString, QJsonObject> byName = stylesByName(remoteCategories);
     // What another device unsubscribed from.
     QSet<QString> remoteDeleted;
     for (const QJsonValue &value : list.value("deleted").toArray()) {
@@ -780,9 +918,17 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
         const QString name = feed.category.left(256);
         if (name.isEmpty() || categories.size() >= maxFeeds)
             continue;
+        // The category as the last list names it, so the publish neither
+        // renames it nor drops its style when the library holds its name
+        // cleaned: the feed's own entry when it is of this category, else
+        // the one stylesByName() picks, as the sidebar shows it.
+        const QString cleaned = FeedParser::cleanText(name);
         const QJsonObject own = remoteCategories.value(categoryEntryOf.value(key)).toObject();
-        QJsonObject category = own.value("name").toString() == name ? categoryStyle(own) : styles.value(name);
-        category.insert("name", name);
+        const bool ownIsThisCategory = isString(own.value("name"), 256) && !cleaned.isEmpty()
+                                       && FeedParser::cleanText(own.value("name").toString()) == cleaned;
+        const QJsonObject web = ownIsThisCategory ? own : byName.value(cleaned);
+        QJsonObject category = categoryStyle(web);
+        category.insert("name", web.isEmpty() ? name : web.value("name").toString());
         categories.insert(feed.url, category);
     }
     // What the last list holds that is not here: kept when this machine
@@ -1029,9 +1175,9 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
 }
 
 QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &event, qint64 builtAt,
-                        bool *superseded) {
+                        bool *superseded, bool *mirrored) {
     const QString tag = QString::fromLatin1(dTag(event.kind));
-    bool changed = false, lost = false;
+    bool changed = false, lost = false, wrote = false;
     const bool saved = store.transaction([&] {
         const SyncAccount account = store.syncAccount();
         if (!store.lastError().isEmpty())
@@ -1052,6 +1198,11 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
         if (event.kind == readStatusKind
             && !store.rememberReadGuids(parseReadStatus(event.content).value_or(QStringList())))
             return false;
+        // What it carried on for the feeds here is kept at once, and
+        // `mirrored` tells the window to show it.
+        if (event.kind == subscriptionsKind)
+            if (const auto list = parseSubscriptions(event.content); list && !mirrorList(store, list->object, &wrote))
+                return false;
         // Stamped with when the content was built, not now: a feed
         // subscribed while this run signed and published is not in it.
         return store.setSyncRemote(tag, event.id, event.content, builtAt);
@@ -1060,6 +1211,8 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
         return store.lastError();
     if (superseded)
         *superseded = lost;
+    if (mirrored)
+        *mirrored = wrote;
     return changed ? tr("the npub changed during publishing") : QString();
 }
 }

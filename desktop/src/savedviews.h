@@ -13,15 +13,15 @@ namespace SavedViews {
 // What a view lists here: its rules as an ArticleFilter, which the caller
 // gives its own limit, search, and open article, and the rules it cannot
 // apply, by the field the view holds them in ("source.feedId",
-// "source.categoryId", "source.tags", or any field this version does not
-// know).
+// "source.categoryId", or any field this version does not know). A view of
+// tags lists the articles of the feeds that carry every one of them
+// (ArticleFilter::tags), as the web app's does.
 struct Evaluation {
     ArticleFilter filter;
     QStringList unsupported;
-    // Its source is one feed, one category, or some tags, which the web app
-    // names by its server's own ids and the desktop keeps no tags for, so
-    // which articles it means cannot be told here (readstr-5us carries what
-    // would tell them, readstr-gp3.13 the tags): it lists nothing, rather
+    // Its source is one feed or one category, which the web app names by its
+    // server's own ids, so which articles it means cannot be told here
+    // (readstr-5us carries what would tell them): it lists nothing, rather
     // than every feed, and cannot be selected. Any other rule left out is
     // left out of a view that still lists, which then lists more here than
     // in the web app, never less.
