@@ -413,6 +413,13 @@ void Backend::reloadCounts() {
     }
     m_sources.setLibrary(feeds, *counts, m_views);
     const int row = m_sources.rowOf(selected);
+    // A tag that another process, or a pull, gave to other feeds lists
+    // theirs, as a view whose rules changed does, though its spellings may
+    // be the same.
+    if (selected.kind == SourceModel::Kind::Tag && row >= 0) {
+        const SourceModel::Row now = m_sources.row(row);
+        rulesChanged = now.tags != selected.tags || now.feedIds != selected.feedIds;
+    }
     if (m_feedCount != feeds.size()) {
         m_feedCount = int(feeds.size());
         emit libraryChanged();
@@ -422,7 +429,8 @@ void Backend::reloadCounts() {
         // shown for it follows.
         if (m_sources.row(row).title != selected.title)
             emit sourceChanged();
-        // A view whose rules changed lists what they hold now.
+        // A view whose rules changed, or a tag whose feeds did, lists what
+        // they hold now.
         if (rulesChanged)
             loadArticles();
         return;

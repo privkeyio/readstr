@@ -179,8 +179,12 @@ space, are listed once, and select the feeds that carry any of them. At most
 500 tags are listed, those carried by the most feeds. A category's heading
 shows its color as a dot and its icon before its name. Both are shown as the
 last subscription list applied has them, pulled or published here, so a
-newer list from the web app updates them, and a feed or category the list
-says nothing of has none. A color is shown only as `#rgb` or `#rrggbb`, and
+newer list from the web app updates them, and a feed the list lists without
+tags, or a category it names without a color or icon, has none. A feed the
+list leaves out, such as one whose unsubscribe you undid while the list
+without it was going out, keeps its own, and the next list carries them
+on. Signing in with another npub clears them until its list arrives. A tag
+that is blank or holds a control character is left out. A color is shown only as `#rgb` or `#rrggbb`, and
 an icon only when it is 16 UTF-16 code units or fewer (a letter or a simple
 emoji takes one or two, so about 8 emoji at most); anything else is left
 out. They are read only here for now: edit them in the

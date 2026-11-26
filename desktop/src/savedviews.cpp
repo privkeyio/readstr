@@ -11,17 +11,24 @@ namespace {
 constexpr qsizetype maxWords = 50, maxWordLength = 200;
 
 // The strings of a JSON array, as the web app's sanitizeStrings keeps them.
-QStringList strings(const QJsonValue &value) {
+// Tags are kept whole rather than cut, so a view's tag is the same string as
+// the feed's tag it names, which can be longer than a word. One no feed can
+// carry is left for the store to list nothing for (Sync::storableTag()), as
+// dropping it would list more.
+QStringList strings(const QJsonValue &value, bool tags = false) {
     QStringList out;
     for (const QJsonValue &item : value.toArray()) {
         if (out.size() >= maxWords)
             break;
         // Cut by UTF-16 units, as the web app's slice() cuts, but never
-        // through a surrogate pair: half of one is no character, and SQLite,
-        // which matches a view's tags, is never given it intact.
-        QString text = item.toString().left(maxWordLength);
-        if (text.size() == maxWordLength && text.back().isHighSurrogate())
-            text.chop(1);
+        // through a surrogate pair: half of one is no character, and the
+        // word would not match as itself.
+        QString text = item.toString();
+        if (!tags) {
+            text.truncate(maxWordLength);
+            if (text.size() == maxWordLength && text.back().isHighSurrogate())
+                text.chop(1);
+        }
         if (!text.isEmpty())
             out << text;
     }
@@ -55,7 +62,7 @@ Evaluation evaluate(const SavedView &saved) {
     else if (kind == QLatin1String("category") && !source.value("categoryId").toString().isEmpty())
         unknown("source.categoryId");
     else if (kind == QLatin1String("tags"))
-        result.filter.tags = strings(source.value("tags"));
+        result.filter.tags = strings(source.value("tags"), true);
     else if (!QStringList{"all", "feed", "category", "tags"}.contains(kind))
         result.unsupported << QStringLiteral("source.kind");
 

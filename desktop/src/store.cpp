@@ -1383,9 +1383,19 @@ QString scopeSql(const ArticleFilter &filter, QVariantList &values) {
         // parameters. A feed carries every tag when as many of its distinct
         // tags are among them as they are distinct, which a tag it or the
         // filter lists twice does not change; json_each() gives NULL tags no
-        // rows.
-        QStringList tags = filter.tags;
-        tags.removeDuplicates();
+        // rows. A tag no feed can carry (Sync::storableTag()) is never bound,
+        // as older SQLite could match it as another: wanted with the others,
+        // it leaves no feed, and as one spelling of many, it is passed over.
+        QStringList tags;
+        bool uncarried = false;
+        for (const QString &tag : filter.tags) {
+            if (!Sync::storableTag(tag))
+                uncarried = true;
+            else if (!tags.contains(tag))
+                tags << tag;
+        }
+        if (tags.isEmpty() || (uncarried && !filter.anyTag))
+            return sql + QStringLiteral(" AND 0");
         sql += " AND i.feed_id IN (SELECT f.id FROM feeds f, json_each(f.tags) t"
                " WHERE t.value IN (SELECT value FROM json_each(?))";
         values << QString::fromUtf8(QJsonDocument(QJsonArray::fromStringList(tags)).toJson(QJsonDocument::Compact));
@@ -2017,6 +2027,15 @@ bool Store::setSyncAccount(const QString &npub, const QString &pubkey, const QSt
         // one's events.
         if (!same && !clearSyncState())
             return false;
+        // Nor do its tags and category styles, which a publish carries on
+        // for a feed its list does not list (Sync::subscriptionsContent()),
+        // so they would otherwise go into this account's list.
+        if (!same)
+            for (const char *statement : {"UPDATE feeds SET tags = NULL WHERE tags IS NOT NULL",
+                                          "UPDATE categories SET color = NULL, icon = NULL"
+                                          " WHERE color IS NOT NULL OR icon IS NOT NULL"})
+                if (!query.exec(QString::fromLatin1(statement)))
+                    return fail(query.lastError().text());
         query.prepare(QStringLiteral("INSERT INTO sync_account (id, npub, pubkey, relay_hints) VALUES (1, ?, ?, ?)"
                                      " ON CONFLICT(id) DO UPDATE SET npub = excluded.npub, pubkey = excluded.pubkey,"
                                      " relay_hints = excluded.relay_hints"));

@@ -7691,7 +7691,8 @@ private slots:
         QVERIFY(result.unknownSource);
         // Tags are kept here, so a view of them lists the feeds that carry
         // them all, its tags sanitized as the web app's sanitizeStrings has
-        // them: strings only, cut to 200 characters, none empty, at most 50.
+        // them: strings only, none empty, at most 50, but kept whole, as a
+        // feed keeps its tags, rather than cut to 200 characters.
         result = evaluate({{"source", QJsonObject{{"kind", "tags"}, {"tags", QJsonArray{"rust", "", 7, "go"}}}}});
         QVERIFY(result.unsupported.isEmpty());
         QVERIFY(!result.unknownSource);
@@ -7701,7 +7702,7 @@ private slots:
             manyTags << QString::number(i) + QString(300, 't');
         result = evaluate({{"source", QJsonObject{{"kind", "tags"}, {"tags", manyTags}}}});
         QCOMPARE(result.filter.tags.size(), 50);
-        QCOMPARE(result.filter.tags.first(), ("0" + QString(300, 't')).left(200));
+        QCOMPARE(result.filter.tags.first(), "0" + QString(300, 't'));
         // Tags that are not in a tags view pick nothing.
         result = evaluate({{"source", QJsonObject{{"kind", "all"}, {"tags", QJsonArray{"rust"}}}}});
         QVERIFY(result.filter.tags.isEmpty());
@@ -8897,6 +8898,252 @@ private slots:
         QCOMPARE(list.value("categories").toObject(), remote.value("categories").toObject());
     }
 
+    // A view's tags are matched whole, as a feed keeps them, even past the
+    // 200 units a view's words are cut to; and a view that names a tag no
+    // feed can carry lists nothing, rather than every feed of its others.
+    void savedViewsMatchTagsWhole()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        const qint64 a = store.addFeed("https://a.example.com/feed", "A");
+        const qint64 b = store.addFeed("https://b.example.com/feed", "B");
+        ParsedItem item;
+        item.guid = item.title = "In A";
+        QCOMPARE(store.saveItems(a, {item}), 1);
+        item.guid = item.title = "In B";
+        QCOMPARE(store.saveItems(b, {item}), 1);
+        const QString longTag = QString(230, 't'), tooLong = QString(Sync::maxTagLength + 1, 'u');
+        QVERIFY(store.setFeedTags(a, {longTag, "tech"}));
+        QVERIFY(store.setFeedTags(b, {"tech"}));
+        const auto listed = [&store](const QJsonArray &tags) {
+            const SavedView view =
+                savedView("v", QJsonObject{{"source", QJsonObject{{"kind", "tags"}, {"tags", tags}}}});
+            ArticleFilter filter = SavedViews::evaluate(view).filter;
+            return titlesOf(store.articles(filter));
+        };
+        QCOMPARE(listed({longTag}), QStringList{"In A"});
+        QCOMPARE(listed({"tech"}), (QStringList{"In B", "In A"}));
+        QVERIFY(listed({tooLong}).isEmpty());
+        QVERIFY(listed({"tech", tooLong}).isEmpty());
+        // A view's words are still cut as the web app cuts them, but not
+        // through an emoji's surrogate pair.
+        const SavedView words = savedView(
+            "w", QJsonObject{{"keywords", QJsonObject{{"include", QJsonArray{QString(230, 'w'),
+                                                                              QString(199, 'x') + "😀"}}}}});
+        QCOMPARE(SavedViews::evaluate(words).filter.includeWords, (QStringList{QString(200, 'w'), QString(199, 'x')}));
+    }
+
+    // A tag with U+0000 or another C0 control character is never kept from
+    // a list, as older SQLite could cut it short and match it as another,
+    // and one a library kept before is never given to SQLite: a view
+    // naming it lists nothing, and as one spelling of many it is passed over.
+    void syncKeepsNoTagWithAControlCharacter()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed", b = "https://b.invalid/feed";
+        const QString nul = QString("news") + QChar(0) + "local", tab = "a\tb";
+        const QJsonObject list{{"rss", QJsonArray{a, b}},
+                               {"nostr", QJsonArray()},
+                               {"tags", QJsonObject{{a, QJsonArray{"news", nul, tab, "ok"}}}}};
+        const Sync::Outcome outcome = Sync::apply(
+            store, store.syncAccount(),
+            syncResult({syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, list, now)}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        QHash<QString, Feed> feeds;
+        for (const Feed &feed : store.feeds())
+            feeds.insert(feed.url, feed);
+        QCOMPARE(feeds.value(a).tags, (QStringList{"news", "ok"}));
+        QVERIFY(!Sync::storableTag(nul) && !Sync::storableTag(tab) && Sync::storableTag("news"));
+
+        ParsedItem item;
+        item.guid = item.title = "In A";
+        QCOMPARE(store.saveItems(feeds.value(a).id, {item}), 1);
+        item.guid = item.title = "In B";
+        QCOMPARE(store.saveItems(feeds.value(b).id, {item}), 1);
+        QVERIFY(store.setFeedTags(feeds.value(b).id, {nul}));
+        ArticleFilter filter;
+        filter.tags = {nul};
+        QVERIFY(titlesOf(store.articles(filter)).isEmpty());
+        filter.tags = {"news", nul};
+        QVERIFY(titlesOf(store.articles(filter)).isEmpty());
+        filter.anyTag = true;
+        QCOMPARE(titlesOf(store.articles(filter)), QStringList{"In A"});
+        filter.tags = {nul};
+        QVERIFY(titlesOf(store.articles(filter)).isEmpty());
+    }
+
+    // A list with an empty key gives its tags and its category to no feed
+    // without an entry of its own, in the sidebar or in a publish from here.
+    void syncGivesNoFeedTheEntryOfAnEmptyKey()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed", b = "https://b.invalid/feed", x = "https://x.invalid/feed",
+                      c = "https://c.invalid/feed";
+        const QJsonObject green{{"name", "News"}, {"color", "#0f0"}};
+        const QJsonObject list{{"rss", QJsonArray{a, b, x}},
+                               {"nostr", QJsonArray()},
+                               {"tags", QJsonObject{{"", QJsonArray{"tech"}}, {a, QJsonArray{"own"}}}},
+                               {"categories", QJsonObject{{"", QJsonObject{{"name", "News"}}}, {x, green}}}};
+        const Sync::Outcome outcome = Sync::apply(
+            store, store.syncAccount(),
+            syncResult({syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, list, now - 100)}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        QVERIFY(store.addFeed(c, "C", "News") > 0);
+        QHash<QString, Feed> feeds;
+        for (const Feed &feed : store.feeds())
+            feeds.insert(feed.url, feed);
+        QCOMPARE(feeds.value(a).tags, QStringList{"own"});
+        QVERIFY(feeds.value(b).tags.isEmpty());
+        QVERIFY(feeds.value(x).tags.isEmpty());
+        QCOMPARE(feeds.value(c).categoryColor, QString("#00ff00"));
+
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const QJsonObject published = QJsonDocument::fromJson(drafts.events.first().content.toUtf8()).object();
+        QCOMPARE(published.value("tags").toObject(), (QJsonObject{{a, QJsonArray{"own"}}}));
+        QCOMPARE(published.value("categories").toObject().value(c).toObject(), green);
+    }
+
+    // A published list that cannot be mirrored here is still recorded as
+    // the one the relays hold, and the next pull mirrors it.
+    void syncRecordsAPublishItCannotMirror()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY(store.open(path));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed";
+        const QJsonObject list{
+            {"rss", QJsonArray{a}}, {"nostr", QJsonArray()}, {"tags", QJsonObject{{a, QJsonArray{"t"}}}}};
+        QVERIFY(Sync::apply(store, store.syncAccount(),
+                            syncResult({syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, list, now - 100)}))
+                    .problems.isEmpty());
+        const qint64 id = store.feeds().value(0).id;
+        QVERIFY(store.setFeedTags(id, {}));
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const NostrEvent draft = drafts.events.first();
+        const QJsonObject json = signedEvent(draft.kind, draft.content, draft.tags, draft.createdAt);
+        const NostrEvent published = *NostrEvent::fromJson(json);
+
+        QCOMPARE(rawExec(path, "CREATE TRIGGER refuse BEFORE UPDATE OF tags ON feeds"
+                               " BEGIN SELECT RAISE(ABORT, 'refused'); END"),
+                 QString());
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("cannot show the subscription list's tags: .*refused"));
+        bool mirrored = true;
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), published, now, nullptr, &mirrored), QString());
+        QVERIFY(!mirrored);
+        const QString tag = QString::fromLatin1(Sync::subscriptionsTag);
+        QCOMPARE(store.syncAccount().appliedIds.value(tag), published.id);
+        QCOMPARE(store.syncRemote(tag).value_or(SyncRemote{}).eventId, published.id);
+        QVERIFY(store.feeds().value(0).tags.isEmpty());
+
+        QCOMPARE(rawExec(path, "DROP TRIGGER refuse"), QString());
+        const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({json}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        QCOMPARE(store.feeds().value(0).tags, QStringList{"t"});
+    }
+
+    // An unsubscribe undone before the list published without the feed is
+    // recorded keeps the feed's tags and its category's style, here and in
+    // the next list published; a newer list from the web app that takes
+    // them away still does; and another account's list never gets them.
+    void syncKeepsTagsOfAnUnsubscribeUndoneBeforeItsPublishIsRecorded()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed", b = "https://b.invalid/feed";
+        const QJsonObject solo{{"name", "Solo"}, {"color", "#123456"}, {"icon", "S"}};
+        const QJsonObject remote{{"rss", QJsonArray{a, b}},
+                                 {"nostr", QJsonArray()},
+                                 {"tags", QJsonObject{{a, QJsonArray{"web"}}, {b, QJsonArray{"other"}}}},
+                                 {"categories", QJsonObject{{a, solo}}},
+                                 {"lastUpdated", now - 100}};
+        Sync::Outcome outcome = Sync::apply(
+            store, store.syncAccount(),
+            syncResult({syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, remote, now - 100)}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        const auto feedOf = [&store](const QString &url) {
+            for (const Feed &feed : store.feeds())
+                if (feed.url == url)
+                    return feed;
+            return Feed{};
+        };
+        const auto draftAt = [&](qint64 at) {
+            const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, at);
+            if (drafts.events.size() != 1)
+                qWarning("no draft: %s %s", qPrintable(drafts.error), qPrintable(drafts.notes.join("; ")));
+            return drafts.events.value(0);
+        };
+        const auto contentOf = [](const NostrEvent &event) {
+            return QJsonDocument::fromJson(event.content.toUtf8()).object();
+        };
+        QCOMPARE(feedOf(a).tags, QStringList{"web"});
+
+        // Unsubscribed, published without it, and undone before the
+        // publish is recorded.
+        FeedSnapshot snapshot;
+        QVERIFY(store.removeFeed(feedOf(a).id, &snapshot));
+        const NostrEvent draft = draftAt(now);
+        QCOMPARE(contentOf(draft).value("deleted").toArray(), QJsonArray{a});
+        QVERIFY(store.restoreFeed(snapshot));
+        const NostrEvent published =
+            *NostrEvent::fromJson(signedEvent(draft.kind, draft.content, draft.tags, draft.createdAt));
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), published, now), QString());
+        QCOMPARE(feedOf(a).tags, QStringList{"web"});
+        QCOMPARE(feedOf(a).categoryColor, QString("#123456"));
+        QCOMPARE(feedOf(a).categoryIcon, QString("S"));
+        QCOMPARE(feedOf(b).tags, QStringList{"other"});
+        QJsonObject next = contentOf(draftAt(now + 10));
+        QVERIFY(next.value("rss").toArray().contains(a));
+        QCOMPARE(next.value("tags").toObject(),
+                 (QJsonObject{{a, QJsonArray{"web"}}, {b, QJsonArray{"other"}}}));
+        QCOMPARE(next.value("categories").toObject().value(a).toObject(),
+                 (QJsonObject{{"name", "Solo"}, {"color", "#123456"}, {"icon", "S"}}));
+
+        // The web app takes a's tags and Solo's style away.
+        const QJsonObject newer{{"rss", QJsonArray{a, b}},
+                                {"nostr", QJsonArray()},
+                                {"tags", QJsonObject{{b, QJsonArray{"other"}}}},
+                                {"categories", QJsonObject{{a, QJsonObject{{"name", "Solo"}}}}},
+                                {"lastUpdated", now + 100}};
+        const QJsonObject newerEvent = syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, newer, now + 100);
+        outcome = Sync::apply(store, store.syncAccount(), syncResult({newerEvent}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        QVERIFY(feedOf(a).tags.isEmpty());
+        QVERIFY(feedOf(a).categoryColor.isEmpty() && feedOf(a).categoryIcon.isEmpty());
+        next = contentOf(draftAt(now + 200));
+        QCOMPARE(next.value("tags").toObject(), (QJsonObject{{b, QJsonArray{"other"}}}));
+        QCOMPARE(next.value("categories").toObject().value(a).toObject(), (QJsonObject{{"name", "Solo"}}));
+
+        // Another account starts with none of this one's.
+        QVERIFY(store.setFeedTags(feedOf(a).id, {"mine"}));
+        QVERIFY(store.replaceCategoryStyles({{"Solo", CategoryStyle{"#654321", "M"}}}));
+        const QString other(64, 'd');
+        QVERIFY(store.setSyncAccount(Nip19::npub(other), other, {}));
+        QVERIFY(feedOf(a).tags.isEmpty() && feedOf(b).tags.isEmpty());
+        QVERIFY(feedOf(a).categoryColor.isEmpty() && feedOf(a).categoryIcon.isEmpty());
+        const Sync::Drafts fresh = Sync::drafts(store, other, {Sync::subscriptionsKind}, {}, now + 300);
+        QCOMPARE(fresh.events.size(), 1);
+        QVERIFY(!contentOf(fresh.events.first()).contains("tags"));
+        QCOMPARE(contentOf(fresh.events.first()).value("categories").toObject().value(a).toObject(),
+                 (QJsonObject{{"name", "Solo"}}));
+    }
+
     // ArticleFilter::tags lists the articles of the feeds that carry every
     // tag, exactly as spelled, and keeps alsoId, words, and marking read
     // within them, as a view of tags does.
@@ -8989,11 +9236,11 @@ private slots:
             return savedView("w", {{"source", QJsonObject{{"kind", "tags"}, {"tags", tags}}}});
         };
         QVERIFY(titles(SavedViews::evaluate(ofTags({"go"})).filter).isEmpty());
-        // Cut to 200 UTF-16 units as the web app cuts it, but not through an
-        // emoji's surrogate pair.
-        const QString cut = QString(199, 'x') + "😀";
-        QCOMPARE(SavedViews::evaluate(ofTags({cut, QString(201, 'y')})).filter.tags,
-                 (QStringList{QString(199, 'x'), QString(200, 'y')}));
+        // Kept whole, as a feed keeps its tags, rather than cut to 200
+        // UTF-16 units as a view's words are (savedViewsMatchTagsWhole()).
+        const QString whole = QString(199, 'x') + "😀";
+        QCOMPARE(SavedViews::evaluate(ofTags({whole, QString(201, 'y')})).filter.tags,
+                 (QStringList{whole, QString(201, 'y')}));
         QVERIFY(!SavedViews::listsSame(ofTags({"go"}), ofTags({"rust"})));
     }
 
@@ -10159,6 +10406,33 @@ private slots:
         QTRY_COMPARE(backend.sourceKind(), QString("all"));
         QCOMPARE(backend.articles()->count(), 3);
         QVERIFY(!backend.hasArticle());
+    }
+
+    // A selected tag that another process gives to other feeds lists
+    // theirs once the window reads the library again, though it is spelled
+    // the same.
+    void backendFollowsATagWhoseFeedsChange()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        Store other;
+        QVERIFY(other.open());
+        QVERIFY(other.setFeedTags(first, {"t"}));
+        Backend backend;
+        SourceModel &sources = *backend.sources();
+        const int row = sources.rowOfTag("t");
+        QVERIFY(row >= 0);
+        backend.selectSource(row);
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Newest", "Older", "Oldest"}));
+
+        QVERIFY(other.setFeedTags(first, {}));
+        QVERIFY(other.setFeedTags(second, {"t"}));
+        backend.selectArticle(0);
+        QTRY_COMPARE(titlesOf(backend.articles()), (QStringList{"Second A", "Second B"}));
+        QCOMPARE(backend.sourceIndex(), sources.rowOfTag("t"));
+        QCOMPARE(backend.sourceKind(), QString("tag"));
     }
 
     // A read article stays in Unread, in its place, until the view changes.

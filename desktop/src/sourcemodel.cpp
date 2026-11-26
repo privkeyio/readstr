@@ -117,6 +117,7 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
     // show.
     struct TagFeeds {
         QSet<QString> spellings;
+        QList<qint64> feedIds;
         int feeds = 0;
         int unread = 0;
     };
@@ -136,6 +137,7 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
             if (!names.contains(name)) {
                 names.insert(name);
                 ++entry.feeds;
+                entry.feedIds << feed.id;
                 entry.unread += feed.unread;
             }
         }
@@ -164,6 +166,8 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
         row.tag = name;
         row.tags = QStringList(entry.spellings.cbegin(), entry.spellings.cend());
         std::sort(row.tags.begin(), row.tags.end());
+        row.feedIds = entry.feedIds;
+        std::sort(row.feedIds.begin(), row.feedIds.end());
         row.count = entry.unread;
         tagRows << row;
     }
@@ -237,7 +241,7 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
             || before.lastError != after.lastError || before.nostr != after.nostr
             || before.incomplete != after.incomplete || before.icon != after.icon
             || before.unsupported != after.unsupported || before.unknownSource != after.unknownSource
-            || before.color != after.color || before.tags != after.tags) {
+            || before.color != after.color || before.tags != after.tags || before.feedIds != after.feedIds) {
             m_rows[i] = after;
             emit dataChanged(index(int(i)), index(int(i)));
         }

@@ -51,6 +51,9 @@ public:
         QString tag = {};
         QStringList tags = {};
         QString color = {};
+        // A tag row's feeds, by id, sorted, so a selected tag whose feeds
+        // change lists theirs, whether or not its spellings change too.
+        QList<qint64> feedIds = {};
         // Same place in the list: a reload that keeps every row's identity
         // updates rows in place instead of resetting the view.
         bool sameSource(const Row &other) const {

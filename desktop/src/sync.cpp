@@ -50,6 +50,12 @@ QString safeIcon(const QString &icon) {
     return text.size() <= maxIconLength && !hasLoneSurrogate(text) ? text : QString();
 }
 
+bool storableTag(const QString &tag) {
+    if (tag.size() > maxTagLength || tag.trimmed().isEmpty() || hasLoneSurrogate(tag))
+        return false;
+    return std::none_of(tag.cbegin(), tag.cend(), [](QChar c) { return c.unicode() < 0x20; });
+}
+
 std::optional<SyncAccount> account(const QString &text) {
     const auto profile = Nip19::decodeProfile(text.trimmed());
     if (!profile)
@@ -394,6 +400,19 @@ QHash<QString, QString> entriesOf(const QJsonObject &map) {
     return entryOf;
 }
 
+// The feeds a list lists, in "rss" or "nostr", by the keys a feed here is
+// found under, as entriesOf() keys them.
+QSet<QString> listedKeys(const QJsonObject &list) {
+    QSet<QString> keys;
+    for (const QJsonValue &entry : list.value("rss").toArray())
+        if (entry.isString())
+            keys.insert(webKey(entry.toString()));
+    for (const QJsonValue &entry : list.value("nostr").toArray())
+        if (const auto key = authorKey(entry.toString()))
+            keys.insert(*key);
+    return keys;
+}
+
 // A category's color and icon, when they fit the web app's schema.
 QJsonObject categoryStyle(const QJsonObject &category) {
     QJsonObject style;
@@ -431,17 +450,22 @@ QHash<QString, QJsonObject> stylesByName(const QJsonObject &categories) {
 // Gives every feed here the tags the list (one parseSubscriptions() took)
 // has for it, found as subscriptionsContent() finds them, and every
 // category the color and icon stylesByName() picks for its name, so the
-// sidebar shows what a publish from here builds on. A feed or a category
-// the list says nothing of has none: they only ever come from a list. A tag
-// that is blank or listed twice is shown once or not at all, and one with a
-// lone surrogate not at all; a color or an icon that is not safe to show is
-// left out. Only what differs is written, and `wrote` says whether anything
-// was.
+// sidebar shows what a publish from here builds on. A feed the list lists
+// or has tags for, and a category it names, has only what the list gives,
+// as they only ever come from a list. A feed it neither lists nor has tags
+// for keeps its own, as does its category when the list names it nowhere:
+// the list may be one published here while an unsubscribe was undone, which
+// says nothing of the feed, and a list that took a feed's tags away from it
+// still lists it. A tag that is listed twice is shown once, and one that
+// storableTag() refuses not at all; a color or an icon that is not safe to
+// show is left out. Only what differs is written, and `wrote` says whether
+// anything was.
 bool mirrorList(Store &store, const QJsonObject &list, bool *wrote = nullptr) {
     if (wrote)
         *wrote = false;
     const QJsonObject tagMap = list.value("tags").toObject();
     const QHash<QString, QString> tagEntryOf = entriesOf(tagMap);
+    const QSet<QString> listed = listedKeys(list);
     const QHash<QString, QJsonObject> byName = stylesByName(list.value("categories").toObject());
     QHash<QString, CategoryStyle> styles;
     for (auto it = byName.cbegin(); it != byName.cend(); ++it) {
@@ -454,12 +478,23 @@ bool mirrorList(Store &store, const QJsonObject &list, bool *wrote = nullptr) {
         return false;
     for (const Feed &feed : feeds) {
         const QString key = Library::isNostrFeed(feed) ? QStringLiteral("npub ") + feed.url : webKey(feed.url);
-        QStringList tags;
-        for (const QJsonValue &value : tagMap.value(tagEntryOf.value(key)).toArray()) {
-            const QString tag = value.toString();
-            if (!tag.trimmed().isEmpty() && !hasLoneSurrogate(tag) && !tags.contains(tag))
-                tags << tag;
+        // Looked up, not taken by value, so a feed with no entry is never
+        // given the entry of an empty key.
+        const auto entry = tagEntryOf.constFind(key);
+        if (entry == tagEntryOf.cend() && !listed.contains(key)) {
+            const QString category = FeedParser::cleanText(feed.category);
+            if (!category.isEmpty() && !byName.contains(category)
+                && (!feed.categoryColor.isEmpty() || !feed.categoryIcon.isEmpty()))
+                styles.insert(category, CategoryStyle{feed.categoryColor, feed.categoryIcon});
+            continue;
         }
+        QStringList tags;
+        if (entry != tagEntryOf.cend())
+            for (const QJsonValue &value : tagMap.value(*entry).toArray()) {
+                const QString tag = value.toString();
+                if (storableTag(tag) && !tags.contains(tag))
+                    tags << tag;
+            }
         if (tags != feed.tags) {
             if (!store.setFeedTags(feed.id, tags))
                 return false;
@@ -865,6 +900,7 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
                       remoteCategories = list.value("categories").toObject();
     const QHash<QString, QString> tagEntryOf = entriesOf(remoteTags), categoryEntryOf = entriesOf(remoteCategories);
     const QHash<QString, QJsonObject> byName = stylesByName(remoteCategories);
+    const QSet<QString> remoteKeys = listedKeys(list);
     // What another device unsubscribed from.
     QSet<QString> remoteDeleted;
     for (const QJsonValue &value : list.value("deleted").toArray()) {
@@ -911,23 +947,44 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
             continue;
         listed.insert(key);
         into << feed.url;
-        const QString tagEntry = tagEntryOf.value(key);
-        if (!tagEntry.isEmpty() && tags.size() < maxFeeds)
-            if (const auto fitting = tagsFitting(remoteTags.value(tagEntry)); fitting && !fitting->isEmpty())
-                tags.insert(feed.url, *fitting);
+        // A feed the last list neither lists nor has tags for, such as one
+        // whose unsubscribe was undone after a list without it was
+        // published, keeps the tags it has here, which only ever came from
+        // a list (mirrorList()). One the list lists with no tags has none.
+        const auto tagEntry = tagEntryOf.constFind(key);
+        const bool remoteListed = remoteKeys.contains(key);
+        if (tags.size() < maxFeeds) {
+            if (tagEntry != tagEntryOf.cend()) {
+                if (const auto fitting = tagsFitting(remoteTags.value(*tagEntry)); fitting && !fitting->isEmpty())
+                    tags.insert(feed.url, *fitting);
+            } else if (!remoteListed && !feed.tags.isEmpty()) {
+                tags.insert(feed.url, QJsonArray::fromStringList(feed.tags));
+            }
+        }
         const QString name = feed.category.left(256);
         if (name.isEmpty() || categories.size() >= maxFeeds)
             continue;
         // The category as the last list names it, so the publish neither
         // renames it nor drops its style when the library holds its name
         // cleaned: the feed's own entry when it is of this category, else
-        // the one stylesByName() picks, as the sidebar shows it.
+        // the one stylesByName() picks, as the sidebar shows it. A feed with
+        // no entry of its own is never given the entry of an empty key.
         const QString cleaned = FeedParser::cleanText(name);
-        const QJsonObject own = remoteCategories.value(categoryEntryOf.value(key)).toObject();
+        const auto ownEntry = categoryEntryOf.constFind(key);
+        const QJsonObject own =
+            ownEntry == categoryEntryOf.cend() ? QJsonObject() : remoteCategories.value(*ownEntry).toObject();
         const bool ownIsThisCategory = isString(own.value("name"), 256) && !cleaned.isEmpty()
                                        && FeedParser::cleanText(own.value("name").toString()) == cleaned;
         const QJsonObject web = ownIsThisCategory ? own : byName.value(cleaned);
         QJsonObject category = categoryStyle(web);
+        // A category the list names nowhere keeps the style it has here
+        // for a feed the list does not list, as its tags are kept.
+        if (web.isEmpty() && !remoteListed) {
+            if (!feed.categoryColor.isEmpty())
+                category.insert("color", feed.categoryColor);
+            if (!feed.categoryIcon.isEmpty())
+                category.insert("icon", feed.categoryIcon);
+        }
         category.insert("name", web.isEmpty() ? name : web.value("name").toString());
         categories.insert(feed.url, category);
     }
@@ -1198,11 +1255,6 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
         if (event.kind == readStatusKind
             && !store.rememberReadGuids(parseReadStatus(event.content).value_or(QStringList())))
             return false;
-        // What it carried on for the feeds here is kept at once, and
-        // `mirrored` tells the window to show it.
-        if (event.kind == subscriptionsKind)
-            if (const auto list = parseSubscriptions(event.content); list && !mirrorList(store, list->object, &wrote))
-                return false;
         // Stamped with when the content was built, not now: a feed
         // subscribed while this run signed and published is not in it.
         return store.setSyncRemote(tag, event.id, event.content, builtAt);
@@ -1211,6 +1263,29 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
         return store.lastError();
     if (superseded)
         *superseded = lost;
+    // What it carried on for the feeds here is kept at once, and `mirrored`
+    // tells the window to show it. That is written apart from the record,
+    // so a failure here never loses the record of an event the relays have
+    // taken, and checked again under its own write, so a newer list applied
+    // in between is never mirrored over. A list not mirrored now is on the
+    // next pull, which mirrors the list applied, so the failure is only
+    // logged.
+    if (!changed && !lost && event.kind == subscriptionsKind)
+        if (const auto list = parseSubscriptions(event.content)) {
+            const bool kept = store.transaction([&] {
+                const SyncAccount account = store.syncAccount();
+                if (!store.lastError().isEmpty())
+                    return false;
+                if (account.pubkey != pubkey || account.appliedIds.value(tag) != event.id)
+                    return true;
+                return mirrorList(store, list->object, &wrote);
+            });
+            if (!kept) {
+                wrote = false;
+                qWarning("readstr: publish: cannot show the subscription list's tags: %s",
+                         qPrintable(store.lastError()));
+            }
+        }
     if (mirrored)
         *mirrored = wrote;
     return changed ? tr("the npub changed during publishing") : QString();

@@ -56,6 +56,16 @@ QString safeColor(const QString &color);
 // feed's title is, and empty when that leaves more than maxIconLength
 // units, rather than cut, which could split an emoji.
 QString safeIcon(const QString &icon);
+// A tag longer than this, in UTF-16 units, does not fit the web app's schema.
+inline constexpr int maxTagLength = 256;
+// Whether a feed here can carry `tag`, as mirroring a subscription list
+// keeps them: not blank, no longer than maxTagLength, and with no C0
+// control character or half of a surrogate pair. Older SQLite can cut a
+// value at an escaped U+0000 when it reads the JSON a feed's tags are kept
+// in, so "news\u0000local" would match "news", and half of a surrogate pair
+// is bound to SQLite as broken UTF-8. A tag that fails this is never stored,
+// so a view that names one lists nothing, and SQLite is never given it.
+bool storableTag(const QString &tag);
 
 // The account for an npub or nprofile (with or without "nostr:"), with the
 // nprofile's relay hints, or null.
@@ -144,8 +154,11 @@ QStringList publishedReadGuids(const QStringList &local, const QStringList &remo
 // Kind 30404's content: this library's feeds, and from `remote`, the last
 // list the relays held (which may be empty), each listed feed's tags and its
 // category's color and icon, which the desktop shows but cannot edit, so they
-// come from that list as it was rather than from the library, the feeds it
-// lists that this machine cannot follow (on the local network, or not a
+// come from that list as it was rather than from the library (save for a
+// local feed that list neither lists nor has tags for, as when an unsubscribe
+// was undone after a list without it went out, which keeps the ones the
+// library has from an earlier list), the feeds it lists that this machine
+// cannot follow (on the local network, or not a
 // web feed or npub), so they are not dropped, and its `deleted`. A feed it
 // lists that this machine could follow but does not was unsubscribed here,
 // since the pull before a publish adds every one, so it goes in `deleted`.
