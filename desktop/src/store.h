@@ -91,6 +91,11 @@ struct ReadChange {
 struct FeedSnapshot {
     qint64 id = 0;
     QString category;
+    // The category's color and icon, and the pubkey of the sync account
+    // then, empty for none, as both came from that account's lists.
+    QString categoryColor;
+    QString categoryIcon;
+    QString account;
     QStringList feedColumns;
     QVariantList feed;
     QStringList itemColumns;
@@ -241,7 +246,11 @@ public:
     // list published since, marking it deleted, does not keep it off the
     // next one. The filter rules as they are now decide what its items
     // hide and highlight, and an article the last synced reads list has is
-    // read, as when a refresh brings it. Fails when the feed's URL is
+    // read, as when a refresh brings it. Its tags, and its category's color
+    // and icon when the category has none now and the subscription list
+    // stored last (syncRemote()) names that category nowhere, come back
+    // only under the sync account they came from; under another, or none,
+    // the feed comes back with no tags. Fails when the feed's URL is
     // subscribed again, or `snapshot` holds no feed, setting `lasting`, as
     // no later try changes that.
     bool restoreFeed(const FeedSnapshot &snapshot, bool *lasting = nullptr);

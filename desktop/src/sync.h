@@ -67,6 +67,11 @@ inline constexpr int maxTagLength = 256;
 // so a view that names one lists nothing, and SQLite is never given it.
 bool storableTag(const QString &tag);
 
+// Whether the subscription list `content` names the category `name` for
+// any feed, as mirrorList() finds a category's entry: by the name as
+// FeedParser::cleanText() leaves it, whether or not it gives a style.
+bool namesCategory(const QString &content, const QString &name);
+
 // The account for an npub or nprofile (with or without "nostr:"), with the
 // nprofile's relay hints, or null.
 std::optional<SyncAccount> account(const QString &text);
@@ -210,7 +215,8 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
                         bool *superseded = nullptr, bool *mirrored = nullptr);
 #ifdef READSTR_TESTS
 // Only in the test build: called by apply() once it has found the list it
-// mirrors still the one applied, before the transaction that checks so again
+// mirrors still the one applied, and by recordPublished() once it has
+// recorded a subscription list, before the transaction that checks so again
 // and mirrors it, on its thread.
 inline std::function<void()> mirrorHook;
 #endif

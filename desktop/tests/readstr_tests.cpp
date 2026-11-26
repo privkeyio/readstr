@@ -9144,6 +9144,224 @@ private slots:
                  (QJsonObject{{"name", "Solo"}}));
     }
 
+    // An unsubscribe undone under another sync account than the one the
+    // feed's tags and its category's style came from brings the feed and
+    // its articles back with neither, so that account's next list never
+    // carries them; undone under the same account, it keeps both.
+    void syncRestoresNoTagsUnderAnotherAccount()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed", b = "https://b.invalid/feed";
+        const QJsonObject remote{{"rss", QJsonArray{a, b}},
+                                 {"nostr", QJsonArray()},
+                                 {"tags", QJsonObject{{a, QJsonArray{"web"}}}},
+                                 {"categories", QJsonObject{{a, QJsonObject{{"name", "Solo"}, {"color", "#123456"}}}}},
+                                 {"lastUpdated", now - 100}};
+        const Sync::Outcome outcome = Sync::apply(
+            store, store.syncAccount(),
+            syncResult({syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, remote, now - 100)}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        const auto feedOf = [&store](const QString &url) {
+            for (const Feed &feed : store.feeds())
+                if (feed.url == url)
+                    return feed;
+            return Feed{};
+        };
+        ParsedItem item;
+        item.guid = item.title = "In A";
+        QCOMPARE(store.saveItems(feedOf(a).id, {item}), 1);
+
+        FeedSnapshot snapshot;
+        QVERIFY(store.removeFeed(feedOf(a).id, &snapshot));
+        QVERIFY(store.restoreFeed(snapshot));
+        QCOMPARE(feedOf(a).tags, QStringList{"web"});
+        QCOMPARE(feedOf(a).categoryColor, QString("#123456"));
+
+        QVERIFY(store.removeFeed(feedOf(a).id, &snapshot));
+        const QString other(64, 'd');
+        QVERIFY(store.setSyncAccount(Nip19::npub(other), other, {}));
+        QVERIFY(store.restoreFeed(snapshot));
+        QVERIFY(feedOf(a).tags.isEmpty());
+        QVERIFY(feedOf(a).categoryColor.isEmpty() && feedOf(a).categoryIcon.isEmpty());
+        QCOMPARE(feedOf(a).category, QString("Solo"));
+        ArticleFilter filter;
+        filter.feedId = feedOf(a).id;
+        QCOMPARE(titlesOf(store.articles(filter)), QStringList{"In A"});
+        const Sync::Drafts drafts = Sync::drafts(store, other, {Sync::subscriptionsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const QJsonObject content = QJsonDocument::fromJson(drafts.events.first().content.toUtf8()).object();
+        QVERIFY(content.value("rss").toArray().contains(a));
+        QVERIFY(!content.contains("tags"));
+        QCOMPARE(content.value("categories").toObject().value(a).toObject(), (QJsonObject{{"name", "Solo"}}));
+    }
+
+    // The only feed of a category unsubscribed, and its list published and
+    // recorded, which leaves the category with no style here: an undo then
+    // brings the style back with the feed, here and in the next list, as an
+    // undo before the record does; but not once a newer list names the
+    // category without one.
+    void syncRestoresTheStyleOfACategoryAnUnsubscribeEmptied()
+    {
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed", b = "https://b.invalid/feed";
+        const QJsonObject solo{{"name", "Solo"}, {"color", "#123456"}, {"icon", "S"}};
+        const QJsonObject remote{{"rss", QJsonArray{a, b}},
+                                 {"nostr", QJsonArray()},
+                                 {"categories", QJsonObject{{a, solo}}},
+                                 {"lastUpdated", now - 100}};
+        Sync::Outcome outcome = Sync::apply(
+            store, store.syncAccount(),
+            syncResult({syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, remote, now - 100)}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        const auto feedOf = [&store](const QString &url) {
+            for (const Feed &feed : store.feeds())
+                if (feed.url == url)
+                    return feed;
+            return Feed{};
+        };
+        const auto styled = [&](const QString &url) {
+            const Feed feed = feedOf(url);
+            return feed.categoryColor == "#123456" && feed.categoryIcon == "S";
+        };
+        qint64 at = now;
+        const auto publish = [&] {
+            const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, at++);
+            if (drafts.events.size() != 1)
+                qWarning("no draft: %s %s", qPrintable(drafts.error), qPrintable(drafts.notes.join("; ")));
+            const NostrEvent draft = drafts.events.value(0);
+            return *NostrEvent::fromJson(signedEvent(draft.kind, draft.content, draft.tags, draft.createdAt));
+        };
+        const auto record = [&](const NostrEvent &event) {
+            return Sync::recordPublished(store, syncPubkey(), event, event.createdAt);
+        };
+        QVERIFY(styled(a));
+
+        // Recorded, then undone.
+        FeedSnapshot snapshot;
+        QVERIFY(store.removeFeed(feedOf(a).id, &snapshot));
+        QCOMPARE(record(publish()), QString());
+        QVERIFY(store.restoreFeed(snapshot));
+        QVERIFY(styled(a));
+        QJsonObject next = QJsonDocument::fromJson(publish().content.toUtf8()).object();
+        QCOMPARE(next.value("categories").toObject().value(a).toObject(), solo);
+
+        // Undone, then recorded.
+        QVERIFY(store.removeFeed(feedOf(a).id, &snapshot));
+        const NostrEvent without = publish();
+        QVERIFY(store.restoreFeed(snapshot));
+        QCOMPARE(record(without), QString());
+        QVERIFY(styled(a));
+
+        // A newer list from the web app that names Solo with no style wins
+        // over the style the unsubscribe kept.
+        QVERIFY(store.removeFeed(feedOf(a).id, &snapshot));
+        QCOMPARE(record(publish()), QString());
+        const QJsonObject newer{{"rss", QJsonArray{b}},
+                                {"nostr", QJsonArray()},
+                                {"deleted", QJsonArray{a}},
+                                {"categories", QJsonObject{{b, QJsonObject{{"name", "Solo"}}}}},
+                                {"lastUpdated", at + 100}};
+        outcome = Sync::apply(
+            store, store.syncAccount(),
+            syncResult({syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, newer, at + 100)}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        QVERIFY(store.restoreFeed(snapshot));
+        QCOMPARE(feedOf(a).category, QString("Solo"));
+        QVERIFY(feedOf(a).categoryColor.isEmpty() && feedOf(a).categoryIcon.isEmpty());
+    }
+
+    // A feed the list has tags for but lists in neither "rss" nor "nostr",
+    // as one whose unsubscribe was undone, is addressed by the list all the
+    // same: its category's style here is carried on by neither the sidebar
+    // nor a publish, so the two agree.
+    void syncTreatsATagEntryAsAddressingItsFeed()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed", b = "https://b.invalid/feed";
+        QVERIFY(store.addFeed(a, "A", "Solo") > 0);
+        const CategoryStyle style{"#123456", "S"};
+        QVERIFY(store.replaceCategoryStyles({{"Solo", style}}));
+        const QJsonObject list{
+            {"rss", QJsonArray{b}}, {"nostr", QJsonArray()}, {"tags", QJsonObject{{a, QJsonArray{"x"}}}}};
+        const QJsonObject event = syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, list, now - 100);
+        Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({event}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        const auto feedOf = [&store](const QString &url) {
+            for (const Feed &feed : store.feeds())
+                if (feed.url == url)
+                    return feed;
+            return Feed{};
+        };
+        QCOMPARE(feedOf(a).tags, QStringList{"x"});
+        QVERIFY(feedOf(a).categoryColor.isEmpty() && feedOf(a).categoryIcon.isEmpty());
+
+        // Given back here, as an undo's fallback gives it.
+        QVERIFY(store.replaceCategoryStyles({{"Solo", style}}));
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const QJsonObject published = QJsonDocument::fromJson(drafts.events.first().content.toUtf8()).object();
+        QCOMPARE(published.value("tags").toObject(), (QJsonObject{{a, QJsonArray{"x"}}}));
+        QCOMPARE(published.value("categories").toObject().value(a).toObject(), (QJsonObject{{"name", "Solo"}}));
+        outcome = Sync::apply(store, store.syncAccount(), syncResult({event}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        QVERIFY(feedOf(a).categoryColor.isEmpty() && feedOf(a).categoryIcon.isEmpty());
+    }
+
+    // A newer subscription list applied between a publish's record and its
+    // mirror is not mirrored over, and the publish says it was superseded,
+    // so the list is built again on the newer one.
+    void syncCallsAPublishSupersededDuringItsMirror()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed";
+        const auto list = [&](const char *tag) {
+            return QJsonObject{
+                {"rss", QJsonArray{a}}, {"nostr", QJsonArray()}, {"tags", QJsonObject{{a, QJsonArray{tag}}}}};
+        };
+        const QJsonObject older = syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, list("old"), now - 100);
+        QVERIFY(Sync::apply(store, store.syncAccount(), syncResult({older})).error.isEmpty());
+        const auto tags = [&store] { return store.feeds().value(0).tags; };
+        QCOMPARE(tags(), QStringList{"old"});
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const NostrEvent draft = drafts.events.first();
+        const NostrEvent published =
+            *NostrEvent::fromJson(signedEvent(draft.kind, draft.content, draft.tags, draft.createdAt));
+        const QJsonObject newer =
+            syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, list("new"), draft.createdAt + 10);
+
+        int raced = 0;
+        Sync::mirrorHook = [&] {
+            if (raced++)
+                return;
+            const Sync::Outcome other = Sync::apply(store, store.syncAccount(), syncResult({newer}));
+            QVERIFY(other.error.isEmpty() && other.problems.isEmpty());
+        };
+        const auto unhook = qScopeGuard([] { Sync::mirrorHook = nullptr; });
+        bool superseded = false, mirrored = true;
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), published, now, &superseded, &mirrored), QString());
+        QVERIFY(raced >= 1);
+        QVERIFY(superseded);
+        QVERIFY(!mirrored);
+        QCOMPARE(tags(), QStringList{"new"});
+    }
+
     // ArticleFilter::tags lists the articles of the feeds that carry every
     // tag, exactly as spelled, and keeps alsoId, words, and marking read
     // within them, as a view of tags does.
@@ -10433,6 +10651,34 @@ private slots:
         QTRY_COMPARE(titlesOf(backend.articles()), (QStringList{"Second A", "Second B"}));
         QCOMPARE(backend.sourceIndex(), sources.rowOfTag("t"));
         QCOMPARE(backend.sourceKind(), QString("tag"));
+    }
+
+    // A selected view of tags lists the articles of the feeds that carry
+    // them all once another process gives the tags to other feeds, though
+    // the view's rules stay the same.
+    void backendFollowsATagsViewWhoseFeedsChange()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        seedViews({savedView("tagged", {{"name", "Tagged"},
+                                        {"source", QJsonObject{{"kind", "tags"}, {"tags", QJsonArray{"t", "u"}}}}})});
+        Store other;
+        QVERIFY(other.open());
+        QVERIFY(other.setFeedTags(first, {"t", "u"}));
+        QVERIFY(other.setFeedTags(second, {"t"}));
+        Backend backend;
+        SourceModel &sources = *backend.sources();
+        backend.selectSource(sources.rowOfView("tagged"));
+        QCOMPARE(backend.selectedViewId(), QString("tagged"));
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Newest", "Older", "Oldest"}));
+
+        QVERIFY(other.setFeedTags(first, {"t"}));
+        QVERIFY(other.setFeedTags(second, {"u", "t"}));
+        backend.selectArticle(0);
+        QTRY_COMPARE(titlesOf(backend.articles()), (QStringList{"Second A", "Second B"}));
+        QCOMPARE(backend.selectedViewId(), QString("tagged"));
     }
 
     // A read article stays in Unread, in its place, until the view changes.

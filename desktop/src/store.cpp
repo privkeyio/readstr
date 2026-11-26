@@ -881,13 +881,23 @@ bool Store::removeFeed(qint64 id, FeedSnapshot *snapshot, qsizetype maxBytes, in
         if (feed.isEmpty())
             return fail(QStringLiteral("no feed with id %1").arg(id));
         taken.feed = feed.first();
-        query.prepare(QStringLiteral("SELECT c.name FROM feeds f JOIN categories c ON c.id = f.category_id"
-                                     " WHERE f.id = ?"));
+        query.prepare(QStringLiteral("SELECT c.name, c.color, c.icon FROM feeds f"
+                                     " JOIN categories c ON c.id = f.category_id WHERE f.id = ?"));
         query.addBindValue(id);
         if (!query.exec())
             return fail(query.lastError().text());
-        if (query.next())
+        if (query.next()) {
             taken.category = query.value(0).toString();
+            taken.categoryColor = query.value(1).toString();
+            taken.categoryIcon = query.value(2).toString();
+        }
+        query.finish();
+        // Read under the same write as the tags and the style, so they are
+        // known to be that account's.
+        if (!query.exec(QStringLiteral("SELECT pubkey FROM sync_account WHERE id = 1")))
+            return fail(query.lastError().text());
+        if (query.next())
+            taken.account = query.value(0).toString();
         query.finish();
         QSqlQuery items(m_db);
         items.setForwardOnly(true);
@@ -918,7 +928,8 @@ bool Store::restoreFeed(const FeedSnapshot &snapshot, bool *lasting) {
     const qsizetype keyColumn = column(snapshot.feedColumns, "url_key"),
                     urlColumn = column(snapshot.feedColumns, "url"),
                     categoryColumn = column(snapshot.feedColumns, "category_id"),
-                    createdColumn = column(snapshot.feedColumns, "created_at");
+                    createdColumn = column(snapshot.feedColumns, "created_at"),
+                    tagsColumn = column(snapshot.feedColumns, "tags");
     if (snapshot.feed.size() != snapshot.feedColumns.size() || keyColumn < 0 || urlColumn < 0 || categoryColumn < 0
         || createdColumn < 0)
         return lastingFail(QStringLiteral("nothing to restore"));
@@ -955,14 +966,54 @@ bool Store::restoreFeed(const FeedSnapshot &snapshot, bool *lasting) {
         const qint64 category = categoryId(snapshot.category);
         if (category < 0)
             return false;
+        // The tags and the style came from the lists of the account synced
+        // when the feed went. Under another, a publish would carry them on
+        // into its list (Sync::subscriptionsContent()), as setSyncAccount()
+        // clears them to prevent.
+        if (!query.exec(QStringLiteral("SELECT pubkey FROM sync_account WHERE id = 1")))
+            return fail(query.lastError().text());
+        const bool sameAccount = (query.next() ? query.value(0).toString() : QString()) == snapshot.account;
+        query.finish();
         QVariantList feed = snapshot.feed;
         feed[categoryColumn] = category ? QVariant(category) : QVariant(QMetaType::fromType<qint64>());
         feed[createdColumn] = QDateTime::currentSecsSinceEpoch();
+        if (!sameAccount && tagsColumn >= 0)
+            feed[tagsColumn] = QVariant(QMetaType::fromType<QString>());
         query.prepare(insertSql(QStringLiteral("feeds"), snapshot.feedColumns));
         for (const QVariant &value : std::as_const(feed))
             query.addBindValue(value);
         if (!query.exec())
             return fail(query.lastError().text());
+        // A list recorded since, with no feed left in the category, took its
+        // style away only because nothing in the list was of it, so it comes
+        // back with the feed. A list stored since that names the category,
+        // with a style or without one, decided it: the mirror gave it what
+        // that list has, and a newer one from the web app may have cleared
+        // it, so the style is restored only where the category has none and
+        // the list stored last names it nowhere.
+        if (sameAccount && category && (!snapshot.categoryColor.isEmpty() || !snapshot.categoryIcon.isEmpty())) {
+            query.prepare(QStringLiteral("SELECT 1 FROM categories WHERE id = ?"
+                                         " AND COALESCE(color, '') = '' AND COALESCE(icon, '') = ''"));
+            query.addBindValue(category);
+            if (!query.exec())
+                return fail(query.lastError().text());
+            const bool unstyled = query.next();
+            query.finish();
+            const auto stored = syncRemote(QString::fromLatin1(Sync::subscriptionsTag));
+            if (!m_error.isEmpty())
+                return false;
+            if (unstyled && !(stored && Sync::namesCategory(stored->content, snapshot.category))) {
+                const auto orNull = [](const QString &text) {
+                    return text.isEmpty() ? QVariant(QMetaType::fromType<QString>()) : QVariant(text);
+                };
+                query.prepare(QStringLiteral("UPDATE categories SET color = ?, icon = ? WHERE id = ?"));
+                query.addBindValue(orNull(snapshot.categoryColor));
+                query.addBindValue(orNull(snapshot.categoryIcon));
+                query.addBindValue(category);
+                if (!query.exec())
+                    return fail(query.lastError().text());
+            }
+        }
         if (snapshot.items.isEmpty())
             return true;
         const KeywordFilter::Rules *rules = compiledFilterRules();
@@ -1386,13 +1437,18 @@ QString scopeSql(const ArticleFilter &filter, QVariantList &values) {
         // rows. A tag no feed can carry (Sync::storableTag()) is never bound,
         // as older SQLite could match it as another: wanted with the others,
         // it leaves no feed, and as one spelling of many, it is passed over.
+        // The set finds a spelling seen before in one lookup, where the
+        // list, which keeps the order bound, would scan every one.
         QStringList tags;
+        QSet<QString> seen;
         bool uncarried = false;
         for (const QString &tag : filter.tags) {
             if (!Sync::storableTag(tag))
                 uncarried = true;
-            else if (!tags.contains(tag))
+            else if (!seen.contains(tag)) {
+                seen.insert(tag);
                 tags << tag;
+            }
         }
         if (tags.isEmpty() || (uncarried && !filter.anyTag))
             return sql + QStringLiteral(" AND 0");

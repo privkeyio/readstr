@@ -733,6 +733,9 @@ private:
     SourceModel m_sources;
     ArticleModel m_articles;
     QList<SavedView> m_views;
+    // Each feed's tags as the sources pane was last given them, so a
+    // selected view of tags whose feeds change lists theirs.
+    QHash<qint64, QStringList> m_feedTags;
     int m_feedCount = 0;
     int m_sourceIndex = 0;
     QString m_searchQuery;

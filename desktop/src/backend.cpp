@@ -68,6 +68,30 @@ KeyStore::Result keyStoreUnavailable() {
 QString noKeyStored(const QString &npub) {
     return Backend::tr("No signing key is stored for %1").arg(Nip19::shortNpub(npub, npub));
 }
+
+QHash<qint64, QStringList> tagsByFeed(const QList<Feed> &feeds) {
+    QHash<qint64, QStringList> tags;
+    for (const Feed &feed : feeds)
+        tags.insert(feed.id, feed.tags);
+    return tags;
+}
+
+// The feeds a view of `tags` lists, by id, sorted, as Store::articles()
+// picks them: those that carry every tag exactly as spelled, as the web
+// app's hasEvery has it, and none when one is a tag no feed can carry
+// (Sync::storableTag()).
+QList<qint64> feedsWithEvery(const QHash<qint64, QStringList> &tagsOf, const QStringList &tags) {
+    QList<qint64> ids;
+    if (tags.isEmpty() || !std::all_of(tags.cbegin(), tags.cend(), [](const QString &tag) {
+            return Sync::storableTag(tag);
+        }))
+        return ids;
+    for (auto it = tagsOf.cbegin(); it != tagsOf.cend(); ++it)
+        if (std::all_of(tags.cbegin(), tags.cend(), [&it](const QString &tag) { return it->contains(tag); }))
+            ids << it.key();
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
 }
 
 Backend::Backend(FilePicker *picker, QObject *parent)
@@ -372,6 +396,7 @@ void Backend::reloadLibrary() {
         loadViews();
     }
     m_sources.setLibrary(feeds, counts, m_views);
+    m_feedTags = tagsByFeed(feeds);
     if (m_feedCount != feeds.size()) {
         m_feedCount = int(feeds.size());
         emit libraryChanged();
@@ -420,6 +445,16 @@ void Backend::reloadCounts() {
         const SourceModel::Row now = m_sources.row(row);
         rulesChanged = now.tags != selected.tags || now.feedIds != selected.feedIds;
     }
+    // So does a view of tags whose rules are the same, when the feeds that
+    // carry them all are not; reading it again otherwise would scan for its
+    // words for nothing.
+    QHash<qint64, QStringList> feedTags = tagsByFeed(feeds);
+    if (selected.kind == SourceModel::Kind::View && row >= 0 && !rulesChanged)
+        if (const SavedView *view = savedView(selected.viewId)) {
+            const QStringList tags = SavedViews::evaluate(*view).filter.tags;
+            rulesChanged = !tags.isEmpty() && feedsWithEvery(m_feedTags, tags) != feedsWithEvery(feedTags, tags);
+        }
+    m_feedTags = std::move(feedTags);
     if (m_feedCount != feeds.size()) {
         m_feedCount = int(feeds.size());
         emit libraryChanged();

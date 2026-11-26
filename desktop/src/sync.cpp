@@ -513,6 +513,13 @@ bool mirrorList(Store &store, const QJsonObject &list, bool *wrote = nullptr) {
 QString tr(const char *text, int n = -1) { return QCoreApplication::translate("Sync", text, nullptr, n); }
 }
 
+bool namesCategory(const QString &content, const QString &name) {
+    const QString cleaned = FeedParser::cleanText(name);
+    return !cleaned.isEmpty()
+           && stylesByName(parseObject(content).value_or(QJsonObject{}).value("categories").toObject())
+                  .contains(cleaned);
+}
+
 Outcome apply(Store &store, const SyncAccount &account, const NostrResult &result,
               const std::function<void()> &beforeWrites) {
     Outcome outcome;
@@ -978,8 +985,10 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
         const QJsonObject web = ownIsThisCategory ? own : byName.value(cleaned);
         QJsonObject category = categoryStyle(web);
         // A category the list names nowhere keeps the style it has here
-        // for a feed the list does not list, as its tags are kept.
-        if (web.isEmpty() && !remoteListed) {
+        // for a feed the list neither lists nor has tags for, as its tags
+        // are kept, and as mirrorList() keeps it, so the sidebar and the
+        // publish agree on it.
+        if (web.isEmpty() && !remoteListed && tagEntry == tagEntryOf.cend()) {
             if (!feed.categoryColor.isEmpty())
                 category.insert("color", feed.categoryColor);
             if (!feed.categoryIcon.isEmpty())
@@ -1272,14 +1281,25 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
     // logged.
     if (!changed && !lost && event.kind == subscriptionsKind)
         if (const auto list = parseSubscriptions(event.content)) {
+#ifdef READSTR_TESTS
+            if (mirrorHook)
+                mirrorHook();
+#endif
+            // A newer version applied between the record and this write won
+            // all the same, so `superseded` says so, as when the record finds
+            // it; and another account by then fails as it does in the record.
             const bool kept = store.transaction([&] {
                 const SyncAccount account = store.syncAccount();
                 if (!store.lastError().isEmpty())
                     return false;
-                if (account.pubkey != pubkey || account.appliedIds.value(tag) != event.id)
+                changed = account.pubkey != pubkey;
+                lost = !changed && account.appliedIds.value(tag) != event.id;
+                if (changed || lost)
                     return true;
                 return mirrorList(store, list->object, &wrote);
             });
+            if (superseded)
+                *superseded = lost;
             if (!kept) {
                 wrote = false;
                 qWarning("readstr: publish: cannot show the subscription list's tags: %s",
