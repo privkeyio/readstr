@@ -68,6 +68,30 @@ KeyStore::Result keyStoreUnavailable() {
 QString noKeyStored(const QString &npub) {
     return Backend::tr("No signing key is stored for %1").arg(Nip19::shortNpub(npub, npub));
 }
+
+QHash<qint64, QStringList> tagsByFeed(const QList<Feed> &feeds) {
+    QHash<qint64, QStringList> tags;
+    for (const Feed &feed : feeds)
+        tags.insert(feed.id, feed.tags);
+    return tags;
+}
+
+// The feeds a view of `tags` lists, by id, sorted, as Store::articles()
+// picks them: those that carry every tag exactly as spelled, as the web
+// app's hasEvery has it, and none when one is a tag no feed can carry
+// (Sync::storableTag()).
+QList<qint64> feedsWithEvery(const QHash<qint64, QStringList> &tagsOf, const QStringList &tags) {
+    QList<qint64> ids;
+    if (tags.isEmpty() || !std::all_of(tags.cbegin(), tags.cend(), [](const QString &tag) {
+            return Sync::storableTag(tag);
+        }))
+        return ids;
+    for (auto it = tagsOf.cbegin(); it != tagsOf.cend(); ++it)
+        if (std::all_of(tags.cbegin(), tags.cend(), [&it](const QString &tag) { return it->contains(tag); }))
+            ids << it.key();
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
 }
 
 Backend::Backend(FilePicker *picker, QObject *parent)
@@ -329,9 +353,13 @@ ArticleFilter Backend::currentFilter() const {
         filter.starredOnly = true;
     else if (row.kind == SourceModel::Kind::Feed)
         filter.feedId = row.feedId;
-    else if (row.kind == SourceModel::Kind::View)
+    else if (row.kind == SourceModel::Kind::Tag) {
+        filter.tags = row.tags;
+        filter.anyTag = true;
+    } else if (row.kind == SourceModel::Kind::View)
         if (const SavedView *view = savedView(row.viewId)) {
             const ArticleFilter rules = SavedViews::evaluate(*view).filter;
+            filter.tags = rules.tags;
             filter.unreadOnly = rules.unreadOnly;
             filter.starredOnly = rules.starredOnly;
             filter.readOnly = rules.readOnly;
@@ -368,6 +396,7 @@ void Backend::reloadLibrary() {
         loadViews();
     }
     m_sources.setLibrary(feeds, counts, m_views);
+    m_feedTags = tagsByFeed(feeds);
     if (m_feedCount != feeds.size()) {
         m_feedCount = int(feeds.size());
         emit libraryChanged();
@@ -409,6 +438,23 @@ void Backend::reloadCounts() {
     }
     m_sources.setLibrary(feeds, *counts, m_views);
     const int row = m_sources.rowOf(selected);
+    // A tag that another process, or a pull, gave to other feeds lists
+    // theirs, as a view whose rules changed does, though its spellings may
+    // be the same.
+    if (selected.kind == SourceModel::Kind::Tag && row >= 0) {
+        const SourceModel::Row now = m_sources.row(row);
+        rulesChanged = now.tags != selected.tags || now.feedIds != selected.feedIds;
+    }
+    // So does a view of tags whose rules are the same, when the feeds that
+    // carry them all are not; reading it again otherwise would scan for its
+    // words for nothing.
+    QHash<qint64, QStringList> feedTags = tagsByFeed(feeds);
+    if (selected.kind == SourceModel::Kind::View && row >= 0 && !rulesChanged)
+        if (const SavedView *view = savedView(selected.viewId)) {
+            const QStringList tags = SavedViews::evaluate(*view).filter.tags;
+            rulesChanged = !tags.isEmpty() && feedsWithEvery(m_feedTags, tags) != feedsWithEvery(feedTags, tags);
+        }
+    m_feedTags = std::move(feedTags);
     if (m_feedCount != feeds.size()) {
         m_feedCount = int(feeds.size());
         emit libraryChanged();
@@ -418,7 +464,8 @@ void Backend::reloadCounts() {
         // shown for it follows.
         if (m_sources.row(row).title != selected.title)
             emit sourceChanged();
-        // A view whose rules changed lists what they hold now.
+        // A view whose rules changed, or a tag whose feeds did, lists what
+        // they hold now.
         if (rulesChanged)
             loadArticles();
         return;
@@ -2723,7 +2770,8 @@ void Backend::publishNext(const std::shared_ptr<PublishRun> &run) {
                 [pubkey = run->account.pubkey, event, builtAt = run->builtAt](Store &store) {
                     WriteResult written;
                     bool superseded = false;
-                    written.error = Sync::recordPublished(store, pubkey, event, builtAt, &superseded);
+                    written.error =
+                        Sync::recordPublished(store, pubkey, event, builtAt, &superseded, &written.reload);
                     written.changed = superseded ? 1 : 0;
                     return written;
                 },
@@ -2740,6 +2788,10 @@ void Backend::publishNext(const std::shared_ptr<PublishRun> &run) {
                         run->settled << event.kind;
                     if (!written.error.isEmpty())
                         run->errors << tr("published, but cannot record it: %1").arg(written.error);
+                    // The tags and category styles the list carried on, when
+                    // the library lacked them, show without waiting for a pull.
+                    if (written.reload)
+                        self->reloadLibrary();
                     self->publishNext(run);
                 });
         }, stillWanted);

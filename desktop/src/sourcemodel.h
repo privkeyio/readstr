@@ -7,15 +7,22 @@
 
 // The sources pane: "All articles", "Unread", and "Starred", then the saved
 // views under their heading, in the web app's order, when there are any,
+// then the tags the feeds carry under theirs, by name, when there are any,
 // then the feeds, those without a category first and then each category
-// under its own heading, by name. Counts are unread articles, except
-// Starred's; views have none.
+// under its own heading, by name, with its color and icon. Counts are unread
+// articles, except Starred's; views have none. A tag lists the articles of
+// the feeds that carry it, in any spelling that shows the same.
 class SourceModel : public QAbstractListModel {
     Q_OBJECT
     Q_PROPERTY(int count READ count NOTIFY countChanged)
 
 public:
-    enum class Kind { All, Unread, Starred, Category, Feed, ViewHeading, View };
+    // The most tags listed: those carried by the most feeds, ties by name. A
+    // subscription list may give thousands, and every reload builds and
+    // sorts their rows on the window's thread.
+    static constexpr int maxTagRows = 500;
+
+    enum class Kind { All, Unread, Starred, Category, Feed, ViewHeading, View, TagHeading, Tag };
 
     struct Row {
         Kind kind = Kind::All;
@@ -37,11 +44,21 @@ public:
         // A view that cannot list here (SavedViews::Evaluation::unknownSource),
         // shown disabled and never selected.
         bool unknownSource = false;
+        // A tag row's name as it shows (its title, and its identity), and
+        // every spelling of it the feeds carry, which select its articles,
+        // sorted; and a category heading's color (Sync::safeColor()), whose
+        // icon is in `icon`.
+        QString tag = {};
+        QStringList tags = {};
+        QString color = {};
+        // A tag row's feeds, by id, sorted, so a selected tag whose feeds
+        // change lists theirs, whether or not its spellings change too.
+        QList<qint64> feedIds = {};
         // Same place in the list: a reload that keeps every row's identity
         // updates rows in place instead of resetting the view.
         bool sameSource(const Row &other) const {
             return kind == other.kind && feedId == other.feedId && category == other.category
-                   && viewId == other.viewId;
+                   && viewId == other.viewId && tag == other.tag;
         }
     };
 
@@ -60,6 +77,7 @@ public:
         IconRole,
         UnsupportedRole,
         UnknownSourceRole,
+        ColorRole,
     };
 
     explicit SourceModel(QObject *parent = nullptr);
@@ -74,6 +92,8 @@ public:
     bool isSelectable(int index) const;
     int rowOf(Kind kind, qint64 feedId = 0) const;
     int rowOfView(const QString &viewId) const;
+    // The row of the tag that shows as `name`.
+    int rowOfTag(const QString &name) const;
     // The row of the source `row` describes, or -1 when it is gone or can no
     // longer be selected.
     int rowOf(const Row &row) const;

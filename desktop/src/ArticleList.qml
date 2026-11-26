@@ -41,6 +41,7 @@ Rectangle {
         case "starred": return qsTr("Starred")
         case "feed":
         case "view": return backend.sourceTitle
+        case "tag": return "#" + backend.sourceTitle
         default: return qsTr("All articles")
         }
     }

@@ -455,6 +455,9 @@ private:
         QString error;
         // Not run, as an earlier write of the same undo command failed.
         bool skipped = false;
+        // The library's feeds or categories changed, so the sources are read
+        // again.
+        bool reload = false;
     };
     // What the worker and this thread share about an undo command.
     struct UndoState {
@@ -730,6 +733,9 @@ private:
     SourceModel m_sources;
     ArticleModel m_articles;
     QList<SavedView> m_views;
+    // Each feed's tags as the sources pane was last given them, so a
+    // selected view of tags whose feeds change lists theirs.
+    QHash<qint64, QStringList> m_feedTags;
     int m_feedCount = 0;
     int m_sourceIndex = 0;
     QString m_searchQuery;

@@ -338,10 +338,11 @@
   },
   "Still undoing: %1": "Ainda a anular: %1",
   "Views": "Vistas",
+  "Tags": "Etiquetas",
   "Partial": "Parcial",
   "Some rules of this view are not supported here, so they are left out: %1": "Algumas regras desta vista não são suportadas aqui, por isso ficam de fora: %1",
   "No articles in this view": "Não há artigos nesta vista",
   "Cannot read the saved views: %1": "Não é possível ler as vistas guardadas: %1",
   "Showing keyword matches among this view's first %1 articles": "A mostrar correspondências de palavras-chave entre os primeiros %1 artigos desta vista",
-  "This view targets a feed, category, or tags that this app can't identify yet": "Esta vista aponta para um feed, uma categoria ou etiquetas que esta aplicação ainda não consegue identificar"
+  "This view targets a feed or category that this app can't identify yet": "Esta vista aponta para um feed ou uma categoria que esta aplicação ainda não consegue identificar"
 }

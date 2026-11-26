@@ -37,6 +37,11 @@ struct Feed {
     bool incomplete = false;
     // When it was subscribed to on this machine.
     QDateTime createdAt = {};
+    // Its tags, and its category's color (Sync::safeColor()) and icon
+    // (Sync::safeIcon()), as the last subscription list applied gave them.
+    QStringList tags = {};
+    QString categoryColor = {};
+    QString categoryIcon = {};
 };
 
 struct Article {
@@ -86,12 +91,23 @@ struct ReadChange {
 struct FeedSnapshot {
     qint64 id = 0;
     QString category;
+    // The category's color and icon, and the pubkey of the sync account
+    // then, empty for none, as both came from that account's lists.
+    QString categoryColor;
+    QString categoryIcon;
+    QString account;
     QStringList feedColumns;
     QVariantList feed;
     QStringList itemColumns;
     QList<QVariantList> items;
     // About how much memory it takes: its text and a little for each value.
     qsizetype bytes = 0;
+};
+
+// A category's color and icon, empty for none.
+struct CategoryStyle {
+    QString color;
+    QString icon;
 };
 
 // The npub the library syncs with. Empty when none is set.
@@ -174,6 +190,14 @@ struct ArticleFilter {
     // (articles()' `scannedIds`), so it marks no further than the list
     // looked, whatever arrived or was read since.
     QList<qint64> scannedIds = {};
+    // Only the articles of feeds that carry every one of these tags, as the
+    // web app's tag filter has it (Prisma's hasEvery), so a view of tags no
+    // feed carries lists nothing. alsoId is listed only within them.
+    QStringList tags = {};
+    // Any one of `tags` will do rather than every one: a tag in the sources
+    // pane stands for every spelling of it that shows the same
+    // (SourceModel::Row::tags).
+    bool anyTag = false;
 };
 
 struct LibraryCounts {
@@ -222,7 +246,11 @@ public:
     // list published since, marking it deleted, does not keep it off the
     // next one. The filter rules as they are now decide what its items
     // hide and highlight, and an article the last synced reads list has is
-    // read, as when a refresh brings it. Fails when the feed's URL is
+    // read, as when a refresh brings it. Its tags, and its category's color
+    // and icon when the category has none now and the subscription list
+    // stored last (syncRemote()) names that category nowhere, come back
+    // only under the sync account they came from; under another, or none,
+    // the feed comes back with no tags. Fails when the feed's URL is
     // subscribed again, or `snapshot` holds no feed, setting `lasting`, as
     // no later try changes that.
     bool restoreFeed(const FeedSnapshot &snapshot, bool *lasting = nullptr);
@@ -231,6 +259,14 @@ public:
     // created_at) is newer than the profile they came from.
     bool updateProfile(qint64 id, const ParsedFeed &profile, qint64 revision, const QString &eventId);
     bool setRelayHints(qint64 id, const QStringList &relays);
+    // The feed's tags as a subscription list carries them; none clears them.
+    bool setFeedTags(qint64 id, const QStringList &tags);
+    // Gives each category the color and icon `styles` has for its name as
+    // FeedParser::cleanText() leaves it, and the others none, writing only
+    // those that change, and says in `wrote` whether any did. Neither is
+    // checked here: callers pass them through Sync::safeColor() and
+    // Sync::safeIcon().
+    bool replaceCategoryStyles(const QHash<QString, CategoryStyle> &styles, bool *wrote = nullptr);
     // Every relay answered a refresh that started at `time`.
     bool recordComplete(qint64 id, const QDateTime &time);
     // Whether the Nostr refresh just saved missed something (Feed::incomplete).

@@ -4,9 +4,11 @@ import QtQuick.Controls.Material
 import QtQuick.Layouts
 
 // All articles, Unread, and Starred, then the saved views synced from the
-// web app, when there are any, then the feeds by category, with unread
-// counts, a mark on Nostr authors, and the last refresh error of each feed
-// (or, for a Nostr author, a quieter note when the refresh missed something).
+// web app, when there are any, then the tags the feeds carry, when there are
+// any, then the feeds by category, each category with the color and icon the
+// web app gave it, with unread counts, a mark on Nostr authors, and the last
+// refresh error of each feed (or, for a Nostr author, a quieter note when
+// the refresh missed something).
 // A view with rules that cannot be applied here says so, and one whose
 // source cannot be told here is shown disabled.
 Rectangle {
@@ -148,9 +150,10 @@ Rectangle {
                 required property string icon
                 required property var unsupported
                 required property bool unknownSource
+                required property string categoryColor
 
                 readonly property bool selected: index === backend.sourceIndex
-                readonly property bool header: kind === "category" || kind === "views"
+                readonly property bool header: kind === "category" || kind === "views" || kind === "tags"
 
                 width: ListView.view.width
                 height: header ? 36 : (lastError !== "" || incomplete ? 50 : 34)
@@ -166,7 +169,7 @@ Rectangle {
                     color: row.selected ? Qt.alpha(theme.accent, pane.active ? 0.28 : 0.16) : Qt.alpha(theme.foreground, 0.06)
                 }
 
-                Label {
+                RowLayout {
                     visible: row.header
                     anchors.left: parent.left
                     anchors.right: parent.right
@@ -174,15 +177,36 @@ Rectangle {
                     anchors.leftMargin: 16
                     anchors.rightMargin: 16
                     anchors.bottomMargin: 6
-                    text: row.kind === "views" ? qsTr("Views")
-                        : row.category === "" ? qsTr("Feeds") : row.category
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    maximumLineCount: 1
-                    font.pixelSize: 11
-                    font.weight: Font.DemiBold
-                    font.capitalization: Font.AllUppercase
-                    opacity: 0.55
+                    spacing: 6
+
+                    // The category's color from the web app, which
+                    // Sync::safeColor() has made a plain #rrggbb.
+                    Rectangle {
+                        objectName: "categoryColor"
+                        visible: row.kind === "category" && row.categoryColor !== ""
+                        Layout.preferredWidth: 8
+                        Layout.preferredHeight: 8
+                        Layout.alignment: Qt.AlignVCenter
+                        radius: 4
+                        color: row.categoryColor !== "" ? row.categoryColor : "transparent"
+                    }
+
+                    Label {
+                        objectName: "sourceHeading"
+                        Layout.fillWidth: true
+                        text: row.kind === "views" ? qsTr("Views")
+                            : row.kind === "tags" ? qsTr("Tags")
+                            : row.category === "" ? qsTr("Feeds")
+                            : row.icon !== "" ? row.icon + " " + row.category
+                            : row.category
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        maximumLineCount: 1
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                        font.capitalization: Font.AllUppercase
+                        opacity: 0.55
+                    }
                 }
 
                 ColumnLayout {
@@ -203,13 +227,15 @@ Rectangle {
                             text: row.kind === "all" ? qsTr("All articles")
                                 : row.kind === "unread" ? qsTr("Unread")
                                 : row.kind === "starred" ? qsTr("Starred")
+                                : row.kind === "tag" ? "#" + row.title
                                 : row.icon !== "" ? row.icon + " " + row.title
                                 : row.title
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
                             // A title with a line break must not grow the row.
                             maximumLineCount: 1
-                            font.weight: row.kind === "feed" || row.kind === "view" ? Font.Normal : Font.DemiBold
+                            font.weight: row.kind === "feed" || row.kind === "view" || row.kind === "tag"
+                                ? Font.Normal : Font.DemiBold
                         }
 
                         // The view lists more here than in the web app:
@@ -308,7 +334,7 @@ Rectangle {
                 PlainToolTip {
                     objectName: "viewUnknownSource"
                     visible: row.unknownSource && hover.hovered
-                    text: qsTr("This view targets a feed, category, or tags that this app can't identify yet")
+                    text: qsTr("This view targets a feed or category that this app can't identify yet")
                 }
 
                 MouseArea {

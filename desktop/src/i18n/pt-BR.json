@@ -210,9 +210,10 @@
   },
   "Still undoing: %1": "Ainda desfazendo: %1",
   "Views": "Visualizações",
+  "Tags": "Tags",
   "Some rules of this view are not supported here, so they are left out: %1": "Algumas regras desta visualização não são compatíveis aqui, então ficam de fora: %1",
   "No articles in this view": "Não há artigos nesta visualização",
   "Cannot read the saved views: %1": "Não é possível ler as visualizações salvas: %1",
   "Showing keyword matches among this view's first %1 articles": "Mostrando correspondências de palavras-chave entre os primeiros %1 artigos desta visualização",
-  "This view targets a feed, category, or tags that this app can't identify yet": "Esta visualização aponta para um feed, uma categoria ou tags que este app ainda não consegue identificar"
+  "This view targets a feed or category that this app can't identify yet": "Esta visualização aponta para um feed ou uma categoria que este app ainda não consegue identificar"
 }
