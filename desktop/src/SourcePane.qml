@@ -11,7 +11,10 @@ import QtQuick.Layouts
 // author, a quieter note when the refresh missed something).
 // A view with rules that cannot be applied here says so, and one whose
 // source cannot be told here is shown disabled. A right click on a view,
-// even a disabled one, edits, moves, or deletes it.
+// even a disabled one, edits, moves, or deletes it; on a feed, besides
+// refreshing or unsubscribing, moves it to a category or edits its tags;
+// and on a category's heading or a tag, renames or deletes it. A category's
+// heading selects its feeds' articles, as a tag does.
 Rectangle {
     id: pane
 
@@ -30,7 +33,8 @@ Rectangle {
     }
 
     property bool active: false
-    readonly property bool menuOpen: appMenu.visible || feedMenu.visible || viewMenu.visible
+    readonly property bool menuOpen: appMenu.visible || feedMenu.visible || viewMenu.visible || categoryMenu.visible
+                                     || tagMenu.visible
     readonly property color errorColor: Material.color(Material.Red, Material.theme === Material.Light ? Material.Shade700 : Material.Shade300)
 
     // Qt Quick Controls menus take their width from the background alone and
@@ -57,6 +61,13 @@ Rectangle {
     signal saveSourceRequested()
     signal editViewRequested(string viewId)
     signal deleteViewRequested(string viewId, string viewName)
+    signal moveFeedRequested(var feedId, string feedTitle)
+    signal feedTagsRequested(var feedId, string feedTitle)
+    // A category by the name the library keeps, and as it shows.
+    signal renameCategoryRequested(string category, string title)
+    signal deleteCategoryRequested(string category, string title)
+    signal renameTagRequested(string tag)
+    signal deleteTagRequested(string tag)
 
     color: Qt.tint(theme.background, Qt.alpha(theme.foreground, 0.03))
 
@@ -172,7 +183,9 @@ Rectangle {
                     anchors.topMargin: 1
                     anchors.bottomMargin: 1
                     radius: Math.min(4, theme.radius)
-                    visible: !row.header && (row.selected || (hover.hovered && row.selectable))
+                    // A category's heading can be selected too, and shows so.
+                    objectName: "sourceHighlight"
+                    visible: (!row.header || row.selectable) && (row.selected || (hover.hovered && row.selectable))
                     color: row.selected ? Qt.alpha(theme.accent, pane.active ? 0.28 : 0.16) : Qt.alpha(theme.foreground, 0.06)
                 }
 
@@ -204,15 +217,15 @@ Rectangle {
                         text: row.kind === "views" ? qsTr("Views")
                             : row.kind === "tags" ? qsTr("Tags")
                             : row.category === "" ? qsTr("Feeds")
-                            : row.icon !== "" ? row.icon + " " + row.category
-                            : row.category
+                            : row.icon !== "" ? row.icon + " " + row.title
+                            : row.title
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
                         maximumLineCount: 1
                         font.pixelSize: 11
                         font.weight: Font.DemiBold
                         font.capitalization: Font.AllUppercase
-                        opacity: 0.55
+                        opacity: row.selected ? 0.9 : 0.55
                     }
                 }
 
@@ -362,6 +375,13 @@ Rectangle {
                             viewMenu.viewId = row.viewId
                             viewMenu.viewName = row.title
                             viewMenu.popup(row, mouse.x, mouse.y)
+                        } else if (mouse.button === Qt.RightButton && row.kind === "category" && row.category !== "") {
+                            categoryMenu.category = row.category
+                            categoryMenu.categoryTitle = row.title
+                            categoryMenu.popup(row, mouse.x, mouse.y)
+                        } else if (mouse.button === Qt.RightButton && row.kind === "tag") {
+                            tagMenu.tag = row.title
+                            tagMenu.popup(row, mouse.x, mouse.y)
                         }
                     }
                 }
@@ -387,7 +407,42 @@ Rectangle {
         // A hidden item still takes its place in a Menu unless its height goes too.
         MenuItem { text: qsTr("Open profile"); visible: feedMenu.nostr; height: visible ? implicitHeight : 0; onTriggered: backend.openProfile(feedMenu.feedId) }
         MenuItem { text: qsTr("Copy npub"); visible: feedMenu.nostr; height: visible ? implicitHeight : 0; onTriggered: backend.copyNpub(feedMenu.feedId) }
+        MenuItem { objectName: "feedMenuMove"; text: qsTr("Move to category…"); onTriggered: pane.moveFeedRequested(feedMenu.feedId, feedMenu.feedTitle) }
+        MenuItem { objectName: "feedMenuTags"; text: qsTr("Tags…"); onTriggered: pane.feedTagsRequested(feedMenu.feedId, feedMenu.feedTitle) }
         MenuItem { text: qsTr("Unsubscribe…"); onTriggered: pane.unsubscribeRequested(feedMenu.feedId, feedMenu.feedTitle) }
+    }
+
+    Menu {
+        id: categoryMenu
+        property string category: ""
+        property string categoryTitle: ""
+        objectName: "categoryMenu"
+        implicitWidth: pane.menuWidth(categoryMenu)
+        Material.roundedScale: theme.radius
+        background: Rectangle {
+            radius: Math.min(4, theme.radius)
+            color: Qt.tint(theme.background, Qt.alpha(theme.foreground, 0.08))
+            border.color: Qt.alpha(theme.foreground, 0.15)
+            border.width: 1
+        }
+        MenuItem { objectName: "categoryMenuRename"; text: qsTr("Rename…"); onTriggered: pane.renameCategoryRequested(categoryMenu.category, categoryMenu.categoryTitle) }
+        MenuItem { objectName: "categoryMenuDelete"; text: qsTr("Delete…"); onTriggered: pane.deleteCategoryRequested(categoryMenu.category, categoryMenu.categoryTitle) }
+    }
+
+    Menu {
+        id: tagMenu
+        property string tag: ""
+        objectName: "tagMenu"
+        implicitWidth: pane.menuWidth(tagMenu)
+        Material.roundedScale: theme.radius
+        background: Rectangle {
+            radius: Math.min(4, theme.radius)
+            color: Qt.tint(theme.background, Qt.alpha(theme.foreground, 0.08))
+            border.color: Qt.alpha(theme.foreground, 0.15)
+            border.width: 1
+        }
+        MenuItem { objectName: "tagMenuRename"; text: qsTr("Rename…"); onTriggered: pane.renameTagRequested(tagMenu.tag) }
+        MenuItem { objectName: "tagMenuDelete"; text: qsTr("Delete…"); onTriggered: pane.deleteTagRequested(tagMenu.tag) }
     }
 
     Menu {

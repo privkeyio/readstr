@@ -17,9 +17,9 @@
 
 namespace Sync {
 namespace {
-// Whether `text` holds half of a surrogate pair on its own, as a relay's
-// JSON can ("\ud800"). Qt binds such a string to SQLite as broken UTF-8, so
-// once stored it would never read back as itself, nor match as a tag.
+QString tr(const char *text, int n = -1) { return QCoreApplication::translate("Sync", text, nullptr, n); }
+}
+
 bool hasLoneSurrogate(const QString &text) {
     for (qsizetype i = 0; i < text.size(); ++i) {
         if (text.at(i).isHighSurrogate() && i + 1 < text.size() && text.at(i + 1).isLowSurrogate())
@@ -29,6 +29,176 @@ bool hasLoneSurrogate(const QString &text) {
     }
     return false;
 }
+
+QString shownName(const QString &name) {
+    QString shown;
+    shown.reserve(name.size());
+    for (qsizetype i = 0; i < name.size(); ++i) {
+        if (name.at(i).isHighSurrogate() && i + 1 < name.size() && name.at(i + 1).isLowSurrogate()) {
+            shown += name.at(i);
+            shown += name.at(++i);
+        } else {
+            shown += name.at(i).isSurrogate() ? QChar(QChar::ReplacementCharacter) : name.at(i);
+        }
+    }
+    return FeedParser::cleanText(shown);
+}
+
+QString tagName(const QString &tag) {
+    const QString cleaned = FeedParser::cleanText(tag);
+    QString name;
+    name.reserve(cleaned.size());
+    for (qsizetype i = 0; i < cleaned.size();) {
+        const bool pair =
+            cleaned.at(i).isHighSurrogate() && i + 1 < cleaned.size() && cleaned.at(i + 1).isLowSurrogate();
+        const char32_t code = pair ? QChar::surrogateToUcs4(cleaned.at(i), cleaned.at(i + 1)) : cleaned.at(i).unicode();
+        const qsizetype length = pair ? 2 : 1;
+        if (QChar::category(code) != QChar::Other_Format || code == 0x200D || (code >= 0xE0020 && code <= 0xE007F))
+            name += QStringView(cleaned).mid(i, length);
+        i += length;
+    }
+    // A space each side of what was taken out is one space.
+    return name.simplified();
+}
+
+QString categoryNameProblem(const QString &name) {
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty())
+        return tr("A category needs a name");
+    if (trimmed.size() > maxCategoryNameLength)
+        return tr("A category name can be at most %1 characters").arg(maxCategoryNameLength);
+    // The import files a pulled feed under the name cleaned, so one that
+    // cleans to something else would come back from the web app as another
+    // category.
+    if (hasLoneSurrogate(trimmed) || FeedParser::cleanText(trimmed) != trimmed)
+        return tr("A category name cannot hold control characters, direction marks, or several spaces in a row");
+    return {};
+}
+
+QString tagProblem(const QString &tag) {
+    const QString trimmed = tag.trimmed();
+    if (trimmed.isEmpty())
+        return tr("A tag needs a name");
+    if (trimmed.size() > maxTagLength)
+        return tr("A tag can be at most %1 characters").arg(maxTagLength);
+    // A tag given here goes out to the web app as it is typed, so it has to
+    // show as it is: tagName() takes out the control characters, direction
+    // marks, invisible format characters, and runs of spaces that would
+    // make it read or match as something else. The message names it as
+    // shownName() has it, so it carries no direction mark or broken text
+    // of its own.
+    if (!storableTag(trimmed) || tagName(trimmed) != trimmed)
+        return tr(
+                   "The tag %1 cannot be kept: it holds control characters, direction marks, invisible characters, or several spaces in a row, or shows as nothing")
+            .arg(shownName(trimmed));
+    return {};
+}
+
+QString formatTagList(const QStringList &tags) {
+    QStringList parts;
+    parts.reserve(tags.size());
+    for (const QString &tag : tags) {
+        // One the list would split, take for a quoted one, or trim goes
+        // between quotes, so parseTagList() reads it back as it is.
+        if (tag.contains(QLatin1Char(',')) || tag.startsWith(QLatin1Char('"')) || tag.trimmed() != tag)
+            parts << QLatin1Char('"') + QString(tag).replace(QLatin1Char('"'), QLatin1String("\"\""))
+                         + QLatin1Char('"');
+        else
+            parts << tag;
+    }
+    return parts.join(QLatin1String(", "));
+}
+
+namespace {
+// The entries of a list as formatTagList() writes them: each one between
+// commas trimmed, or, when it starts with a quote, what is between that
+// quote and the next one on its own, as it is, with a doubled quote for
+// each quote in it. Null when a quote is not closed, or is followed by
+// more than spaces before the next comma.
+std::optional<QStringList> splitTagList(const QString &text) {
+    QStringList entries;
+    const qsizetype size = text.size();
+    for (qsizetype i = 0;;) {
+        while (i < size && text.at(i).isSpace())
+            ++i;
+        if (i < size && text.at(i) == QLatin1Char('"')) {
+            QString entry;
+            for (++i;; ++i) {
+                if (i >= size)
+                    return std::nullopt;
+                if (text.at(i) != QLatin1Char('"')) {
+                    entry += text.at(i);
+                } else if (i + 1 < size && text.at(i + 1) == QLatin1Char('"')) {
+                    entry += QLatin1Char('"');
+                    ++i;
+                } else {
+                    ++i;
+                    break;
+                }
+            }
+            while (i < size && text.at(i).isSpace())
+                ++i;
+            if (i < size && text.at(i) != QLatin1Char(','))
+                return std::nullopt;
+            entries << entry;
+        } else {
+            qsizetype end = text.indexOf(QLatin1Char(','), i);
+            if (end < 0)
+                end = size;
+            entries << text.mid(i, end - i).trimmed();
+            i = end;
+        }
+        if (i >= size)
+            return entries;
+        ++i;
+    }
+}
+}
+
+std::optional<QStringList> parseTagList(const QString &text, QString *problem, const QStringList &current) {
+    const std::optional<QStringList> entries = splitTagList(text);
+    if (!entries) {
+        if (problem)
+            *problem = tr("A tag in quotes needs its closing quote before the next comma, and each quote in it written twice");
+        return std::nullopt;
+    }
+    // A tag the feed carries already, left as the list showed it, is kept
+    // exactly, even one from the web app that could not be typed here, so
+    // saving another change never respells it, nor drops it for one that
+    // shows the same; only those new or changed are checked.
+    const QSet<QString> kept(current.cbegin(), current.cend());
+    QSet<QString> names, seen;
+    for (const QString &entry : *entries)
+        if (kept.contains(entry))
+            names.insert(tagName(entry));
+    QStringList tags;
+    for (const QString &entry : *entries) {
+        const bool existing = kept.contains(entry);
+        const QString tag = existing ? entry : entry.trimmed();
+        if (tag.isEmpty() || seen.contains(tag))
+            continue;
+        if (!existing) {
+            if (const QString why = tagProblem(tag); !why.isEmpty()) {
+                if (problem)
+                    *problem = why;
+                return std::nullopt;
+            }
+            // Spellings that show the same are one tag in the sources pane,
+            // so the first stands for them here too.
+            const QString name = tagName(tag);
+            if (names.contains(name))
+                continue;
+            names.insert(name);
+        }
+        seen.insert(tag);
+        tags << tag;
+    }
+    if (tags.size() > maxTagsPerFeed) {
+        if (problem)
+            *problem = tr("A feed can have at most %1 tags").arg(maxTagsPerFeed);
+        return std::nullopt;
+    }
+    return tags;
 }
 
 QString safeColor(const QString &color) {
@@ -49,6 +219,11 @@ QString safeIcon(const QString &icon) {
     const QString text = FeedParser::cleanText(icon);
     return text.size() <= maxIconLength && !hasLoneSurrogate(text) ? text : QString();
 }
+
+QString accountChanged() { return tr("the sync account changed"); }
+QString organizationChanged() { return tr("the feeds or categories have changed since"); }
+QString noSuchCategory(const QString &name) { return tr("There is no category %1").arg(shownName(name)); }
+QString noSuchTag(const QString &name) { return tr("No feed has the tag %1").arg(shownName(name)); }
 
 bool storableTag(const QString &tag) {
     if (tag.size() > maxTagLength || tag.trimmed().isEmpty() || hasLoneSurrogate(tag))
@@ -469,59 +644,150 @@ QHash<QString, QJsonObject> stylesByName(const QJsonObject &categories) {
     return byName;
 }
 
-// Gives every feed here the tags the list (one parseSubscriptions() took)
-// has for it, found as subscriptionsContent() finds them, and every
-// category the color and icon stylesByName() picks for its name, so the
-// sidebar shows what a publish from here builds on. A feed the list lists
-// or has tags for, and a category it names, has only what the list gives,
-// as they only ever come from a list. A feed it neither lists nor has tags
-// for keeps its own, as does its category when the list names it nowhere:
-// the list may be one published here while an unsubscribe was undone, which
-// says nothing of the feed, and a list that took a feed's tags away from it
-// still lists it. A tag that is listed twice is shown once, and one that
-// storableTag() refuses not at all; a color or an icon that is not safe to
-// show is left out. Only what differs is written, and `wrote` says whether
-// anything was.
-bool mirrorList(Store &store, const QJsonObject &list, bool *wrote = nullptr) {
-    if (wrote)
-        *wrote = false;
-    const QJsonObject tagMap = list.value("tags").toObject();
-    const QHash<QString, QString> tagEntryOf = entriesOf(tagMap);
-    const QSet<QString> listed = listedKeys(list);
-    const QHash<QString, QJsonObject> byName = stylesByName(list.value("categories").toObject());
+// A feed as entriesOf() and listedKeys() key it.
+QString feedKey(const Feed &feed) {
+    return Library::isNostrFeed(feed) ? QStringLiteral("npub ") + feed.url : webKey(feed.url);
+}
+
+// The tags of a list's entry as a feed here keeps them: each once, and none
+// storableTag() refuses.
+QStringList storableTags(const QJsonValue &entry) {
+    QStringList tags;
+    for (const QJsonValue &value : entry.toArray()) {
+        const QString tag = value.toString();
+        if (storableTag(tag) && !tags.contains(tag))
+            tags << tag;
+    }
+    return tags;
+}
+
+// A subscription list (one parseSubscriptions() took) looked up the way
+// mirrorList() reads it.
+struct ListIndex {
+    explicit ListIndex(const QJsonObject &list)
+        : tagMap(list.value("tags").toObject()), tagEntryOf(entriesOf(tagMap)), listed(listedKeys(list)),
+          byName(stylesByName(list.value("categories").toObject())) {}
+    QJsonObject tagMap;
+    QHash<QString, QString> tagEntryOf;
+    QSet<QString> listed;
+    QHash<QString, QJsonObject> byName;
+};
+
+// The tags the list gives `feed`, found as subscriptionsContent() finds
+// them, or null when it neither lists the feed nor has tags for it, which
+// leaves the feed its own: the list may be one published here while an
+// unsubscribe was undone, which says nothing of the feed, and a list that
+// took a feed's tags away from it still lists it.
+std::optional<QStringList> mirroredTags(const ListIndex &list, const Feed &feed) {
+    const QString key = feedKey(feed);
+    // Looked up, not taken by value, so a feed with no entry is never given
+    // the entry of an empty key.
+    const auto entry = list.tagEntryOf.constFind(key);
+    if (entry == list.tagEntryOf.cend() && !list.listed.contains(key))
+        return std::nullopt;
+    return entry == list.tagEntryOf.cend() ? QStringList() : storableTags(list.tagMap.value(*entry));
+}
+
+// The color and icon the list gives each category, by its name cleaned:
+// the ones stylesByName() picks, safe to show, and for a category it names
+// nowhere that a feed it neither lists nor has tags for is in, the style the
+// library has, as mirroredTags() leaves such a feed its own.
+QHash<QString, CategoryStyle> mirroredStyles(const ListIndex &list, const QList<Feed> &feeds) {
     QHash<QString, CategoryStyle> styles;
-    for (auto it = byName.cbegin(); it != byName.cend(); ++it) {
+    for (auto it = list.byName.cbegin(); it != list.byName.cend(); ++it) {
         const CategoryStyle style{safeColor(it->value("color").toString()), safeIcon(it->value("icon").toString())};
         if (!style.color.isEmpty() || !style.icon.isEmpty())
             styles.insert(it.key(), style);
     }
+    for (const Feed &feed : feeds) {
+        const QString key = feedKey(feed);
+        if (list.tagEntryOf.contains(key) || list.listed.contains(key))
+            continue;
+        const QString category = FeedParser::cleanText(feed.category);
+        if (!category.isEmpty() && !list.byName.contains(category)
+            && (!feed.categoryColor.isEmpty() || !feed.categoryIcon.isEmpty()))
+            styles.insert(category, CategoryStyle{feed.categoryColor, feed.categoryIcon});
+    }
+    return styles;
+}
+
+bool sameStyle(const CategoryStyle &a, const CategoryStyle &b) { return a.color == b.color && a.icon == b.icon; }
+
+// Gives every feed here the tags mirroredTags() finds for it, and every
+// category the color and icon mirroredStyles() does, so the sidebar shows
+// what a publish from here builds on. A feed the list lists or has tags
+// for, and a category it names, has only what the list gives, as they come
+// from a list unless changed here. A tag that is listed twice is shown
+// once, and one that storableTag() refuses not at all; a color or an icon
+// that is not safe to show is left out. Only what differs is written, and
+// `wrote` says whether anything was.
+//
+// While the categories or tags were changed here and have not gone out yet
+// (subscriptionsEditedBit), a pull must not take those changes back: the
+// list it brings, the same one again or a newer one from the web app, was
+// made without them. So a feed whose tags, or a category whose style, are
+// not what the list the library was mirrored from last gave them (the one
+// cached for publishing, which a pull caches only after this) keeps what
+// it has, and only the rest follow the list: what the web app changed of
+// the feeds not changed here still shows, and the next publish carries
+// both (subscriptionsContent()). With no such list cached, the one kept
+// when the account last stopped syncing stands for it (Store::
+// keptSubscriptionsBase()); with neither, as after changes made before any
+// account, every feed with tags and every category with a style keeps its
+// own.
+bool mirrorList(Store &store, const QJsonObject &list, bool *wrote = nullptr) {
+    if (wrote)
+        *wrote = false;
+    const SyncAccount account = store.syncAccount();
+    if (!store.lastError().isEmpty())
+        return false;
+    const bool edited = (account.publishPending & subscriptionsEditedBit) != 0;
+    std::optional<ListIndex> base;
+    if (edited) {
+        const auto cached = store.syncRemote(QString::fromLatin1(subscriptionsTag));
+        if (!store.lastError().isEmpty())
+            return false;
+        // None is cached after the account signed in again, until this
+        // pull caches one: the list kept for the owner when it stopped
+        // syncing is the one the tags were mirrored from.
+        std::optional<QString> content = cached ? std::optional(cached->content) : std::nullopt;
+        if (!content) {
+            content = store.keptSubscriptionsBase();
+            if (!store.lastError().isEmpty())
+                return false;
+        }
+        if (content)
+            if (const auto object = parseObject(*content))
+                base.emplace(*object);
+    }
+    const ListIndex index(list);
     const QList<Feed> feeds = store.feeds();
     if (!store.lastError().isEmpty())
         return false;
     for (const Feed &feed : feeds) {
-        const QString key = Library::isNostrFeed(feed) ? QStringLiteral("npub ") + feed.url : webKey(feed.url);
-        // Looked up, not taken by value, so a feed with no entry is never
-        // given the entry of an empty key.
-        const auto entry = tagEntryOf.constFind(key);
-        if (entry == tagEntryOf.cend() && !listed.contains(key)) {
-            const QString category = FeedParser::cleanText(feed.category);
-            if (!category.isEmpty() && !byName.contains(category)
-                && (!feed.categoryColor.isEmpty() || !feed.categoryIcon.isEmpty()))
-                styles.insert(category, CategoryStyle{feed.categoryColor, feed.categoryIcon});
+        const std::optional<QStringList> tags = mirroredTags(index, feed);
+        if (!tags)
             continue;
+        if (edited) {
+            const std::optional<QStringList> before = base ? mirroredTags(*base, feed) : std::nullopt;
+            if (before ? feed.tags != *before : !feed.tags.isEmpty())
+                continue;
         }
-        QStringList tags;
-        if (entry != tagEntryOf.cend())
-            for (const QJsonValue &value : tagMap.value(*entry).toArray()) {
-                const QString tag = value.toString();
-                if (storableTag(tag) && !tags.contains(tag))
-                    tags << tag;
-            }
-        if (tags != feed.tags) {
-            if (!store.setFeedTags(feed.id, tags))
+        if (*tags != feed.tags) {
+            if (!store.setFeedTags(feed.id, *tags))
                 return false;
             if (wrote)
                 *wrote = true;
+        }
+    }
+    QHash<QString, CategoryStyle> styles = mirroredStyles(index, feeds);
+    if (edited) {
+        const QHash<QString, CategoryStyle> before = base ? mirroredStyles(*base, feeds) : QHash<QString, CategoryStyle>();
+        for (const Feed &feed : feeds) {
+            const QString category = FeedParser::cleanText(feed.category);
+            const CategoryStyle now{feed.categoryColor, feed.categoryIcon};
+            if (!category.isEmpty() && !sameStyle(now, before.value(category)))
+                styles.insert(category, now);
         }
     }
     bool restyled = false;
@@ -531,8 +797,6 @@ bool mirrorList(Store &store, const QJsonObject &list, bool *wrote = nullptr) {
         *wrote = true;
     return true;
 }
-
-QString tr(const char *text, int n = -1) { return QCoreApplication::translate("Sync", text, nullptr, n); }
 }
 
 bool namesCategory(const QString &content, const QString &name) {
@@ -941,7 +1205,7 @@ bool hasUserInfo(const QString &entry) { return !QUrl(entry).userInfo().isEmpty(
 }
 
 std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QString &remote, qint64 remoteStoredAt,
-                                            qint64 now, int *tooLong) {
+                                            qint64 now, int *tooLong, bool edited) {
     const QJsonObject list = parseObject(remote).value_or(QJsonObject{});
     const QJsonObject remoteTags = list.value("tags").toObject(),
                       remoteCategories = list.value("categories").toObject();
@@ -998,13 +1262,16 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
         // whose unsubscribe was undone after a list without it was
         // published, keeps the tags it has here, which only ever came from
         // a list (mirrorList()). One the list lists with no tags has none.
+        // Edited here, a feed whose tags are not what the list gives it
+        // carries its own: they are the ones changed here.
         const auto tagEntry = tagEntryOf.constFind(key);
         const bool remoteListed = remoteKeys.contains(key);
         if (tags.size() < maxFeeds) {
-            if (tagEntry != tagEntryOf.cend()) {
+            if (tagEntry != tagEntryOf.cend()
+                && !(edited && feed.tags != storableTags(remoteTags.value(*tagEntry)))) {
                 if (const auto fitting = tagsFitting(remoteTags.value(*tagEntry)); fitting && !fitting->isEmpty())
                     tags.insert(feed.url, *fitting);
-            } else if (!remoteListed && !feed.tags.isEmpty()) {
+            } else if ((edited || !remoteListed) && !feed.tags.isEmpty()) {
                 tags.insert(feed.url, QJsonArray::fromStringList(feed.tags));
             }
         }
@@ -1024,11 +1291,26 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
                                        && FeedParser::cleanText(own.value("name").toString()) == cleaned;
         const QJsonObject web = ownIsThisCategory ? own : byName.value(cleaned);
         QJsonObject category = categoryStyle(web);
-        // A category the list names nowhere keeps the style it has here
-        // for a feed the list neither lists nor has tags for, as its tags
-        // are kept, and as mirrorList() keeps it, so the sidebar and the
-        // publish agree on it.
-        if (web.isEmpty() && !remoteListed && tagEntry == tagEntryOf.cend()) {
+        // Edited here, a category whose color and icon are not the ones the
+        // list gives it as the sidebar shows them (stylesByName(), through
+        // safeColor() and safeIcon()) carries its own: renamed or merged
+        // here, it keeps the style it had, or takes the one it joined.
+        const QJsonObject shown = categoryStyle(byName.value(cleaned));
+        const bool restyled =
+            edited && !sameStyle(CategoryStyle{safeColor(shown.value("color").toString()),
+                                               safeIcon(shown.value("icon").toString())},
+                                 CategoryStyle{feed.categoryColor, feed.categoryIcon});
+        if (restyled) {
+            category = QJsonObject();
+            if (!feed.categoryColor.isEmpty())
+                category.insert("color", feed.categoryColor);
+            if (!feed.categoryIcon.isEmpty())
+                category.insert("icon", feed.categoryIcon);
+        } else if (web.isEmpty() && !remoteListed && tagEntry == tagEntryOf.cend()) {
+            // A category the list names nowhere keeps the style it has here
+            // for a feed the list neither lists nor has tags for, as its
+            // tags are kept, and as mirrorList() keeps it, so the sidebar and
+            // the publish agree on it.
             if (!feed.categoryColor.isEmpty())
                 category.insert("color", feed.categoryColor);
             if (!feed.categoryIcon.isEmpty())
@@ -1234,8 +1516,8 @@ Drafts draftsInTransaction(Store &store, const QString &pubkey, const QList<int>
             if (!store.lastError().isEmpty())
                 return failed();
             int tooLong = 0;
-            const auto built =
-                subscriptionsContent(feeds, remoteContent, remote ? remote->storedAt : 0, now, &tooLong);
+            const auto built = subscriptionsContent(feeds, remoteContent, remote ? remote->storedAt : 0, now,
+                                                    &tooLong, (account.publishPending & subscriptionsEditedBit) != 0);
             if (!built) {
                 out.failed << kind;
                 out.errors << tr("the subscription list is too large for the relays (over 60,000 bytes)");
@@ -1245,6 +1527,7 @@ Drafts draftsInTransaction(Store &store, const QString &pubkey, const QList<int>
                 out.notes << tr("%n feeds are left out of the subscription list, as their addresses are too long",
                                 tooLong);
             content = *built;
+            out.subscriptionsEdits = account.subscriptionsEdits;
         } else if (kind == readStatusKind) {
             // Allowed when the run began, but maybe not any more.
             if (!account.publishReads) {
@@ -1334,7 +1617,7 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
 }
 
 QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &event, qint64 builtAt,
-                        bool *superseded, bool *mirrored, qint64 viewsEdits) {
+                        bool *superseded, bool *mirrored, qint64 viewsEdits, qint64 subscriptionsEdits) {
     const QString tag = QString::fromLatin1(dTag(event.kind));
     bool changed = false, lost = false, wrote = false;
     const bool saved = store.transaction([&] {
@@ -1364,6 +1647,12 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
         // would never match, so every start would publish the views again.
         if (event.kind == viewsKind && (account.publishPending & viewsEditedBit) && viewsEdits >= 0
             && viewsEdits == account.viewsEdits && !store.markPublishPending(pubkey, viewsEditedBit, false))
+            return false;
+        // So are the categories and tags, after which a pull mirrors the
+        // list as it comes (mirrorList()), this one first.
+        if (event.kind == subscriptionsKind && (account.publishPending & subscriptionsEditedBit)
+            && subscriptionsEdits >= 0 && subscriptionsEdits == account.subscriptionsEdits
+            && !store.markPublishPending(pubkey, subscriptionsEditedBit, false))
             return false;
         // Stamped with when the content was built, not now: a feed
         // subscribed while this run signed and published is not in it.

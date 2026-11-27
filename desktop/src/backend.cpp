@@ -305,6 +305,16 @@ QString Backend::selectedViewId() const {
     return row.kind == SourceModel::Kind::View ? row.viewId : QString();
 }
 
+QString Backend::selectedCategory() const {
+    const SourceModel::Row row = m_sources.row(m_sourceIndex);
+    return row.kind == SourceModel::Kind::Category ? row.category : QString();
+}
+
+QString Backend::selectedTag() const {
+    const SourceModel::Row row = m_sources.row(m_sourceIndex);
+    return row.kind == SourceModel::Kind::Tag ? row.tag : QString();
+}
+
 const SavedView *Backend::savedView(const QString &id) const {
     for (const SavedView &view : m_views)
         if (view.id == id)
@@ -355,6 +365,8 @@ ArticleFilter Backend::currentFilter() const {
         filter.starredOnly = true;
     else if (row.kind == SourceModel::Kind::Feed)
         filter.feedId = row.feedId;
+    else if (row.kind == SourceModel::Kind::Category)
+        filter.category = row.category;
     else if (row.kind == SourceModel::Kind::Tag) {
         filter.tags = row.tags;
         filter.anyTag = true;
@@ -442,8 +454,9 @@ void Backend::reloadCounts() {
     const int row = m_sources.rowOf(selected);
     // A tag that another process, or a pull, gave to other feeds lists
     // theirs, as a view whose rules changed does, though its spellings may
-    // be the same.
-    if (selected.kind == SourceModel::Kind::Tag && row >= 0) {
+    // be the same; and so does a category another process moved feeds into
+    // or out of.
+    if ((selected.kind == SourceModel::Kind::Tag || selected.kind == SourceModel::Kind::Category) && row >= 0) {
         const SourceModel::Row now = m_sources.row(row);
         rulesChanged = now.tags != selected.tags || now.feedIds != selected.feedIds;
     }
@@ -1621,21 +1634,26 @@ void Backend::reloadSyncAccount() {
         resetPublish();
         // Undone or redone now, a change to the views would put back the
         // last account's views, or delete this one's, and mark that to go
-        // out under this account. The rest of the history is the library's
-        // own, whichever account is set, so it stays.
-        const auto ofViews = [](const std::shared_ptr<UndoCommand> &command) {
-            if (command->savedViews)
+        // out under this account; and one to the categories or tags would
+        // put the last account's tags and category styles into this one's
+        // list. The rest of the history is the library's own, whichever
+        // account is set, so it stays.
+        const auto ofAccount = [](const std::shared_ptr<UndoCommand> &command) {
+            const bool forgotten = command->savedViews || command->organization;
+            if (forgotten)
                 command->state->failed = true;
-            return command->savedViews;
+            return forgotten;
         };
-        if ((m_undo.removeIf(ofViews) + m_redo.removeIf(ofViews)) > 0)
+        if ((m_undo.removeIf(ofAccount) + m_redo.removeIf(ofAccount)) > 0)
             emit undoChanged();
         // What was changed here and not published before the last quit goes
-        // out with the first publish: views edited here too, even when a
-        // publish built before their last edit cleared their kind's mark.
+        // out with the first publish: views, categories, and tags edited
+        // here too, even when a publish built before their last edit
+        // cleared their kind's mark.
         for (int kind : {Sync::subscriptionsKind, Sync::readStatusKind, Sync::viewsKind})
             if (((account.publishPending & publishBit(kind))
-                 || (kind == Sync::viewsKind && (account.publishPending & viewsEditedBit)))
+                 || (kind == Sync::viewsKind && (account.publishPending & viewsEditedBit))
+                 || (kind == Sync::subscriptionsKind && (account.publishPending & subscriptionsEditedBit)))
                 && (kind != Sync::readStatusKind || account.publishReads))
                 m_publishKinds << kind;
         resetSigning();
@@ -2331,7 +2349,9 @@ void Backend::loadSigner() {
 
 bool Backend::syncNpubDropsViews(const QString &text) {
     const auto account = Sync::account(text);
-    return account && m_storeOpen && m_store.savedViewsOfAnother(account->pubkey).value_or(false);
+    return account && m_storeOpen
+           && (m_store.savedViewsOfAnother(account->pubkey).value_or(false)
+               || m_store.subscriptionEditsOfAnother(account->pubkey).value_or(false));
 }
 
 bool Backend::setSyncNpub(const QString &text, bool dropViews) {
@@ -2349,7 +2369,8 @@ bool Backend::setSyncNpub(const QString &text, bool dropViews) {
                 return;
             }
             reloadSyncAccount();
-            // Another account's saved views may be gone from the library now.
+            // Another account's saved views, tags, and category styles may be
+            // gone from the library now.
             reloadLibrary();
             sync();
         });
@@ -2524,8 +2545,10 @@ struct Backend::PublishRun {
     // When the drafts were built: a feed subscribed after this is newer
     // than the list published from them.
     qint64 builtAt = 0;
-    // The edits to the saved views the drafts carry (Sync::Drafts::viewsEdits).
+    // The edits to the saved views, and to the categories and tags, the
+    // drafts carry (Sync::Drafts::viewsEdits, subscriptionsEdits).
     qint64 viewsEdits = -1;
+    qint64 subscriptionsEdits = -1;
 };
 
 namespace {
@@ -2735,6 +2758,7 @@ void Backend::continuePublish(const Sync::Outcome &outcome) {
             }
             run->events = drafts.events;
             run->viewsEdits = drafts.viewsEdits;
+            run->subscriptionsEdits = drafts.subscriptionsEdits;
             run->settled << drafts.unchanged;
             run->failed << drafts.failed << drafts.waiting;
             run->errors << drafts.errors;
@@ -2792,12 +2816,12 @@ void Backend::publishNext(const std::shared_ptr<PublishRun> &run) {
                 return self->publishNext(run);
             }
             self->onWorker<WriteResult>(
-                [pubkey = run->account.pubkey, event, builtAt = run->builtAt,
-                 viewsEdits = run->viewsEdits](Store &store) {
+                [pubkey = run->account.pubkey, event, builtAt = run->builtAt, viewsEdits = run->viewsEdits,
+                 subscriptionsEdits = run->subscriptionsEdits](Store &store) {
                     WriteResult written;
                     bool superseded = false;
                     written.error = Sync::recordPublished(store, pubkey, event, builtAt, &superseded,
-                                                          &written.reload, viewsEdits);
+                                                          &written.reload, viewsEdits, subscriptionsEdits);
                     written.changed = superseded ? 1 : 0;
                     return written;
                 },
@@ -3582,4 +3606,264 @@ void Backend::changeViewsUndoably(std::function<QString()> label, const ViewChan
                 done();
         },
         command->state, pubkey, failed);
+}
+
+QStringList Backend::categoryNames() const {
+    QStringList names;
+    for (int i = 0; i < m_sources.count(); ++i) {
+        const SourceModel::Row row = m_sources.row(i);
+        if (row.kind == SourceModel::Kind::Category && !row.category.isEmpty())
+            names << row.category;
+    }
+    return names;
+}
+
+QString Backend::feedCategory(qint64 feedId) {
+    return m_storeOpen ? m_store.feed(feedId).value_or(Feed{}).category : QString();
+}
+
+QString Backend::feedTags(qint64 feedId) const { return Sync::formatTagList(m_feedTags.value(feedId)); }
+
+int Backend::categoryFeedCount(const QString &name) const {
+    // The feeds follow their category's heading, which has the name as the
+    // library keeps it, where a feed's row has it cleaned.
+    int count = 0;
+    QString heading;
+    for (int i = 0; i < m_sources.count(); ++i) {
+        const SourceModel::Row row = m_sources.row(i);
+        if (row.kind == SourceModel::Kind::Category)
+            heading = row.category;
+        else if (row.kind == SourceModel::Kind::Feed && !name.isEmpty() && heading == name)
+            ++count;
+    }
+    return count;
+}
+
+int Backend::tagFeedCount(const QString &name) const {
+    return int(m_sources.row(m_sources.rowOfTag(name)).feedIds.size());
+}
+
+QString Backend::categoryProblem(const QString &name) const { return Sync::categoryNameProblem(name); }
+
+QString Backend::tagListProblem(const QString &list, qint64 feedId) const {
+    QString problem;
+    Sync::parseTagList(list, &problem, m_feedTags.value(feedId));
+    return problem;
+}
+
+QString Backend::tagProblem(const QString &name) const { return Sync::tagProblem(name); }
+
+namespace {
+// A feed as the status bar names it.
+QString feedTitle(const SourceModel &sources, qint64 feedId) {
+    return sources.row(sources.rowOf(SourceModel::Kind::Feed, feedId)).title;
+}
+}
+
+bool Backend::refuseOrganize(const QString &failure, const QString &why) {
+    emit organizeSaved(false, failure.arg(why));
+    return false;
+}
+
+bool Backend::renameCategory(const QString &from, const QString &to) {
+    const QString failure = tr("Cannot rename the category: %1");
+    if (!m_storeOpen)
+        return refuseOrganize(failure, tr("the library is not open"));
+    if (const QString why = Sync::categoryNameProblem(to); !why.isEmpty())
+        return refuseOrganize(failure, why);
+    const QString name = to.trimmed();
+    const QString shown = FeedParser::cleanText(from);
+    const bool selected = selectedCategory() == from;
+    organize(
+        [shown, name](const OrganizeChange &change) {
+            return change.merged ? tr("merged the category %1 into %2").arg(shown, name)
+                                 : tr("renamed the category %1 to %2").arg(shown, name);
+        },
+        [from, name](Store &store, OrganizeChange *change, const QString &pubkey) {
+            return store.renameCategory(from, name, change, pubkey);
+        },
+        failure,
+        [this, shown, name, selected](const OrganizeChange &change) {
+            setStatus(change.merged ? tr("Merged the category %1 into %2").arg(shown, name)
+                                    : tr("Renamed the category %1 to %2").arg(shown, name));
+            // The category selected goes on being, under its new name.
+            if (const int row = m_sources.rowOfCategory(name); selected && m_sources.isSelectable(row))
+                selectSource(row);
+        });
+    return true;
+}
+
+void Backend::deleteCategory(const QString &name) {
+    const QString failure = tr("Cannot delete the category: %1");
+    if (!m_storeOpen) {
+        refuseOrganize(failure, tr("the library is not open"));
+        return;
+    }
+    const QString shown = FeedParser::cleanText(name);
+    organize([shown](const OrganizeChange &) { return tr("deleted the category %1").arg(shown); },
+             [name](Store &store, OrganizeChange *change, const QString &pubkey) {
+                 return store.deleteCategory(name, change, pubkey);
+             },
+             failure,
+             [this, shown](const OrganizeChange &change) {
+                 setStatus(tr("Deleted the category %1 (%n feeds left without one)", nullptr, change.feeds)
+                               .arg(shown));
+             });
+}
+
+bool Backend::setFeedCategory(qint64 feedId, const QString &name) {
+    const QString failure = tr("Cannot move the feed: %1");
+    if (!m_storeOpen)
+        return refuseOrganize(failure, tr("the library is not open"));
+    // A category there already is picked by the name the library keeps,
+    // which is taken as it is (Store::setFeedCategory()); only a new name is
+    // checked, and trimmed.
+    const bool known = !name.isEmpty() && categoryNames().contains(name);
+    if (!known && !name.isEmpty())
+        if (const QString why = Sync::categoryNameProblem(name); !why.isEmpty())
+            return refuseOrganize(failure, why);
+    const QString category = known ? name : name.trimmed();
+    const QString shown = FeedParser::cleanText(category);
+    const QString title = feedTitle(m_sources, feedId);
+    organize(
+        [title, shown](const OrganizeChange &) {
+            return shown.isEmpty() ? tr("took %1 out of its category").arg(title)
+                                   : tr("moved %1 to %2").arg(title, shown);
+        },
+        [feedId, category](Store &store, OrganizeChange *change, const QString &pubkey) {
+            return store.setFeedCategory(feedId, category, change, pubkey);
+        },
+        failure,
+        [this, title, shown](const OrganizeChange &) {
+            setStatus(shown.isEmpty() ? tr("Took %1 out of its category").arg(title)
+                                      : tr("Moved %1 to %2").arg(title, shown));
+        });
+    return true;
+}
+
+bool Backend::setFeedTags(qint64 feedId, const QString &list) {
+    const QString failure = tr("Cannot change the tags: %1");
+    if (!m_storeOpen)
+        return refuseOrganize(failure, tr("the library is not open"));
+    if (const QString why = tagListProblem(list, feedId); !why.isEmpty())
+        return refuseOrganize(failure, why);
+    const QString title = feedTitle(m_sources, feedId);
+    organize([title](const OrganizeChange &) { return tr("changed the tags of %1").arg(title); },
+             [feedId, list](Store &store, OrganizeChange *change, const QString &pubkey) {
+                 return store.setFeedTagList(feedId, list, change, pubkey);
+             },
+             failure,
+             [this, title](const OrganizeChange &) { setStatus(tr("Changed the tags of %1").arg(title)); });
+    return true;
+}
+
+bool Backend::renameTag(const QString &name, const QString &to) {
+    const QString failure = tr("Cannot rename the tag: %1");
+    if (!m_storeOpen)
+        return refuseOrganize(failure, tr("the library is not open"));
+    if (const QString why = Sync::tagProblem(to); !why.isEmpty())
+        return refuseOrganize(failure, why);
+    const QString tag = to.trimmed();
+    const bool selected = selectedTag() == name;
+    organize([name, tag](const OrganizeChange &) { return tr("renamed the tag %1 to %2").arg(name, tag); },
+             [name, tag](Store &store, OrganizeChange *change, const QString &pubkey) {
+                 return store.renameTag(name, tag, change, pubkey);
+             },
+             failure,
+             [this, name, tag, selected](const OrganizeChange &) {
+                 setStatus(tr("Renamed the tag %1 to %2").arg(name, tag));
+                 if (const int row = m_sources.rowOfTag(Sync::tagName(tag)); selected && m_sources.isSelectable(row))
+                     selectSource(row);
+             });
+    return true;
+}
+
+void Backend::deleteTag(const QString &name) {
+    const QString failure = tr("Cannot delete the tag: %1");
+    if (!m_storeOpen) {
+        refuseOrganize(failure, tr("the library is not open"));
+        return;
+    }
+    organize([name](const OrganizeChange &) { return tr("deleted the tag %1").arg(name); },
+             [name](Store &store, OrganizeChange *change, const QString &pubkey) {
+                 return store.deleteTag(name, change, pubkey);
+             },
+             failure,
+             [this, name](const OrganizeChange &change) {
+                 setStatus(tr("Deleted the tag %1 from %n feeds", nullptr, change.feeds).arg(name));
+             });
+}
+
+void Backend::organize(std::function<QString(const OrganizeChange &)> label, Organize work, const QString &failure,
+                       std::function<void(const OrganizeChange &)> done) {
+    // Filled in on the worker, and read here only once its write is done.
+    auto change = std::make_shared<OrganizeChange>();
+    auto command = std::make_shared<UndoCommand>();
+    command->label = [label = std::move(label), change] { return label(*change); };
+    command->organization = true;
+    command->apply = [this, change, state = command->state](bool undo, const Finished &finished) {
+        restoreOrganization(change, undo, state, finished);
+    };
+    // Checked again in the change's own transaction, as a login queued
+    // before it may set another account first.
+    const QString pubkey = m_syncAccount.pubkey;
+    pushUndo(command);
+    writeOnWorker(
+        [work = std::move(work), change, pubkey](Store &store) {
+            return work(store, change.get(), pubkey) ? int(change->changed) : -1;
+        },
+        failure,
+        [this, command, change, failure, done = std::move(done)](const WriteResult &result) {
+            QString why = result.error;
+            // Skipped as reloadSyncAccount() forgot the command, the account
+            // having changed before the worker reached the write.
+            if (why.isEmpty() && result.skipped)
+                why = Sync::accountChanged();
+            if (!why.isEmpty()) {
+                dropUndo(command);
+                setStatus(failure.arg(why), true);
+                // The account was set apart from this window, as by `readstr
+                // sync login`, so the next change is worked out under it.
+                if (why == Sync::accountChanged())
+                    reloadSyncAccount();
+                reloadLibrary();
+                emit organizeSaved(false, failure.arg(why));
+                return;
+            }
+            // Asked for as it already was: nothing to publish or undo.
+            if (result.changed == 0) {
+                dropUndo(command);
+            } else {
+                schedulePublish(Sync::subscriptionsKind);
+                trimUndo();
+            }
+            reloadLibrary();
+            if (result.changed > 0 && done)
+                done(*change);
+            emit organizeSaved(true, {});
+        },
+        command->state);
+}
+
+void Backend::restoreOrganization(const std::shared_ptr<const OrganizeChange> &change, bool undo,
+                                  const std::shared_ptr<UndoState> &state, const Finished &finished) {
+    const QString failure = undoFailure(undo);
+    // A change that changed nothing writes nothing, so nothing goes out.
+    writeOnWorker([change, undo](Store &store) { return store.restoreOrganization(*change, undo) ? int(change->changed) : -1; },
+                  failure,
+                  [this, change, failure, finished](const WriteResult &result) {
+                      if (!result.error.isEmpty())
+                          setStatus(failure.arg(result.error), true);
+                      // reloadSyncAccount() says nothing of the command it
+                      // forgot, so the skip is said here; one skipped as an
+                      // earlier write of its command failed stays quiet, as
+                      // that failure was said.
+                      else if (result.skipped && change->account != m_syncAccount.pubkey)
+                          setStatus(failure.arg(Sync::accountChanged()), true);
+                      else if (!result.skipped && result.changed > 0)
+                          schedulePublish(Sync::subscriptionsKind);
+                      finished(result.error.isEmpty() && !result.skipped);
+                      reloadLibrary();
+                  },
+                  state);
 }

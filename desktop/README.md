@@ -42,11 +42,13 @@ from the web app or made here, the tags your feeds carry, then your feeds by cat
 each category with the color and icon the web app gave it, with unread
 counts and a feed's last refresh error under it),
 the articles of the selected source in the middle, newest first, and the
-article itself on the right. Selecting an article marks it read. Right-click
-a feed to refresh it or unsubscribe (and, for a Nostr author, to open their
-profile on njump.me or copy their npub), or a saved view to edit, move, or
-delete it; the `⋮` menu has refresh, mark the view read, OPML import and
-export, Sync with Nostr, Filters, and new saved views.
+article itself on the right. A category's heading is a source too, listing
+the articles of its feeds. Selecting an article marks it read. Right-click
+a feed to refresh it, move it to a category, edit its tags, or unsubscribe
+(and, for a Nostr author, to open their profile on njump.me or copy their
+npub), a category's heading or a tag to rename or delete it, or a saved
+view to edit, move, or delete it; the `⋮` menu has refresh, mark the view
+read, OPML import and export, Sync with Nostr, Filters, and new saved views.
 
 `Ctrl+F` searches the articles of the selected source: their titles, authors,
 summaries, and text (as the reader shows it, so markup and link addresses
@@ -213,12 +215,71 @@ newer list from the web app updates them, and a feed the list lists without
 tags, or a category it names without a color or icon, has none. A feed the
 list leaves out, such as one whose unsubscribe you undid while the list
 without it was going out, keeps its own, and the next list carries them
-on. Signing in with another npub clears them until its list arrives. A tag
+on. Signing in with another npub clears them until its list arrives;
+stopping syncing and signing in again with the same one keeps them. A tag
 that is blank or holds a control character is left out. A color is shown only as `#rgb` or `#rrggbb`, and
 an icon only when it is 16 UTF-16 code units or fewer (a letter or a simple
 emoji takes one or two, so about 8 emoji at most); anything else is left
-out. They are read only here for now: edit them in the
-web app.
+out.
+
+### Categories and tags
+
+A right click on a feed has **Move to category…**, which puts it in a
+category picked from those there are, in a new one typed in, or in none,
+and **Tags…**, which edits its tags as one comma-separated list. A tag that
+holds a comma, starts with a quote, or has spaces around it shows there
+between quotes, each quote in it doubled, and is typed so too
+(`"a, b", c`). A right
+click on a category's heading, or `F2` and `Delete` with it selected,
+renames or deletes it; deleting asks first, saying how many feeds it leaves
+without a category, and keeps them all. Renaming a category to the name of
+another one there already merges the two: the feeds join that one, which
+keeps its own color and icon when it has either, or takes those of the one
+renamed; a plain rename keeps them. A right click on a tag, or `F2` and
+`Delete` with it selected, renames or deletes it on every feed that carries
+it, in every spelling of it that shows the same. Each change is saved in one
+transaction with the mark to publish the subscription list, and `Ctrl+Z`
+undoes it (not after signing in or out, as the change was made under the
+npub set then).
+
+A category's name or a tag that would not read back as it is once the web
+app's list is pulled again is refused, and the dialog says why and keeps
+what was typed: blank ones, a category name with a control character, a
+direction mark, or a run of spaces, which the pull cleans away, over 256
+characters, a tag that holds a control character, a direction mark, an
+invisible character such as a zero-width space, or a run of spaces, or
+over 256 characters, or more than 100 tags on one feed, as the web app's
+list takes them. The spaces around a name are trimmed, and of tags that
+show the same (as the Tags section lists them) a feed keeps the first.
+Only what is typed anew is checked: a category there already, even one an
+OPML file named in a way that could not be typed here, can be picked for a
+feed, and the tags a feed has, from the web app or from here, are kept as
+they are, unchecked, where the list is saved with them left as it showed
+them.
+
+The next subscription list published carries the categories, their colors
+and icons, and every feed's tags as they are here, so the web app shows
+them (see Publishing). Until it has gone out, a pull, even of a newer list
+from the web app, does not take these changes back: a feed whose tags, or a
+category whose color and icon, were changed here keeps them, while the
+others follow the list as before. The categories also go into an exported
+OPML file as its folders.
+
+The tags and the categories' colors and icons are those of the npub they
+were pulled or changed under, even after "Stop syncing": signing in again
+with that npub keeps them, and a change not published yet goes out once it
+is back, while what the web app changed meanwhile of the other feeds and
+categories still comes in with the next pull, as the last list pulled is
+kept to tell the two apart. Changes made before any npub was set are the
+first one's, and go out with it; as there is no list to tell them from the
+web app's then, that first pull keeps the tags of every feed that has some,
+and the style of every category, as they are here, and the publish after
+it carries them. Tags kept from before Readstr recorded whose they are,
+with no npub set, are not taken by the next one. Another npub starts
+without them; when they hold changes the
+last npub has not published yet, setting it first asks whether to remove
+them, as for the saved views (see Sync with the web app), and
+`readstr sync login` refuses unless given `--drop-views`.
 
 ## Nostr
 
@@ -377,8 +438,10 @@ npub's they were pulled or edited under, even after you stop: the next npub
 would publish them as its own with its first view edit, so setting a
 different one, directly or after "Stop syncing", first asks whether to
 remove them from this computer, with their mute words and any edits not
-published yet, which nothing brings back. Keeping them leaves the npub as
-it was. `readstr sync login` refuses instead, unless given `--drop-views`.
+published yet, which nothing brings back. It asks the same when the
+categories and tags hold changes that npub made and has not published (see
+Categories and tags). Keeping them leaves the npub as it was. `readstr sync
+login` refuses instead, unless given `--drop-views`.
 The same npub again keeps them, and views made before any npub was set
 become the first one's. Undo and redo forget changes to the saved views
 when the npub changes, so they never put one account's views back under
@@ -395,10 +458,13 @@ you switch to, and for one set before Readstr could publish. Until then
 changes are kept, and they go out with that first "Publish now".
 
 - The subscription list (kind 30404), 2 seconds after you subscribe,
-  unsubscribe, or import an OPML file (a burst of changes goes out once).
-  Each feed keeps the tags and category color and icon the last list gave
-  it, carried on from that list as it was, since Readstr shows them but
-  cannot edit them; a feed in that list that Readstr
+  unsubscribe, import an OPML file, or change a category or tag (a burst of
+  changes goes out once). Each feed keeps the tags and category color and
+  icon the last list gave it, carried on from that list as it was, so what
+  Readstr leaves out of them (a tag with a control character, a color it
+  does not show) stays, unless they were changed here since that list went
+  out: then the feed carries them as they are here (see Categories and
+  tags). A feed in that list that Readstr
   cannot follow (one on the local network, or neither a web feed nor an
   npub) stays in the list, and one it could follow but you unsubscribed
   goes into `deleted`. A feed another device unsubscribed from (in that
@@ -473,6 +539,13 @@ those that take `--json` print one line of JSON whose shape is stable (below).
 | Command | What it does |
 |---|---|
 | `readstr feeds [--json]` | List subscriptions with unread and total counts, their categories, and their tags |
+| `readstr feeds category ID NAME\|--none [--json]` | Put a feed in a category, made if need be, or in none |
+| `readstr feeds tags ID LIST [--json]` | Give a feed the tags of a comma-separated list (`""` for none); a tag with a comma, a leading quote, or spaces around it goes between quotes, each quote in it doubled, and the feed's own tags written so are kept as they are |
+| `readstr categories [--json]` | List the categories with their color, icon, and counts |
+| `readstr categories rename NAME NEW [--json]` | Rename a category, merging it into one named `NEW` if there is one |
+| `readstr categories delete NAME [--json]` | Delete a category; its feeds are left without one |
+| `readstr tags [--json]` | List the tags as the sources pane names them, with their spellings and counts |
+| `readstr tags rename TAG NEW [--json]`, `readstr tags delete TAG [--json]` | Rename or delete a tag on every feed that carries it |
 | `readstr articles [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]` | List articles, newest first (50 unless `--limit`; `--limit 0` for all); `--view` lists a saved view's, in its order, naming on stderr the rules left out; exits 1 for a view of a feed or a category, which cannot be identified here yet, or with `--unread` for a view of read articles |
 | `readstr search QUERY [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]` | Search titles, authors, summaries, and text, best match first, as `Ctrl+F` does; exits 1 for a query with no letters or digits or over 256 characters |
 | `readstr views [--json]` | List the saved views in the web app's order, with the rules that cannot be applied here, and those that list nothing here |
@@ -486,7 +559,7 @@ those that take `--json` print one line of JSON whose shape is stable (below).
 | `readstr star ID...`, `unstar ID...` | Star or unstar articles |
 | `readstr import FILE.opml [--json]` | Add the feeds in an OPML file; folders become categories |
 | `readstr export [FILE]` | Write the subscriptions as OPML to FILE, or to stdout |
-| `readstr sync login NPUB [--drop-views]` | Sync with an npub or nprofile from now on (public key only); exits 1 when the saved views belong to another npub, unless `--drop-views` removes them, mute words and unpublished edits included |
+| `readstr sync login NPUB [--drop-views]` | Sync with an npub or nprofile from now on (public key only); exits 1 when the saved views belong to another npub, or the categories and tags hold its changes not published yet, unless `--drop-views` removes them, mute words and unpublished edits included |
 | `readstr sync logout` | Stop syncing and forget what was pulled for the npub |
 | `readstr sync [--json]` | Pull and merge the web app's sync events now; exits 1 if anything failed or was refused |
 | `readstr filters [--json]` | List the keyword filter rules in the order they apply (add and edit them in the window) |
@@ -559,6 +632,25 @@ ISO 8601 (`2026-11-19T20:57:14Z`), and anything unknown is `null`.
   "source": {"kind": "all"}, "readState": "unread", "sort": "newest",
   "keywords": {"include": ["rust"]}, "exclude": [], "unsupported": [],
   "listable": true}]
+
+// readstr feeds category ID NAME --json, and readstr feeds tags ID LIST
+// --json: the feed as readstr feeds --json lists it
+
+// readstr categories --json (by name)
+[{"name": "News", "color": "#3b82f6", "icon": "📰", "feeds": 2, "unread": 20}]
+
+// readstr categories rename NAME NEW --json ("merged" is true when NEW was a
+// category already; "feeds" counts the feeds that changed)
+{"from": "News", "to": "Daily", "feeds": 2, "merged": false}
+
+// readstr categories delete NAME --json, readstr tags delete TAG --json
+{"name": "News", "feeds": 2}
+
+// readstr tags --json (by the name they show as)
+[{"name": "tech", "spellings": ["tech"], "feeds": 3, "unread": 12}]
+
+// readstr tags rename TAG NEW --json
+{"from": "tech", "to": "technology", "feeds": 3}
 
 // readstr filters --json (in the order they apply; "target" is "title",
 // "content", "author", or "any", "type" "contains", "word", or "regex", and
@@ -671,7 +763,7 @@ field.
 |---|---|
 | `J`, `K` | Next or previous article |
 | `N` | Next unread article |
-| `Up`, `Down` | Move in the selected list (sources and saved views, or articles) |
+| `Up`, `Down` | Move in the selected list (sources, saved views, tags, and categories, or articles) |
 | `Tab` | Switch between sources and articles |
 | `Space`, `Shift+Space` | Scroll the article |
 | `M` | Mark read or unread |
@@ -684,14 +776,14 @@ field.
 | `Ctrl+Shift+A` | Mark everything in the view read |
 | `V`, `Shift+V` | Next or previous saved view |
 | `Ctrl+Shift+N` | Create a saved view |
-| `F2` | Edit the selected saved view |
+| `F2` | Edit the selected saved view, or rename the selected category or tag |
 | `Alt+Up`, `Alt+Down` | Move the selected saved view up or down |
-| `Ctrl+Z` | Undo the last change: marking read or unread, starring, marking the view or a rule's matches read, unsubscribing, changing the filter rules, or making, editing, moving, or deleting a saved view |
+| `Ctrl+Z` | Undo the last change: marking read or unread, starring, marking the view or a rule's matches read, unsubscribing, changing the filter rules, making, editing, moving, or deleting a saved view, or changing a category or a tag |
 | `Ctrl+Shift+Z` | Redo what was undone |
 | `Ctrl+O` | Import OPML |
 | `Ctrl+Shift+E` | Export OPML |
 | `Ctrl+F` | Search the articles |
-| `Delete` | Unsubscribe from the selected feed, or delete the selected saved view (asks first) |
+| `Delete` | Unsubscribe from the selected feed, or delete the selected saved view, category, or tag (asks first) |
 | `?` | Show or hide the shortcuts |
 | `Esc` | Close the shortcuts, or clear the search |
 | `Q`, `Ctrl+Q` | Quit |

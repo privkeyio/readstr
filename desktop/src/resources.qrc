@@ -12,6 +12,8 @@
         <file alias="FiltersDialog.qml">FiltersDialog.qml</file>
         <file alias="ViewDialog.qml">ViewDialog.qml</file>
         <file alias="DeleteViewDialog.qml">DeleteViewDialog.qml</file>
+        <file alias="CategoryDialog.qml">CategoryDialog.qml</file>
+        <file alias="TagsDialog.qml">TagsDialog.qml</file>
         <file alias="ShortcutsOverlay.qml">ShortcutsOverlay.qml</file>
         <file alias="i18n/en.json">i18n/en.json</file>
         <file alias="i18n/da.json">i18n/da.json</file>
