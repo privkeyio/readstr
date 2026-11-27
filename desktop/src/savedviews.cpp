@@ -366,9 +366,22 @@ QString move(QList<SavedView> &views, const QString &id, qsizetype index) {
     return {};
 }
 
-int save(Store &store, const std::function<QString(QList<SavedView> &)> &change, QString *problem) {
+QString accountChanged() { return tr("the sync account changed"); }
+
+int save(Store &store, const std::function<QString(QList<SavedView> &)> &change, QString *problem,
+         const std::optional<QString> &expectedPubkey) {
     problem->clear();
     const bool saved = store.transaction([&] {
+        // Read before the views, in this transaction, so a change worked
+        // out under one account is never written, or marked to publish,
+        // under the next one, which a login queued before it may have set.
+        const SyncAccount account = store.syncAccount();
+        if (!store.lastError().isEmpty())
+            return false;
+        if (expectedPubkey && account.pubkey != *expectedPubkey) {
+            *problem = accountChanged();
+            return false;
+        }
         QList<SavedView> views = store.savedViews();
         if (!store.lastError().isEmpty())
             return false;
@@ -378,11 +391,8 @@ int save(Store &store, const std::function<QString(QList<SavedView> &)> &change,
         // As the web app's normalizeViews numbers them.
         for (qsizetype i = 0; i < views.size(); ++i)
             views[i].view.insert("order", int(i));
-        // Read in this transaction, so the mark goes to the account the
-        // views were read under; with none set there is nothing to mark.
-        const SyncAccount account = store.syncAccount();
-        if (!store.lastError().isEmpty())
-            return false;
+        // The mark goes to the account the views were read under; with none
+        // set there is nothing to mark.
         return store.replaceSavedViews(views) && (account.pubkey.isEmpty() || store.markViewsEdited(account.pubkey));
     });
     if (saved)

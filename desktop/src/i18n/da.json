@@ -397,6 +397,7 @@
   "not every relay answered, so the saved views are not replaced": "ikke alle relæer svarede, så de gemte visninger erstattes ikke",
   "Set on the web": "Angivet på webben",
   "the view has changed since": "visningen er ændret siden",
+  "the sync account changed": "synkroniseringskontoen er skiftet",
   "The saved views here came from another npub. Syncing with this one removes them from this computer, with their mute words and any edits not published yet, and that cannot be undone.": "De gemte visninger her kom fra en anden npub. Synkronisering med denne fjerner dem fra denne computer sammen med deres skjulte ord og eventuelle ændringer, der ikke er udgivet endnu, og det kan ikke fortrydes.",
   "Keep them": "Behold dem",
   "Remove the views": "Fjern visningerne"

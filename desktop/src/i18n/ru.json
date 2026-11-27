@@ -419,6 +419,7 @@
   "not every relay answered, so the saved views are not replaced": "ответили не все релеи, поэтому сохранённые представления не заменяются",
   "Set on the web": "Задано в веб-приложении",
   "the view has changed since": "подборка с тех пор изменилась",
+  "the sync account changed": "аккаунт синхронизации сменился",
   "The saved views here came from another npub. Syncing with this one removes them from this computer, with their mute words and any edits not published yet, and that cannot be undone.": "Сохранённые подборки здесь пришли от другого npub. Синхронизация с этим удалит их с этого компьютера вместе с их стоп-словами и неопубликованными изменениями, и это нельзя отменить.",
   "Keep them": "Оставить",
   "Remove the views": "Удалить подборки"

@@ -1187,8 +1187,10 @@ QString viewsContent(const QList<SavedView> &views, qint64 now) {
     return compact({{"views", publishedViews(views)}, {"lastUpdated", now}});
 }
 
-Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, const QHash<int, qint64> &seen,
-              qint64 now) {
+namespace {
+// drafts(), meant for inside one transaction.
+Drafts draftsInTransaction(Store &store, const QString &pubkey, const QList<int> &kinds,
+                           const QHash<int, qint64> &seen, qint64 now) {
     Drafts out;
     const auto failed = [&] {
         out.events.clear();
@@ -1202,6 +1204,10 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
         out.error = tr("the npub changed before publishing");
         return out;
     }
+#ifdef READSTR_TESTS
+    if (draftsHook)
+        draftsHook();
+#endif
     for (int kind : kinds) {
         const QString tag = QString::fromLatin1(dTag(kind));
         const qint64 createdAt = nextCreatedAt(now, qMax(account.applied.value(tag), seen.value(kind)));
@@ -1305,6 +1311,24 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
             continue;
         }
         out.events << draft(kind, content, createdAt);
+    }
+    return out;
+}
+}
+
+Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, const QHash<int, qint64> &seen,
+              qint64 now) {
+    // Read in one transaction, so the account, its watermarks, the cache,
+    // and the library are one snapshot: a login as another npub that drops
+    // and replaces the views in between would otherwise have that npub's
+    // views go out under this one's key, dated by this one's watermark.
+    Drafts out;
+    if (!store.transaction([&] {
+            out = draftsInTransaction(store, pubkey, kinds, seen, now);
+            return true;
+        })) {
+        out = Drafts();
+        out.error = store.lastError();
     }
     return out;
 }

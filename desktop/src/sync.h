@@ -226,7 +226,8 @@ struct Drafts {
 };
 // Unsigned events of `kinds` from the library, each dated past the newest
 // version seen of it: its watermark, or what `seen` (Outcome::newest) says
-// the last pull found. Fails when the account is no longer `pubkey`.
+// the last pull found. Fails when the account is no longer `pubkey`. All
+// of it is read in one transaction, so it must not be called inside one.
 Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, const QHash<int, qint64> &seen,
               qint64 now);
 // Records `event`, published, as the newest of its kind: its watermark,
@@ -246,5 +247,8 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
 // recorded a subscription list, before the transaction that checks so again
 // and mirrors it, on its thread.
 inline std::function<void()> mirrorHook;
+// Only in the test build: called by drafts() once it has read the account,
+// before it reads the library, on its thread.
+inline std::function<void()> draftsHook;
 #endif
 }

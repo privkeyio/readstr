@@ -121,5 +121,10 @@ QString move(QList<SavedView> &views, const QString &id, qsizetype index);
 // if one is set (Store::markViewsEdited()), in one transaction, so a pull
 // meanwhile is never lost and the change never stays unpublished. Returns 1 once saved, 0 when `change` refused, with
 // why in `problem`, and -1 when the library failed (Store::lastError()).
-int save(Store &store, const std::function<QString(QList<SavedView> &)> &change, QString *problem);
+// With `expectedPubkey`, the pubkey of the sync account the change was
+// worked out under (empty for none), it refuses too, saying
+// accountChanged(), when the account set is another by then.
+QString accountChanged();
+int save(Store &store, const std::function<QString(QList<SavedView> &)> &change, QString *problem,
+         const std::optional<QString> &expectedPubkey = std::nullopt);
 }

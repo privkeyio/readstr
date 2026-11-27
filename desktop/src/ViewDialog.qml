@@ -24,6 +24,14 @@ Dialog {
     property var picked: []
     // An empty name is only an error once the user tried to save.
     property bool attempted: false
+    // The view as the form was filled in from (Backend::viewForm()), handed
+    // back so the save refuses once a pull has changed it.
+    property string base: ""
+    // A save is being written: the dialog waits for it, and closes only
+    // once it is saved, so a refused or failed one keeps what was typed.
+    property bool saving: false
+    // Why the last save was not written, until the form changes.
+    property string saveError: ""
 
     readonly property var form: ({
         name: nameField.text,
@@ -33,8 +41,10 @@ Dialog {
         readState: readBox.currentValue,
         sort: sortBox.currentValue,
         include: includeField.text,
-        exclude: excludeField.text
+        exclude: excludeField.text,
+        base: base
     })
+    onFormChanged: saveError = ""
     readonly property string problem: {
         // Read so the problem is worked out again when the views change, as
         // a pull meanwhile can fill the list or remove this view.
@@ -64,6 +74,8 @@ Dialog {
             return
         viewId = id
         attempted = false
+        saving = false
+        base = values.base === undefined ? "" : values.base
         sourceEditable = values.sourceEditable
         fixedSource = values.sourceEditable ? "" : values.source
         nameField.text = values.name
@@ -74,6 +86,7 @@ Dialog {
         includeField.text = values.include
         excludeField.text = values.exclude
         picked = values.tags
+        saveError = ""
         // The library's tags, and the view's own that no feed carries now.
         const offered = backend.viewTags()
         for (let i = 0; i < values.tags.length; ++i)
@@ -94,9 +107,26 @@ Dialog {
     }
 
     function submit() {
+        if (saving)
+            return
         attempted = true
-        if (problem === "" && backend.saveView(viewId, form))
-            close()
+        if (problem !== "")
+            return
+        saving = true
+        if (!backend.saveView(viewId, form))
+            saving = false
+    }
+
+    Connections {
+        target: backend
+        enabled: dialog.saving
+        function onViewSaved(ok, why) {
+            dialog.saving = false
+            if (ok)
+                dialog.close()
+            else
+                dialog.saveError = why
+        }
     }
 
     parent: Overlay.overlay
@@ -363,7 +393,8 @@ Dialog {
                 objectName: "viewProblem"
                 Layout.fillWidth: true
                 visible: text !== ""
-                text: dialog.attempted || nameField.text.trim() !== "" ? dialog.problem : ""
+                text: dialog.saveError !== "" ? dialog.saveError
+                    : dialog.attempted || nameField.text.trim() !== "" ? dialog.problem : ""
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
                 maximumLineCount: 3
@@ -385,6 +416,7 @@ Dialog {
         Button {
             objectName: "viewSave"
             text: dialog.viewId === "" ? qsTr("Create") : qsTr("Save")
+            enabled: !dialog.saving
             flat: true
             focusPolicy: Qt.NoFocus
             Material.roundedScale: theme.radius

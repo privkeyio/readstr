@@ -261,6 +261,7 @@
   "not every relay answered, so the saved views are not replaced": "nem todos os relays responderam, então as visualizações salvas não são substituídas",
   "Set on the web": "Definida na web",
   "the view has changed since": "a visualização mudou desde então",
+  "the sync account changed": "a conta de sincronização mudou",
   "The saved views here came from another npub. Syncing with this one removes them from this computer, with their mute words and any edits not published yet, and that cannot be undone.": "As visualizações salvas aqui vieram de outra npub. Sincronizar com esta as remove deste computador, com as palavras silenciadas e quaisquer edições ainda não publicadas, e isso não pode ser desfeito.",
   "Keep them": "Mantê-las",
   "Remove the views": "Remover as visualizações"

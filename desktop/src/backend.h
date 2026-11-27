@@ -390,7 +390,8 @@ public:
     // feed's or category's, which only the web app can set), tags, readState,
     // sort, include and exclude (the keywords and the mute words, each a
     // comma-separated list), and sourceEditable. Empty when there is no such
-    // view.
+    // view. An existing view's form holds `base` too, the view as the form
+    // was filled in from, which saveView() edits only while it is still so.
     Q_INVOKABLE QVariantMap viewForm(const QString &id) const;
     // A new view's form for the source selected (canSaveSourceAsView), named
     // after it.
@@ -404,7 +405,10 @@ public:
     // then selected. False, changing nothing, when viewProblem() finds
     // fault with it. Each change to the views, saved in one transaction with
     // the mark to publish them, goes out as kind 30406 without the mute
-    // words, and undo() can undo it.
+    // words, and undo() can undo it. Saved on the worker: once true, it says
+    // whether it was saved with viewSaved(). A form with a `base`
+    // (viewForm()) is refused when the view is no longer that base, as when
+    // a pull changed it while the dialog was open.
     Q_INVOKABLE bool saveView(const QString &id, const QVariantMap &form);
     Q_INVOKABLE void deleteView(const QString &id);
     // Moves the view `id` `step` places, within the list.
@@ -496,6 +500,9 @@ signals:
     void statusChanged();
     void undoChanged();
     void viewsChanged();
+    // The write of a saveView() that returned true is done: `ok` when it
+    // was saved, or else `problem` says why not.
+    void viewSaved(bool ok, const QString &problem);
 
 private:
     // Runs `work` on the worker thread with its Store, then `done` with the
@@ -647,17 +654,23 @@ private:
     // library, which shows them and moves the selection off a view that is
     // gone, as a sync pull does.
     bool loadViews();
-    // Changes the saved views on the worker (SavedViews::save()), saying in
+    // Changes the saved views on the worker (SavedViews::save()), only
+    // while the sync account is still `pubkey` (empty for none), saying in
     // the status bar why it could not, with `failure`, then publishes them
-    // and shows them, and calls `finished`.
+    // and shows them, and calls `finished`, and `failed` with the message
+    // when it could not.
     void changeViews(std::function<QString(QList<SavedView> &)> change, const QString &failure,
-                     const Finished &finished, const std::shared_ptr<UndoState> &undo);
+                     const Finished &finished, const std::shared_ptr<UndoState> &undo, const QString &pubkey,
+                     const std::function<void(const QString &)> &failed = {});
     // Changes the views as `change` does, or does again (`undo` false) or
     // undoes as `reverse` does, as an action undo() can undo, labelled with
-    // `label`. `done` follows the action's own change once it is saved.
+    // `label`, each only under the sync account set now. `done` follows the
+    // action's own change once it is saved, and `failed`, with why, once it
+    // is not.
     using ViewChange = std::function<QString(QList<SavedView> &)>;
     void changeViewsUndoably(std::function<QString()> label, const ViewChange &change, const ViewChange &reverse,
-                             const QString &failure, std::function<void()> done = {});
+                             const QString &failure, std::function<void()> done = {},
+                             std::function<void(const QString &)> failed = {});
     // The saved view `id`, or null when there is none.
     const SavedView *savedView(const QString &id) const;
     void loadArticles();

@@ -926,7 +926,7 @@ private slots:
                  {"DROP TRIGGER items_fts_delete", "DROP TABLE items_fts", "DROP TABLE filter_rules",
                   "DROP TABLE filter_state", "ALTER TABLE items DROP COLUMN filter_flags",
                   "ALTER TABLE feeds DROP COLUMN tags", "ALTER TABLE categories DROP COLUMN color",
-                  "ALTER TABLE categories DROP COLUMN icon", "ALTER TABLE sync_account DROP COLUMN views_edits", "DROP TABLE saved_views_owner",
+                  "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner",
                   "INSERT INTO items (feed_id, guid, title, content, created_at, address)"
                   " VALUES (1, 'nostr', 'Long form', 'See [the page](https://hidden.example.com/needle) on *bees*', 2,"
                   " '30023:abc:d')",
@@ -5837,7 +5837,7 @@ private slots:
         for (const char *statement :
              {"DROP TABLE filter_rules", "DROP TABLE filter_state", "ALTER TABLE items DROP COLUMN filter_flags",
               "ALTER TABLE feeds DROP COLUMN tags", "ALTER TABLE categories DROP COLUMN color",
-              "ALTER TABLE categories DROP COLUMN icon", "ALTER TABLE sync_account DROP COLUMN views_edits", "DROP TABLE saved_views_owner", "PRAGMA user_version = 7"})
+              "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner", "PRAGMA user_version = 7"})
             QCOMPARE(rawExec(path, statement), QString());
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
@@ -5854,7 +5854,7 @@ private slots:
         QVERIFY(store.setFilterRules({filterRule("x", KeywordFilter::Target::Title)}));
         for (const char *statement :
              {"ALTER TABLE filter_state DROP COLUMN saves", "ALTER TABLE feeds DROP COLUMN tags",
-              "ALTER TABLE categories DROP COLUMN color", "ALTER TABLE categories DROP COLUMN icon", "ALTER TABLE sync_account DROP COLUMN views_edits", "DROP TABLE saved_views_owner",
+              "ALTER TABLE categories DROP COLUMN color", "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner",
               "PRAGMA user_version = 8"})
             QCOMPARE(rawExec(path, statement), QString());
         Store again;
@@ -8874,8 +8874,100 @@ private slots:
         }, &problem), 1);
         drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now + 2);
         QCOMPARE(drafts.events.size(), 1);
-        QCOMPARE(QJsonDocument::fromJson(drafts.events.first().content.toUtf8()).object().value("views").toArray(),
-                 QJsonArray());
+        // Parsed as the web app would, so `{}` or a null list, which the web
+        // app refuses, cannot pass for an empty one.
+        const auto none = Sync::parseViews(drafts.events.first().content);
+        QVERIFY(none);
+        QVERIFY(none->isEmpty());
+    }
+
+    // A publish built before syncing stopped and started again with the
+    // same npub never counts an edit made since as published: the count of
+    // edits goes on rather than starting again.
+    void syncKeepsAViewEditOfALaterSessionToPublish()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QString problem;
+        const auto name = [&](const QString &name) {
+            return SavedViews::save(store, [&](QList<SavedView> &views) {
+                if (views.isEmpty())
+                    return SavedViews::add(views, savedView("mine", {{"name", name}}));
+                SavedView renamed = views.at(0);
+                renamed.view.insert("name", name);
+                return SavedViews::replace(views, renamed);
+            }, &problem);
+        };
+        QCOMPARE(name("First"), 1);
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const std::unique_ptr<LocalSigner> signer = LocalSigner::create(QByteArray(32, '\1'));
+        const NostrEvent sent = signer->signNow(drafts.events.first()).first;
+
+        QVERIFY(store.clearSyncAccount());
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QCOMPARE(name("Second"), 1);
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), sent, now, nullptr, nullptr, drafts.viewsEdits),
+                 QString());
+        QVERIFY(store.syncAccount().publishPending & viewsEditedBit);
+    }
+
+    // The account and the views a draft is built from are read as one: a
+    // login as another npub that drops the views and makes one of its own
+    // meanwhile, as `readstr sync login --drop-views` and `readstr views
+    // add` would, waits for the draft, which holds the first npub's views.
+    void syncDraftsTheViewsOfTheAccountItRead()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY(store.open(path));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QString problem;
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            return SavedViews::add(views, savedView("a", {{"name", "Of A"}}));
+        }, &problem), 1);
+
+        const QString other = QString(64, 'd');
+        std::atomic<bool> switched = false, ok = false;
+        std::thread login;
+        const auto joined = qScopeGuard([&login] {
+            if (login.joinable())
+                login.join();
+        });
+        bool hooked = false;
+        Sync::draftsHook = [&] {
+            if (std::exchange(hooked, true))
+                return;
+            login = std::thread([&] {
+                Store cli;
+                QString why;
+                ok = cli.open(path) && cli.setSyncAccount(Nip19::npub(other), other, {}, true)
+                     && SavedViews::save(cli, [](QList<SavedView> &views) {
+                            return SavedViews::add(views, savedView("b", {{"name", "Of B"}}));
+                        }, &why) == 1;
+                switched = true;
+            });
+            // Long enough for the login to be done, unless it waits.
+            for (int i = 0; i < 100 && !switched; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        };
+        const auto unhook = qScopeGuard([] { Sync::draftsHook = nullptr; });
+        const Sync::Drafts drafts =
+            Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, QDateTime::currentSecsSinceEpoch());
+        login.join();
+        QVERIFY(hooked);
+        QVERIFY(ok);
+        QVERIFY2(drafts.error.isEmpty(), qPrintable(drafts.error));
+        QCOMPARE(drafts.events.size(), 1);
+        const auto views = Sync::parseViews(drafts.events.first().content);
+        QVERIFY(views);
+        QCOMPARE(views->size(), 1);
+        QCOMPARE(views->first().id, QString("a"));
+        QCOMPARE(store.syncAccount().pubkey, other);
     }
 
     // A pull after a change here merges as the web app's mergeViewLists
@@ -9133,7 +9225,9 @@ private slots:
         QVERIFY(store.setSyncAccount(Nip19::npub(other), other, {}, true));
         QVERIFY(store.savedViews().isEmpty());
         QCOMPARE(store.syncAccount().publishPending, 0);
-        QCOMPARE(store.syncAccount().viewsEdits, qint64(0));
+        // The count of edits goes on from the last account's, so it never
+        // repeats one a publish was built at.
+        QCOMPARE(store.syncAccount().viewsEdits, qint64(1));
         const Sync::Drafts drafts = Sync::drafts(store, other, {Sync::viewsKind}, {}, 1800000000);
         QVERIFY(drafts.events.isEmpty());
         // Marked for the account the edit was read under, never another.
@@ -9403,6 +9497,99 @@ private slots:
         QVERIFY(!backend.canUndo() && !backend.canRedo());
     }
 
+    // The dialog's form is saved only over the view it was filled in from:
+    // a pull that changed the view while it was open, which the window
+    // shows, is not overwritten with the form's older values.
+    void backendRefusesAFormOfAViewAPullChanged()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        seedLibrary();
+        const SavedView web = savedView("web", {{"order", 0}, {"name", "Web"}});
+        seedViews({web});
+        Backend backend;
+        QVariantMap form = backend.viewForm("web");
+        form.insert("name", "Mine");
+
+        Store store;
+        QVERIFY(store.open());
+        SavedView pulled = web;
+        pulled.view.insert("name", "Pulled");
+        pulled.view.insert("sort", "oldest");
+        QVERIFY(store.transaction([&] { return store.replaceSavedViews({pulled}); }));
+        // The window reads the views again, as it does after a pull.
+        backend.selectArticle(0);
+        QTRY_COMPARE(backend.savedViews().value(0).view.value("name").toString(), QString("Pulled"));
+
+        QSignalSpy saved(&backend, &Backend::viewSaved);
+        QVERIFY(backend.saveView("web", form));
+        QVERIFY(saved.wait(10000));
+        QCOMPARE(saved.first().at(0).toBool(), false);
+        QCOMPARE(saved.first().at(1).toString(), QString("Cannot save the view: The view changed; try again"));
+        QCOMPARE(store.savedViews().at(0).view.value("name").toString(), QString("Pulled"));
+        QCOMPARE(store.savedViews().at(0).view.value("sort").toString(), QString("oldest"));
+        QVERIFY(!backend.canUndo());
+
+        // Filled in again, it saves.
+        form = backend.viewForm("web");
+        form.insert("name", "Mine");
+        QVERIFY(backend.saveView("web", form));
+        QVERIFY(saved.wait(10000));
+        QCOMPARE(saved.last().at(0).toBool(), true);
+        QCOMPARE(store.savedViews().at(0).view.value("name").toString(), QString("Mine"));
+        QCOMPARE(store.savedViews().at(0).view.value("sort").toString(), QString("oldest"));
+    }
+
+    // A move is undone or redone only over the order it left: one a pull
+    // changed since stays as the pull left it.
+    void backendUndoesAMoveOnlyOverTheOrderItLeft()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        seedLibrary();
+        const SavedView a = savedView("a", {}), b = savedView("b", {}), c = savedView("c", {});
+        seedViews({a, b, c});
+        Store store;
+        QVERIFY(store.open());
+        const auto ids = [&store] {
+            QStringList ids;
+            for (const SavedView &view : store.savedViews())
+                ids << view.id;
+            return ids;
+        };
+        const auto pull = [&store](const QList<SavedView> &views) {
+            return store.transaction([&] { return store.replaceSavedViews(views); });
+        };
+        Backend backend;
+
+        backend.moveView("c", -1);
+        QTRY_COMPARE(ids(), (QStringList{"a", "c", "b"}));
+        QVERIFY(pull({b, a, c}));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Cannot undo: the view has changed since"));
+        QCOMPARE(ids(), (QStringList{"b", "a", "c"}));
+        QVERIFY(!backend.canUndo() && !backend.canRedo());
+
+        backend.moveView("c", -1);
+        QTRY_COMPARE(ids(), (QStringList{"b", "c", "a"}));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: moved the view c"));
+        QCOMPARE(ids(), (QStringList{"b", "a", "c"}));
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: moved the view c"));
+        QCOMPARE(ids(), (QStringList{"b", "c", "a"}));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: moved the view c"));
+        QVERIFY(pull({a, b, c}));
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Cannot redo: the view has changed since"));
+        QCOMPARE(ids(), (QStringList{"a", "b", "c"}));
+    }
+
     // Another npub takes the saved views only when told to drop them, and
     // once it is set, undo and redo no longer reach the views of the last
     // one, which would come back marked to publish under it.
@@ -9446,6 +9633,41 @@ private slots:
         Store store;
         QVERIFY(store.open());
         QVERIFY(store.savedViews().isEmpty());
+        QVERIFY(!(store.syncAccount().publishPending & viewsEditedBit));
+    }
+
+    // An undo asked for while another npub is being set, and so queued on
+    // the worker before the window forgets the views' history, still never
+    // writes the last npub's views under the new one.
+    void backendRefusesAViewUndoQueuedBeforeAnotherAccount()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        seedLibrary();
+        seedViews({savedView("web", {{"order", 0}})});
+        Backend backend;
+        backend.setRelays({relay.url()});
+        QStringList statuses;
+        connect(&backend, &Backend::statusChanged, &backend, [&] { statuses << backend.status(); });
+        // Its last view deleted, the npub's views are no other's to drop.
+        backend.deleteView("web");
+        QTRY_COMPARE(backend.status(), QString("Deleted the view web"));
+        const QString other = Nip19::npub(QString(64, 'd'));
+        QVERIFY(!backend.syncNpubDropsViews(other));
+
+        QVERIFY(backend.setSyncNpub(other));
+        backend.undo();
+        Store store;
+        QVERIFY(store.open());
+        // Refused, it says so; written, it is in the library.
+        QTRY_VERIFY(statuses.contains("Cannot undo: the sync account changed") || !store.savedViews().isEmpty());
+        QVERIFY(store.savedViews().isEmpty());
+        QVERIFY(statuses.contains("Cannot undo: the sync account changed"));
+        QTRY_COMPARE(backend.syncNpub(), other);
+        QVERIFY(!backend.canUndo() && !backend.canRedo());
         QVERIFY(!(store.syncAccount().publishPending & viewsEditedBit));
     }
 
@@ -9698,8 +9920,43 @@ private slots:
         name->setProperty("text", "Tech news");
         QVERIFY(QMetaObject::invokeMethod(find("viewSave"), "clicked"));
         QTRY_COMPARE(backend.status(), QString("Saved the view Tech news"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
         QCOMPARE(backend.savedViews().first().view.value("source").toObject(),
                  (QJsonObject{{"kind", "feed"}, {"feedId", "clx"}}));
+
+        // A save the worker refuses, as for a view a pull changed while the
+        // dialog was open, leaves the dialog open with why and what was
+        // typed; once filled in again, it saves and closes.
+        backend.selectSource(backend.sources()->rowOfView(id));
+        QCOMPARE(backend.selectedViewId(), id);
+        QTest::keyClick(loaded.window, Qt::Key_F2);
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        name->setProperty("text", "Typed");
+        {
+            Store store;
+            QVERIFY(store.open());
+            QList<SavedView> views = store.savedViews();
+            const qsizetype at = SavedViews::indexOf(views, id);
+            QVERIFY(at >= 0);
+            views[at].view.insert("name", "Pulled");
+            QVERIFY(store.transaction([&] { return store.replaceSavedViews(views); }));
+        }
+        backend.selectArticle(0);
+        QTRY_COMPARE(backend.sourceTitle(), QString("Pulled"));
+        QVERIFY(QMetaObject::invokeMethod(find("viewSave"), "clicked"));
+        QTRY_COMPARE(find("viewProblem")->property("text").toString(),
+                     QString("Cannot save the view: The view changed; try again"));
+        QVERIFY(dialog->property("visible").toBool());
+        QCOMPARE(name->property("text").toString(), QString("Typed"));
+        QVERIFY(find("viewSave")->property("enabled").toBool());
+        QCOMPARE(backend.sourceTitle(), QString("Pulled"));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "edit", Q_ARG(QVariant, id)));
+        QCOMPARE(name->property("text").toString(), QString("Pulled"));
+        QCOMPARE(find("viewProblem")->property("text").toString(), QString());
+        name->setProperty("text", "Typed");
+        QVERIFY(QMetaObject::invokeMethod(find("viewSave"), "clicked"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QCOMPARE(backend.sourceTitle(), QString("Typed"));
     }
 
     // `readstr views add|edit|delete|move` change the views as the window
@@ -10056,7 +10313,7 @@ private slots:
             QVERIFY(store.addFeed("https://a.example.com/feed", "A", "News"));
         }
         for (const char *statement : {"ALTER TABLE feeds DROP COLUMN tags", "ALTER TABLE categories DROP COLUMN color",
-                                      "ALTER TABLE categories DROP COLUMN icon", "ALTER TABLE sync_account DROP COLUMN views_edits", "DROP TABLE saved_views_owner", "PRAGMA user_version = 9"})
+                                      "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner", "PRAGMA user_version = 9"})
             QCOMPARE(rawExec(path, statement), QString());
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
@@ -11400,7 +11657,9 @@ private slots:
         QCOMPARE(backend.nextAutoRefreshMs(), -1);
         backend.startAutoRefresh();
         const int next = backend.nextAutoRefreshMs();
-        QVERIFY2(next > 26 * 60 * 1000 && next <= 33 * 60 * 1000, qPrintable(QString::number(next)));
+        // The timer is a Qt::CoarseTimer, which Qt may fire up to 5% late,
+        // so the time it says is left can be past the longest delay.
+        QVERIFY2(next > 26 * 60 * 1000 && next <= 33 * 60 * 1000 * 105 / 100, qPrintable(QString::number(next)));
     }
 
     void backendImportsAndExportsOpml()

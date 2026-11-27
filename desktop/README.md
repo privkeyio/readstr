@@ -432,7 +432,9 @@ changes are kept, and they go out with that first "Publish now".
   (the web app's views first, then those only here, as the web app merges
   them). A view the last list held and the newer one lacks was deleted in
   the web app, so the pull drops it here too, unless it was made or changed
-  here since, and the next edit does not bring it back there. They wait
+  here since, and the next edit does not bring it back there. Its mute
+  words go with it, even ones changed here since, as they are never
+  published and so do not count as a change the web app could see. They wait
   when not every relay answered the pull, which may have missed a newer
   list, or while the list applied last is not cached yet, until the next
   pull. Views not changed here go out only when you ask ("Publish now")

@@ -131,9 +131,11 @@ struct SyncAccount {
     // The kinds changed here and not published yet (publishBit()), kept
     // across restarts.
     int publishPending = 0;
-    // How many times the saved views were edited here for this account
-    // (Store::markViewsEdited()), so a publish can tell whether the views it
-    // carried are still the views as edited (Sync::recordPublished()).
+    // How many times the saved views were edited here (Store::
+    // markViewsEdited()), so a publish can tell whether the views it carried
+    // are still the views as edited (Sync::recordPublished()). Counted for
+    // the library, not the account, so it never repeats when syncing stops
+    // and starts again, and an older session's publish never matches.
     qint64 viewsEdits = 0;
 };
 

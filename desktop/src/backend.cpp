@@ -3269,13 +3269,49 @@ SavedViews::Draft newViewDraft() {
     draft.source = QStringLiteral("all");
     return draft;
 }
+
+// The view a form was filled in from, as text the dialog hands back
+// unread (Backend::viewForm()).
+QString baseOf(const SavedView &view) {
+    return QString::fromUtf8(QJsonDocument(QJsonObject{{"id", view.id},
+                                                       {"view", view.view},
+                                                       {"exclude", QJsonArray::fromStringList(view.exclude)}})
+                                 .toJson(QJsonDocument::Compact));
+}
+
+// The view `form` was filled in from, when it says one, and it is the view
+// `id`.
+std::optional<SavedView> formBase(const QString &id, const QVariantMap &form) {
+    const QJsonObject base = QJsonDocument::fromJson(form.value(QStringLiteral("base")).toString().toUtf8()).object();
+    if (id.isEmpty() || base.value("id").toString() != id || !base.value("view").isObject())
+        return std::nullopt;
+    QStringList exclude;
+    for (const QJsonValue &word : base.value("exclude").toArray())
+        exclude << word.toString();
+    return SavedView{id, base.value("view").toObject(), exclude};
+}
+
+// The ids of `views`, in their order.
+QStringList idsOf(const QList<SavedView> &views) {
+    QStringList ids;
+    for (const SavedView &view : views)
+        ids << view.id;
+    return ids;
+}
 }
 
 QVariantMap Backend::viewForm(const QString &id) const {
     if (id.isEmpty())
         return formOf(newViewDraft(), true);
     const SavedView *view = savedView(id);
-    return view ? formOf(SavedViews::draftOf(*view), SavedViews::sourceEditable(*view)) : QVariantMap();
+    if (!view)
+        return {};
+    QVariantMap form = formOf(SavedViews::draftOf(*view), SavedViews::sourceEditable(*view));
+    // Handed back by saveView(), so an edit worked out from the view as it
+    // was when the dialog opened never overwrites what a pull brought while
+    // the dialog was open.
+    form.insert(QStringLiteral("base"), baseOf(*view));
+    return form;
 }
 
 QVariantMap Backend::sourceViewForm() const {
@@ -3337,12 +3373,14 @@ QVariantMap fieldsOf(const QVariantMap &form) {
 }
 
 QString Backend::viewProblem(const QString &id, const QVariantMap &form) const {
-    const SavedView *base = id.isEmpty() ? nullptr : savedView(id);
-    if (!id.isEmpty() && !base)
+    const SavedView *stored = id.isEmpty() ? nullptr : savedView(id);
+    if (!id.isEmpty() && !stored)
         return tr("The view is gone");
-    if (!base)
+    if (!stored)
         if (const QString why = SavedViews::full(m_views); !why.isEmpty())
             return why;
+    const std::optional<SavedView> given = formBase(id, form);
+    const SavedView *base = given ? &*given : stored;
     QString error;
     SavedViews::build(SavedViews::edited(base, fieldsOf(form)), base, &error);
     return error;
@@ -3351,39 +3389,51 @@ QString Backend::viewProblem(const QString &id, const QVariantMap &form) const {
 bool Backend::saveView(const QString &id, const QVariantMap &form) {
     if (!m_storeOpen || !viewProblem(id, form).isEmpty())
         return false;
-    const SavedView *base = id.isEmpty() ? nullptr : savedView(id);
+    // Worked out from the view as the form was filled in from it, not as it
+    // is now, which a pull may have changed while the dialog was open.
+    const std::optional<SavedView> given = formBase(id, form);
+    const SavedView *base = given ? &*given : id.isEmpty() ? nullptr : savedView(id);
     const std::optional<SavedView> built = SavedViews::build(SavedViews::edited(base, fieldsOf(form)), base, nullptr);
     if (!built)
         return false;
     const SavedView view = *built;
     const QString name = SavedViews::name(view);
+    const auto failed = [this](const QString &why) { emit viewSaved(false, why); };
     if (base) {
-        // Saved as it was: nothing to write, publish, or undo.
-        if (base->view == view.view && base->exclude == view.exclude)
+        // Saved as it was: nothing to write, publish, or undo. Said once
+        // this returns, as for a save written on the worker.
+        if (base->view == view.view && base->exclude == view.exclude) {
+            QMetaObject::invokeMethod(this, [this] { emit viewSaved(true, {}); }, Qt::QueuedConnection);
             return true;
+        }
         // Each way only over the view it was worked out from, so neither
         // the edit nor its undo overwrites what a pull or `readstr views`
         // changed in between.
         const SavedView before = *base;
-        changeViewsUndoably([name] { return tr("edited the view %1").arg(name); },
-                            [view, before](QList<SavedView> &views) {
-                                return SavedViews::replace(views, view, &before);
-                            },
-                            [before, view](QList<SavedView> &views) {
-                                return SavedViews::replace(views, before, &view);
-                            },
-                            tr("Cannot save the view: %1"), [this, name] { setStatus(tr("Saved the view %1").arg(name)); });
+        changeViewsUndoably(
+            [name] { return tr("edited the view %1").arg(name); },
+            [view, before](QList<SavedView> &views) { return SavedViews::replace(views, view, &before); },
+            [before, view](QList<SavedView> &views) { return SavedViews::replace(views, before, &view); },
+            tr("Cannot save the view: %1"),
+            [this, name] {
+                setStatus(tr("Saved the view %1").arg(name));
+                emit viewSaved(true, {});
+            },
+            failed);
         return true;
     }
     changeViewsUndoably([name] { return tr("created the view %1").arg(name); },
                         [view](QList<SavedView> &views) { return SavedViews::add(views, view); },
                         [view](QList<SavedView> &views) { return SavedViews::remove(views, view.id, &view); },
-                        tr("Cannot save the view: %1"), [this, name, id = view.id] {
+                        tr("Cannot save the view: %1"),
+                        [this, name, id = view.id] {
                             setStatus(tr("Created the view %1").arg(name));
                             // As the web app makes the view it saves the active one.
                             if (const int row = m_sources.rowOfView(id); m_sources.isSelectable(row))
                                 selectSource(row);
-                        });
+                            emit viewSaved(true, {});
+                        },
+                        failed);
     return true;
 }
 
@@ -3415,9 +3465,32 @@ void Backend::moveView(const QString &id, int step) {
     if (to == from)
         return;
     const QString name = SavedViews::name(m_views.at(from));
+    // The order the move left, and the one before it, as the worker saw
+    // them: an undo or a redo moves the view back or again only while the
+    // list is still in the order the step before it left, so neither puts
+    // back an older order over one a pull or `readstr views` set since.
+    struct Orders {
+        QStringList before;
+        QStringList after;
+    };
+    const auto orders = std::make_shared<Orders>();
     changeViewsUndoably([name] { return tr("moved the view %1").arg(name); },
-                        [id, to](QList<SavedView> &views) { return SavedViews::move(views, id, to); },
-                        [id, from](QList<SavedView> &views) { return SavedViews::move(views, id, from); },
+                        [id, to, orders](QList<SavedView> &views) {
+                            const QStringList now = idsOf(views);
+                            if (!orders->after.isEmpty() && now != orders->before)
+                                return SavedViews::changedMeanwhile();
+                            const QString why = SavedViews::move(views, id, to);
+                            if (why.isEmpty() && orders->after.isEmpty()) {
+                                orders->before = now;
+                                orders->after = idsOf(views);
+                            }
+                            return why;
+                        },
+                        [id, from, orders](QList<SavedView> &views) {
+                            if (idsOf(views) != orders->after)
+                                return SavedViews::changedMeanwhile();
+                            return SavedViews::move(views, id, from);
+                        },
                         tr("Cannot move the view: %1"));
 }
 
@@ -3441,44 +3514,68 @@ void Backend::stepView(int step) {
 }
 
 void Backend::changeViews(std::function<QString(QList<SavedView> &)> change, const QString &failure,
-                          const Finished &finished, const std::shared_ptr<UndoState> &undo) {
+                          const Finished &finished, const std::shared_ptr<UndoState> &undo, const QString &pubkey,
+                          const std::function<void(const QString &)> &failed) {
     // Why `change` refused, as a view gone meanwhile: written on the worker,
     // read here once its write is done.
     auto problem = std::make_shared<QString>();
     writeOnWorker(
-        [change = std::move(change), problem](Store &store) { return SavedViews::save(store, change, problem.get()); },
+        [change = std::move(change), problem, pubkey](Store &store) {
+            return SavedViews::save(store, change, problem.get(), pubkey);
+        },
         failure,
-        [this, failure, finished, problem](const WriteResult &result) {
+        [this, failure, finished, problem, failed](const WriteResult &result) {
+            QString why;
             if (!result.error.isEmpty())
-                setStatus(failure.arg(result.error), true);
+                why = failure.arg(result.error);
             else if (!problem->isEmpty())
-                setStatus(failure.arg(*problem), true);
-            else if (!result.skipped)
+                why = failure.arg(*problem);
+            // Skipped as the account changed (reloadSyncAccount()), which
+            // shows the status of its own.
+            else if (result.skipped)
+                why = failure.arg(SavedViews::accountChanged());
+            else
                 schedulePublish(Sync::viewsKind);
+            if (!result.error.isEmpty() || !problem->isEmpty())
+                setStatus(why, true);
+            // The account was set apart from this window, as by `readstr
+            // sync login`, so the next change is worked out under it.
+            if (*problem == SavedViews::accountChanged())
+                reloadSyncAccount();
             reloadLibrary();
-            finished(result.error.isEmpty() && problem->isEmpty() && !result.skipped);
+            finished(why.isEmpty());
+            if (!why.isEmpty() && failed)
+                failed(why);
         },
         undo);
 }
 
 void Backend::changeViewsUndoably(std::function<QString()> label, const ViewChange &change, const ViewChange &reverse,
-                                  const QString &failure, std::function<void()> done) {
+                                  const QString &failure, std::function<void()> done,
+                                  std::function<void(const QString &)> failed) {
     auto command = std::make_shared<UndoCommand>();
     command->label = std::move(label);
     command->savedViews = true;
-    command->apply = [this, change, reverse, state = command->state](bool undo, const Finished &finished) {
+    // The account the views are changed under, which its undo and redo are
+    // checked against too: one queued before the account changed may run
+    // before reloadSyncAccount() forgets it.
+    const QString pubkey = m_syncAccount.pubkey;
+    command->apply = [this, change, reverse, pubkey, state = command->state](bool undo, const Finished &finished) {
         // A view changed since cannot be tried again: the command goes.
         ViewChange step = [step = undo ? reverse : change](QList<SavedView> &views) {
             const QString why = step(views);
             return why == SavedViews::changedMeanwhile() ? tr("the view has changed since") : why;
         };
-        changeViews(std::move(step), undoFailure(undo), finished, state);
+        changeViews(std::move(step), undoFailure(undo), finished, state, pubkey);
     };
     pushUndo(command);
-    changeViews(change, failure, [this, command, done = std::move(done)](bool ok) {
-        if (!ok)
-            return dropUndo(command);
-        if (done)
-            done();
-    }, command->state);
+    changeViews(
+        change, failure,
+        [this, command, done = std::move(done)](bool ok) {
+            if (!ok)
+                return dropUndo(command);
+            if (done)
+                done();
+        },
+        command->state, pubkey, failed);
 }
