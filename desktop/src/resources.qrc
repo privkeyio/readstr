@@ -5,10 +5,13 @@
         <file alias="ArticleList.qml">ArticleList.qml</file>
         <file alias="ReaderPane.qml">ReaderPane.qml</file>
         <file alias="AddFeedDialog.qml">AddFeedDialog.qml</file>
+        <file alias="ConfirmDialog.qml">ConfirmDialog.qml</file>
         <file alias="UnsubscribeDialog.qml">UnsubscribeDialog.qml</file>
         <file alias="SyncDialog.qml">SyncDialog.qml</file>
         <file alias="SettingsDialog.qml">SettingsDialog.qml</file>
         <file alias="FiltersDialog.qml">FiltersDialog.qml</file>
+        <file alias="ViewDialog.qml">ViewDialog.qml</file>
+        <file alias="DeleteViewDialog.qml">DeleteViewDialog.qml</file>
         <file alias="ShortcutsOverlay.qml">ShortcutsOverlay.qml</file>
         <file alias="i18n/en.json">i18n/en.json</file>
         <file alias="i18n/da.json">i18n/da.json</file>

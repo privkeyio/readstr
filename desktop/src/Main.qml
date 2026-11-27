@@ -27,7 +27,8 @@ ApplicationWindow {
     // Single keys must not fire while a dialog or menu has the keyboard, or
     // typing an address would star articles.
     readonly property bool dialogsClosed: !addDialog.visible && !unsubscribeDialog.visible && !syncDialog.visible
-                                          && !settingsDialog.visible && !filtersDialog.visible && !sourcePane.menuOpen
+                                          && !settingsDialog.visible && !filtersDialog.visible && !viewDialog.visible
+                                          && !deleteViewDialog.visible && !sourcePane.menuOpen
     // Nor behind the shortcuts overlay, which only ? and Esc close.
     readonly property bool keysFree: dialogsClosed && !helpVisible
     // A text field keeps Ctrl+Z and Ctrl+Shift+Z for undoing its own typing.
@@ -48,12 +49,16 @@ ApplicationWindow {
         { keys: "Ctrl+R", action: qsTr("Refresh all feeds") },
         { keys: "Ctrl+N", action: qsTr("Add a feed") },
         { keys: "Ctrl+Shift+A", action: qsTr("Mark everything in the view read") },
+        { keys: "V, Shift+V", action: qsTr("Next or previous saved view") },
+        { keys: "Ctrl+Shift+N", action: qsTr("Create a saved view") },
+        { keys: "F2", action: qsTr("Edit the selected saved view") },
+        { keys: "Alt+Up, Alt+Down", action: qsTr("Move the selected saved view up or down") },
         { keys: "Ctrl+Z", action: qsTr("Undo the last change") },
         { keys: "Ctrl+Shift+Z", action: qsTr("Redo what was undone") },
         { keys: "Ctrl+O", action: qsTr("Import OPML") },
         { keys: "Ctrl+Shift+E", action: qsTr("Export OPML") },
         { keys: "Ctrl+C", action: qsTr("Copy the selected text") },
-        { keys: "Delete", action: qsTr("Unsubscribe from the selected feed") },
+        { keys: "Delete", action: qsTr("Unsubscribe from the selected feed, or delete the selected view") },
         { keys: "?", action: qsTr("Show or hide the shortcuts") },
         { keys: "Ctrl+F", action: qsTr("Search the articles") },
         { keys: "Esc", action: qsTr("Close the shortcuts, or clear the search") },
@@ -63,6 +68,14 @@ ApplicationWindow {
     function askUnsubscribe(feedId, feedTitle) {
         if (feedId > 0)
             unsubscribeDialog.ask(feedId, feedTitle)
+    }
+
+    // Delete acts on what is selected: a saved view, or a feed.
+    function askDelete() {
+        if (backend.selectedViewId !== "")
+            deleteViewDialog.ask(backend.selectedViewId, backend.sourceTitle)
+        else
+            askUnsubscribe(backend.selectedFeedId, backend.sourceTitle)
     }
 
     function move(step) {
@@ -105,7 +118,14 @@ ApplicationWindow {
     // The article never takes the keyboard, so its selection is copied
     // from here, without the zero-width spaces that break long words.
     Shortcut { sequences: [StandardKey.Copy]; context: Qt.ApplicationShortcut; enabled: win.keysFree && reader.selectedText !== ""; onActivated: backend.copyText(reader.selectedText) }
-    Shortcut { sequence: "Delete"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: win.askUnsubscribe(backend.selectedFeedId, backend.sourceTitle) }
+    Shortcut { sequence: "Delete"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: win.askDelete() }
+    Shortcut { sequence: "V"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: { win.activePane = "sources"; backend.stepView(1) } }
+    Shortcut { sequence: "Shift+V"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: { win.activePane = "sources"; backend.stepView(-1) } }
+    Shortcut { sequence: "Ctrl+Shift+N"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: viewDialog.create() }
+    Shortcut { sequence: "F2"; context: Qt.ApplicationShortcut; enabled: win.keysFree && backend.selectedViewId !== ""; onActivated: viewDialog.edit(backend.selectedViewId) }
+    // Off in a text field, as for undo, which may take them itself.
+    Shortcut { sequence: "Alt+Up"; context: Qt.ApplicationShortcut; enabled: win.keysFree && !win.editingText && backend.selectedViewId !== ""; onActivated: backend.moveView(backend.selectedViewId, -1) }
+    Shortcut { sequence: "Alt+Down"; context: Qt.ApplicationShortcut; enabled: win.keysFree && !win.editingText && backend.selectedViewId !== ""; onActivated: backend.moveView(backend.selectedViewId, 1) }
 
     // Right-to-left languages mirror the window; the Translator sets the
     // application's layout direction.
@@ -135,6 +155,10 @@ ApplicationWindow {
                     onSyncRequested: syncDialog.open()
                     onSettingsRequested: settingsDialog.open()
                     onFiltersRequested: filtersDialog.open()
+                    onNewViewRequested: viewDialog.create()
+                    onSaveSourceRequested: viewDialog.createFromSource()
+                    onEditViewRequested: (viewId) => viewDialog.edit(viewId)
+                    onDeleteViewRequested: (viewId, viewName) => deleteViewDialog.ask(viewId, viewName)
                 }
 
                 Rectangle { Layout.fillHeight: true; Layout.preferredWidth: 1; color: Qt.alpha(theme.foreground, 0.1) }
@@ -218,4 +242,6 @@ ApplicationWindow {
     SyncDialog { id: syncDialog }
     SettingsDialog { id: settingsDialog }
     FiltersDialog { id: filtersDialog }
+    ViewDialog { id: viewDialog }
+    DeleteViewDialog { id: deleteViewDialog }
 }

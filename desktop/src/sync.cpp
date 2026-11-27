@@ -313,6 +313,7 @@ QList<SavedView> normalize(QList<SavedView> views) {
         views[i].view.insert("order", int(i));
     return views;
 }
+}
 
 std::optional<QList<SavedView>> parseViews(const QString &content) {
     const auto object = parseObject(content);
@@ -331,9 +332,27 @@ std::optional<QList<SavedView>> parseViews(const QString &content) {
     return normalize(views);
 }
 
-// mergeViewLists: the remote views first, keeping each one's local mute
-// words, then the local ones the remote lacks, since deletions do not sync.
-QList<SavedView> mergeViews(const QList<SavedView> &local, const QList<SavedView> &remote) {
+namespace {
+// A view's rules and names, without its place, which every pull and every
+// save here numbers again.
+QJsonObject withoutOrder(QJsonObject view) {
+    view.remove("order");
+    return view;
+}
+}
+
+QList<SavedView> mergeViews(const QList<SavedView> &local, const QList<SavedView> &remote,
+                            const QList<SavedView> &previous) {
+    // A view the relays held before and the newer list lacks was deleted
+    // in the web app. Kept, it would go out again with the next edit here
+    // and come back there too; so it goes, unless it changed here since,
+    // which makes it a view the user still wants.
+    QHash<QString, QJsonObject> before;
+    for (const SavedView &view : previous)
+        before.insert(view.id, withoutOrder(view.view));
+    QSet<QString> listed;
+    for (const SavedView &view : remote)
+        listed.insert(view.id);
     QHash<QString, QStringList> excludes;
     for (const SavedView &view : local)
         excludes.insert(view.id, view.exclude);
@@ -350,11 +369,14 @@ QList<SavedView> mergeViews(const QList<SavedView> &local, const QList<SavedView
         if (seen.contains(view.id))
             continue;
         seen.insert(view.id);
+        if (!listed.contains(view.id) && before.contains(view.id) && before.value(view.id) == withoutOrder(view.view))
+            continue;
         merged << view;
     }
     return normalize(merged);
 }
 
+namespace {
 // Newer than the last event applied in the order the pool picks versions
 // by, so a tie in created_at goes to the lower id, and the same event
 // replayed is never newer than itself.
@@ -741,7 +763,25 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
                 if (!fresh)
                     return true;
                 const QList<SavedView> local = store.savedViews();
-                return store.lastError().isEmpty() && store.replaceSavedViews(mergeViews(local, *remote))
+                if (!store.lastError().isEmpty())
+                    return false;
+                // The list the relays held before this one, which apply()
+                // caches only after this write, so a view it held and this
+                // one lacks can be told deleted in the web app. Only when it
+                // is the list applied last: one cached behind that, or none
+                // cached, says nothing of what this one dropped, so nothing
+                // is taken for deleted.
+                const auto previous = store.syncRemote(QString::fromLatin1(viewsTag));
+                if (!store.lastError().isEmpty())
+                    return false;
+                const SyncAccount now = store.syncAccount();
+                if (!store.lastError().isEmpty())
+                    return false;
+                const bool current =
+                    previous && previous->eventId == now.appliedIds.value(QString::fromLatin1(viewsTag));
+                const QList<SavedView> held =
+                    current ? parseViews(previous->content).value_or(QList<SavedView>()) : QList<SavedView>();
+                return store.replaceSavedViews(mergeViews(local, *remote, held))
                     && store.setSyncApplied(QString::fromLatin1(viewsTag), views->createdAt, views->id);
             });
             if (!saved)
@@ -1106,11 +1146,23 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
     return content;
 }
 
+QString unsettledHold(const Outcome &outcome, int kind) {
+    if (outcome.settled)
+        return {};
+    if (kind == readStatusKind)
+        return tr("not every relay answered, so the read status is not replaced");
+    if (kind == viewsKind)
+        return tr("not every relay answered, so the saved views are not replaced");
+    return {};
+}
+
 QString readStatusContent(const QStringList &guids, qint64 now) {
     return compact({{"itemGuids", QJsonArray::fromStringList(guids)}, {"lastUpdated", now}});
 }
 
-QString viewsContent(const QList<SavedView> &views, qint64 now) {
+namespace {
+// The views as kind 30406 carries them, without their mute words.
+QJsonArray publishedViews(const QList<SavedView> &views) {
     QJsonArray array;
     for (const SavedView &view : views) {
         if (array.size() >= maxRemoteViews)
@@ -1127,11 +1179,18 @@ QString viewsContent(const QList<SavedView> &views, qint64 now) {
         }
         array << published;
     }
-    return compact({{"views", array}, {"lastUpdated", now}});
+    return array;
+}
 }
 
-Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, const QHash<int, qint64> &seen,
-              qint64 now) {
+QString viewsContent(const QList<SavedView> &views, qint64 now) {
+    return compact({{"views", publishedViews(views)}, {"lastUpdated", now}});
+}
+
+namespace {
+// drafts(), meant for inside one transaction.
+Drafts draftsInTransaction(Store &store, const QString &pubkey, const QList<int> &kinds,
+                           const QHash<int, qint64> &seen, qint64 now) {
     Drafts out;
     const auto failed = [&] {
         out.events.clear();
@@ -1145,6 +1204,10 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
         out.error = tr("the npub changed before publishing");
         return out;
     }
+#ifdef READSTR_TESTS
+    if (draftsHook)
+        draftsHook();
+#endif
     for (int kind : kinds) {
         const QString tag = QString::fromLatin1(dTag(kind));
         const qint64 createdAt = nextCreatedAt(now, qMax(account.applied.value(tag), seen.value(kind)));
@@ -1224,14 +1287,26 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
             const QList<SavedView> views = store.savedViews();
             if (!store.lastError().isEmpty())
                 return failed();
-            // Views come only from the relays here, and deletions do not
-            // sync, so publishing over a list they hold would only bring
-            // back views deleted in the web app.
-            if (views.isEmpty() || remote || account.applied.contains(tag)) {
+            // Deletions do not sync, so publishing views not edited here
+            // over a list the relays hold would only bring back views
+            // deleted in the web app. Edited, they go out as they are, even
+            // none: the pull before this merged what the relays hold.
+            const bool edited = account.publishPending & viewsEditedBit;
+            if (!edited && (views.isEmpty() || remote || account.applied.contains(tag))) {
                 out.unchanged << kind;
                 continue;
             }
+            // A list applied but not cached, as in a library from before
+            // publishing, or a newer one applied and not cached yet, is what
+            // the next pull tells views deleted in the web app by
+            // (mergeViews()), so these wait for that pull to cache it.
+            if ((!remote && account.applied.contains(tag)) || cacheBehind) {
+                out.waiting << kind;
+                out.notes << tr("the last saved views applied here have not been pulled again yet, so they are not replaced");
+                continue;
+            }
             content = viewsContent(views, now);
+            out.viewsEdits = account.viewsEdits;
         } else {
             continue;
         }
@@ -1239,9 +1314,27 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
     }
     return out;
 }
+}
+
+Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, const QHash<int, qint64> &seen,
+              qint64 now) {
+    // Read in one transaction, so the account, its watermarks, the cache,
+    // and the library are one snapshot: a login as another npub that drops
+    // and replaces the views in between would otherwise have that npub's
+    // views go out under this one's key, dated by this one's watermark.
+    Drafts out;
+    if (!store.transaction([&] {
+            out = draftsInTransaction(store, pubkey, kinds, seen, now);
+            return true;
+        })) {
+        out = Drafts();
+        out.error = store.lastError();
+    }
+    return out;
+}
 
 QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &event, qint64 builtAt,
-                        bool *superseded, bool *mirrored) {
+                        bool *superseded, bool *mirrored, qint64 viewsEdits) {
     const QString tag = QString::fromLatin1(dTag(event.kind));
     bool changed = false, lost = false, wrote = false;
     const bool saved = store.transaction([&] {
@@ -1263,6 +1356,14 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
             return true;
         if (event.kind == readStatusKind
             && !store.rememberReadGuids(parseReadStatus(event.content).value_or(QStringList())))
+            return false;
+        // The views are published as edited only when no edit came after
+        // the draft was built: one edited again while it was out still
+        // waits to go out. Counted rather than compared with the library,
+        // which a view that does not come back from JSON as it went in
+        // would never match, so every start would publish the views again.
+        if (event.kind == viewsKind && (account.publishPending & viewsEditedBit) && viewsEdits >= 0
+            && viewsEdits == account.viewsEdits && !store.markPublishPending(pubkey, viewsEditedBit, false))
             return false;
         // Stamped with when the content was built, not now: a feed
         // subscribed while this run signed and published is not in it.

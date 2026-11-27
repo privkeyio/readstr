@@ -29,6 +29,11 @@ void usage(QTextStream &stream) {
               "       readstr articles [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]\n"
               "       readstr search QUERY [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]\n"
               "       readstr views [--json]\n"
+              "       readstr views add NAME [--icon ICON] [--source all|starred|tags] [--tags LIST]\n"
+              "                         [--read all|unread|read] [--sort newest|oldest] [--include LIST] [--mute LIST]\n"
+              "       readstr views edit ID [--name NAME] [the options of add]\n"
+              "       readstr views delete ID\n"
+              "       readstr views move ID up|down\n"
               "       readstr subscribe URL|NPUB [--json]\n"
               "       readstr unsubscribe ID\n"
               "       readstr refresh [--feed ID] [--json]\n"
@@ -36,7 +41,7 @@ void usage(QTextStream &stream) {
               "       readstr import FILE.opml [--json]\n"
               "       readstr export [FILE]\n"
               "       readstr sync [--json]\n"
-              "       readstr sync login NPUB\n"
+              "       readstr sync login NPUB [--drop-views]\n"
               "       readstr sync logout\n"
               "       readstr filters [--json]\n"
               "       readstr settings [--json]\n"
@@ -535,9 +540,12 @@ int exportOpml(const QString &command, const QStringList &arguments, QTextStream
 
 int sync(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
     Options options;
-    if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
+    if (!parseOptions(command, arguments, {"--json", "--drop-views"}, {}, options, err))
         return 1;
     const QString action = options.positional.value(0);
+    const bool dropViews = options.flags.contains("--drop-views");
+    if (dropViews && action != QLatin1String("login"))
+        return fail(command, "--drop-views goes with login", err);
     if (action == QLatin1String("login")) {
         if (options.json || options.positional.size() != 2)
             return fail(command, "login needs one npub or nprofile", err);
@@ -547,7 +555,16 @@ int sync(const QString &command, const QStringList &arguments, QTextStream &out,
         Store store;
         if (!openStore(command, store, err))
             return 1;
-        if (!store.setSyncAccount(account->npub, account->pubkey, account->relays))
+        // As the window asks first: what goes cannot be brought back.
+        const std::optional<bool> others = store.savedViewsOfAnother(account->pubkey);
+        if (!others)
+            return fail(command, store.lastError(), err);
+        if (*others && !dropViews)
+            return fail(command,
+                        "the saved views here belong to another npub, and their mute words and edits not "
+                        "published yet would be lost; add --drop-views to remove them and sync with this one",
+                        err);
+        if (!store.setSyncAccount(account->npub, account->pubkey, account->relays, dropViews))
             return fail(command, store.lastError(), err);
         out << "Syncing with " << account->npub << ". Run 'readstr sync' to pull now.\n";
         return 0;
@@ -693,14 +710,104 @@ int filters(const QString &command, const QStringList &arguments, QTextStream &o
     return 0;
 }
 
+// A saved view changed here is marked to publish in the same transaction
+// (SavedViews::save()), so the window publishes it when it next starts, as
+// a subscription changed here is.
+int changeViews(const QString &command, const std::function<QString(QList<SavedView> &)> &change,
+                QTextStream &err) {
+    Store store;
+    if (!openStore(command, store, err))
+        return 1;
+    QString problem;
+    const int saved = SavedViews::save(store, change, &problem);
+    if (saved < 0)
+        return fail(command, store.lastError(), err);
+    return saved == 0 ? fail(command, problem, err) : 0;
+}
+
+// `views add NAME` and `views edit ID`, whose options change only what
+// they name. Lists are comma-separated, as in the window's dialog. The view
+// is worked out inside the write, from the views as they are then, so an
+// edit never puts back what a pull or the window changed since.
+int saveView(const QString &command, const QString &action, const Options &options, QTextStream &out,
+             QTextStream &err) {
+    const bool edit = action == QLatin1String("edit");
+    if (options.positional.size() != 2)
+        return fail(command, edit ? "edit needs a view id" : "add needs a name", err);
+    const QString target = options.positional.at(1);
+    const QHash<QString, QString> &values = options.values;
+    QVariantMap fields;
+    if (!edit)
+        fields.insert("name", target);
+    using Field = std::pair<const char *, const char *>;
+    for (const auto &[option, field] : std::initializer_list<Field>{{"--name", "name"},     {"--icon", "icon"},
+                                                                    {"--read", "readState"}, {"--sort", "sort"},
+                                                                    {"--include", "include"}, {"--mute", "exclude"}})
+        if (values.contains(option))
+            fields.insert(field, values.value(option));
+    if (values.contains("--source")) {
+        const QString source = values.value("--source");
+        fields.insert("source", source == QLatin1String("starred") ? QStringLiteral("favorites") : source);
+    }
+    if (values.contains("--tags"))
+        fields.insert("tags", SavedViews::words(values.value("--tags")));
+    std::optional<SavedView> saved;
+    const int code = changeViews(command, [&](QList<SavedView> &list) -> QString {
+        const qsizetype at = edit ? SavedViews::indexOf(list, target) : -1;
+        if (edit && at < 0)
+            return QStringLiteral("no saved view has the id '%1'").arg(target);
+        const std::optional<SavedView> base = edit ? std::optional(list.at(at)) : std::nullopt;
+        const SavedViews::Draft draft = SavedViews::edited(base ? &*base : nullptr, fields);
+        // Tags would be dropped unsaid on a view that lists something else.
+        const QString kind = draft.source.isEmpty() && base ? SavedViews::draftOf(*base).source : draft.source;
+        if (fields.contains("tags") && kind != QLatin1String("tags"))
+            return QStringLiteral("--tags needs a view of tags; add --source tags");
+        QString error;
+        saved = SavedViews::build(draft, base ? &*base : nullptr, &error);
+        if (!saved)
+            return error;
+        return base ? SavedViews::replace(list, *saved) : SavedViews::add(list, *saved);
+    }, err);
+    if (code == 0 && saved)
+        out << (edit ? "Saved view " : "Created view ") << printable(saved->id) << "  "
+            << printable(SavedViews::name(*saved)) << "\n";
+    return code;
+}
+
 // The saved views, in the web app's order, each with the rules it holds
 // that cannot be applied here; `articles --view ID` lists one's articles.
+// With `add`, `edit`, `delete`, or `move`, changes them as the window does.
 int views(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
+    const QString action = arguments.value(0);
+    if (action == QLatin1String("add") || action == QLatin1String("edit")) {
+        Options options;
+        QStringList valued{"--icon", "--source", "--tags", "--read", "--sort", "--include", "--mute"};
+        if (action == QLatin1String("edit"))
+            valued << "--name";
+        if (!parseOptions(command, arguments, {}, valued, options, err))
+            return 1;
+        return saveView(command, action, options, out, err);
+    }
+    if (action == QLatin1String("delete")) {
+        if (arguments.size() != 2)
+            return fail(command, "delete needs a view id", err);
+        const QString id = arguments.at(1);
+        return changeViews(command, [&id](QList<SavedView> &list) { return SavedViews::remove(list, id); }, err);
+    }
+    if (action == QLatin1String("move")) {
+        const QString id = arguments.value(1), direction = arguments.value(2);
+        if (arguments.size() != 3 || (direction != QLatin1String("up") && direction != QLatin1String("down")))
+            return fail(command, "move needs a view id and up or down", err);
+        const int step = direction == QLatin1String("up") ? -1 : 1;
+        return changeViews(command, [&id, step](QList<SavedView> &list) {
+            return SavedViews::move(list, id, SavedViews::indexOf(list, id) + step);
+        }, err);
+    }
     Options options;
     if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
         return 1;
     if (!options.positional.isEmpty())
-        return fail(command, "takes no arguments", err);
+        return fail(command, "takes no arguments, or add, edit, delete, or move", err);
     Store store;
     if (!openStore(command, store, err))
         return 1;

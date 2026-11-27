@@ -226,6 +226,21 @@ const QList<QStringList> migrations = {
         "ALTER TABLE categories ADD COLUMN color TEXT",
         "ALTER TABLE categories ADD COLUMN icon TEXT",
     },
+    {
+        // The pubkey of the account the saved views were pulled or edited
+        // under, kept when syncing stops, so a later account never takes
+        // them over unasked (setSyncAccount()). A library with an account
+        // set already has its views from that one. With it, how many times
+        // the saved views were edited here (SyncAccount::viewsEdits), so a
+        // publish built before the last edit never marks that edit as
+        // published. It is kept here rather than with the account, whose
+        // row stopping syncing deletes, so the count never starts again at
+        // 0 and a publish built in an earlier session never matches an edit
+        // of a later one.
+        "CREATE TABLE saved_views_owner (id INTEGER PRIMARY KEY CHECK (id = 1), pubkey TEXT NOT NULL,"
+        " views_edits INTEGER NOT NULL DEFAULT 0)",
+        "INSERT INTO saved_views_owner (id, pubkey) SELECT 1, pubkey FROM sync_account WHERE id = 1",
+    },
 };
 
 // The condition that leaves out an item a filter rule hides.
@@ -2041,8 +2056,8 @@ SyncAccount Store::syncAccount() {
     SyncAccount account;
     QSqlQuery query(m_db);
     if (!query.exec(QStringLiteral(
-            "SELECT npub, pubkey, relay_hints, synced_at, publish_reads, publish_confirmed, publish_pending"
-            " FROM sync_account WHERE id = 1"))) {
+            "SELECT npub, pubkey, relay_hints, synced_at, publish_reads, publish_confirmed, publish_pending,"
+            " (SELECT views_edits FROM saved_views_owner WHERE id = 1) FROM sync_account WHERE id = 1"))) {
         fail(query.lastError().text());
         return account;
     }
@@ -2055,6 +2070,7 @@ SyncAccount Store::syncAccount() {
         account.publishReads = query.value(4).toBool();
         account.publishConfirmed = query.value(5).toBool();
         account.publishPending = query.value(6).toInt();
+        account.viewsEdits = query.value(7).toLongLong();
     }
     query.finish();
     if (account.pubkey.isEmpty())
@@ -2070,9 +2086,41 @@ SyncAccount Store::syncAccount() {
     return account;
 }
 
-bool Store::setSyncAccount(const QString &npub, const QString &pubkey, const QStringList &relays) {
+std::optional<bool> Store::savedViewsOfAnother(const QString &pubkey) {
+    m_error.clear();
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("SELECT 1 FROM saved_views_owner o WHERE o.pubkey <> '' AND o.pubkey <> ?"
+                                 " AND EXISTS (SELECT 1 FROM saved_views)"));
+    query.addBindValue(pubkey);
+    if (!query.exec()) {
+        fail(query.lastError().text());
+        return std::nullopt;
+    }
+    return query.next();
+}
+
+bool Store::setSyncAccount(const QString &npub, const QString &pubkey, const QStringList &relays,
+                           bool dropOtherViews) {
     return transaction([&] {
+        const std::optional<bool> others = savedViewsOfAnother(pubkey);
+        if (!others)
+            return false;
+        // Another account's views, unpublished edits and mute words among
+        // them, would go out under this one with its first edit, since a
+        // pull keeps the views its list lacks (Sync::mergeViews()); and
+        // nothing brings back the mute words or the edits, so they go only
+        // when the caller says so, once the user has agreed.
+        if (*others && !dropOtherViews)
+            return fail(QStringLiteral("the saved views here belong to another npub"));
         QSqlQuery query(m_db);
+        if (*others && !query.exec(QStringLiteral("DELETE FROM saved_views")))
+            return fail(query.lastError().text());
+        // Views made with no owner, before any account, are this one's now.
+        query.prepare(QStringLiteral("INSERT INTO saved_views_owner (id, pubkey) VALUES (1, ?)"
+                                     " ON CONFLICT(id) DO UPDATE SET pubkey = excluded.pubkey"));
+        query.addBindValue(pubkey);
+        if (!query.exec())
+            return fail(query.lastError().text());
         query.prepare(QStringLiteral("SELECT 1 FROM sync_account WHERE pubkey = ?"));
         query.addBindValue(pubkey);
         if (!query.exec())
@@ -2288,6 +2336,21 @@ bool Store::replaceSavedViews(const QList<SavedView> &views) {
             return fail(query.lastError().text());
     }
     return true;
+}
+
+bool Store::markViewsEdited(const QString &pubkey) {
+    if (!updateSyncAccount(pubkey, QStringLiteral("publish_pending = publish_pending | ?"),
+                           {publishBit(Sync::viewsKind) | viewsEditedBit}))
+        return false;
+    // setSyncAccount() gave the views to the account it set, so the row is
+    // there and names it; the count is the library's, kept across accounts.
+    QSqlQuery query(m_db);
+    query.prepare(
+        QStringLiteral("UPDATE saved_views_owner SET views_edits = views_edits + 1 WHERE id = 1 AND pubkey = ?"));
+    query.addBindValue(pubkey);
+    if (!query.exec())
+        return fail(query.lastError().text());
+    return query.numRowsAffected() == 1 || fail(QStringLiteral("the saved views belong to another npub"));
 }
 
 std::optional<QList<KeywordFilter::Rule>> Store::filterRules(QStringList *dropped) {

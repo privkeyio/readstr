@@ -837,12 +837,12 @@ private slots:
         {
             Store store;
             QVERIFY2(store.open(path), qPrintable(store.lastError()));
-            QCOMPARE(store.schemaVersion(), 10);
+            QCOMPARE(store.schemaVersion(), 11);
             QVERIFY(store.addFeed("https://a.example.com/feed", "A"));
         }
         Store again;
         QVERIFY2(again.open(path), qPrintable(again.lastError()));
-        QCOMPARE(again.schemaVersion(), 10);
+        QCOMPARE(again.schemaVersion(), 11);
         QCOMPARE(again.feeds().size(), 1);
 
         QSqlDatabase raw = QSqlDatabase::addDatabase("QSQLITE", "raw");
@@ -926,7 +926,7 @@ private slots:
                  {"DROP TRIGGER items_fts_delete", "DROP TABLE items_fts", "DROP TABLE filter_rules",
                   "DROP TABLE filter_state", "ALTER TABLE items DROP COLUMN filter_flags",
                   "ALTER TABLE feeds DROP COLUMN tags", "ALTER TABLE categories DROP COLUMN color",
-                  "ALTER TABLE categories DROP COLUMN icon",
+                  "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner",
                   "INSERT INTO items (feed_id, guid, title, content, created_at, address)"
                   " VALUES (1, 'nostr', 'Long form', 'See [the page](https://hidden.example.com/needle) on *bees*', 2,"
                   " '30023:abc:d')",
@@ -939,7 +939,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 10);
+        QCOMPARE(store.schemaVersion(), 11);
         QCOMPARE(searchTitles(store, "engine"), QStringList{"Kept title"});
         QCOMPARE(searchTitles(store, "lovelace"), QStringList{"Kept title"});
         QCOMPARE(searchTitles(store, "summary"), QStringList{"Kept title"});
@@ -1667,7 +1667,7 @@ private slots:
             for (int i = 0; i < 8; ++i)
                 threads << QThread::create([&failures, path] {
                     Store store;
-                    if (!store.open(path) || store.schemaVersion() != 10) {
+                    if (!store.open(path) || store.schemaVersion() != 11) {
                         qWarning("%s", qPrintable(store.lastError()));
                         ++failures;
                     }
@@ -1722,7 +1722,7 @@ private slots:
 
         Store writer;
         QVERIFY2(writer.open(path), qPrintable(writer.lastError()));
-        QCOMPARE(writer.schemaVersion(), 10);
+        QCOMPARE(writer.schemaVersion(), 11);
         QCOMPARE(writer.articles({0, false, false, 0}).size(), workers * perRound);
 
         // A reader in the middle of a transaction neither blocks a writer
@@ -4225,8 +4225,8 @@ private slots:
         }
         const QString source = QFileInfo(QFINDTESTDATA("../src/backend.cpp")).absolutePath();
         for (const char *name :
-             {"backend.cpp", "keystore.cpp", "sanitizer.cpp", "portalfilepicker.cpp", "remotesigner.cpp", "signer.cpp",
-              "sync.cpp"}) {
+             {"backend.cpp", "keystore.cpp", "sanitizer.cpp", "portalfilepicker.cpp", "remotesigner.cpp", "savedviews.cpp",
+              "signer.cpp", "sync.cpp"}) {
             QFile file(source + "/" + name);
             QVERIFY(file.open(QIODevice::ReadOnly));
             for (const auto &match : cppString.globalMatch(QString::fromUtf8(file.readAll())))
@@ -5837,11 +5837,11 @@ private slots:
         for (const char *statement :
              {"DROP TABLE filter_rules", "DROP TABLE filter_state", "ALTER TABLE items DROP COLUMN filter_flags",
               "ALTER TABLE feeds DROP COLUMN tags", "ALTER TABLE categories DROP COLUMN color",
-              "ALTER TABLE categories DROP COLUMN icon", "PRAGMA user_version = 7"})
+              "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner", "PRAGMA user_version = 7"})
             QCOMPARE(rawExec(path, statement), QString());
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 10);
+        QCOMPARE(store.schemaVersion(), 11);
         QVERIFY(store.filterRules() && store.filterRules()->isEmpty());
         // No rules hide anything, so there is no pass to make.
         bool ran = true;
@@ -5854,12 +5854,12 @@ private slots:
         QVERIFY(store.setFilterRules({filterRule("x", KeywordFilter::Target::Title)}));
         for (const char *statement :
              {"ALTER TABLE filter_state DROP COLUMN saves", "ALTER TABLE feeds DROP COLUMN tags",
-              "ALTER TABLE categories DROP COLUMN color", "ALTER TABLE categories DROP COLUMN icon",
+              "ALTER TABLE categories DROP COLUMN color", "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner",
               "PRAGMA user_version = 8"})
             QCOMPARE(rawExec(path, statement), QString());
         Store again;
         QVERIFY2(again.open(path), qPrintable(again.lastError()));
-        QCOMPARE(again.schemaVersion(), 10);
+        QCOMPARE(again.schemaVersion(), 11);
         QCOMPARE(rawCount(path, "SELECT saves FROM filter_state WHERE applied IS NOT NULL"), 0);
         QVERIFY(again.applyFilterRules({}, &ran));
         QVERIFY(!ran);
@@ -7380,6 +7380,66 @@ private slots:
         QCOMPARE(error->property("text").toString(), QString("That is not a bunker:// link with a relay Readstr can use"));
     }
 
+    // Another npub in the dialog asks first when the saved views here came
+    // from the last one: kept, nothing changes; removed, the npub is set.
+    void syncDialogAsksBeforeDroppingAnotherAccountsViews()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        seedViews({savedView("web", {{"order", 0}}, {"mute"})});
+        FakeKeyStore keys;
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setKeyStore(&keys);
+        QQmlEngine engine;
+        engine.addImageProvider("qr", new QrImageProvider);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty(
+            "theme", QVariantMap{{"radius", 0}, {"background", "#000000"}, {"foreground", "#ffffff"}});
+        engine.rootContext()->setContextProperty("translator", QVariantMap{{"language", "en"}});
+        QQmlComponent component(&engine);
+        component.setData("import QtQuick\nimport QtQuick.Controls\n"
+                          "ApplicationWindow { width: 800; height: 760; property alias dialog: dialog\n"
+                          " SyncDialog { id: dialog } }\n",
+                          QUrl("qrc:/probe.qml"));
+        std::unique_ptr<QObject> window(component.create());
+        QVERIFY2(window, qPrintable(component.errorString()));
+        QObject *dialog = window->property("dialog").value<QObject *>();
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        auto *confirmation = window->findChild<QQuickItem *>("dropViewsConfirmation");
+        QObject *keep = window->findChild<QObject *>("keepViewsButton");
+        QObject *drop = window->findChild<QObject *>("dropViewsButton");
+        QVERIFY(confirmation && keep && drop);
+        QVERIFY(!confirmation->isVisible());
+        QObject *field = nullptr;
+        for (QQuickItem *item : window->findChildren<QQuickItem *>())
+            if (item->property("placeholderText").toString() == "npub or nprofile")
+                field = item;
+        QVERIFY(field);
+        const QString other = Nip19::npub(QString(64, 'd'));
+        field->setProperty("text", other);
+
+        QVERIFY(QMetaObject::invokeMethod(dialog, "submit"));
+        QTRY_VERIFY(confirmation->isVisible());
+        QVERIFY(dialog->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(keep, "clicked"));
+        QTRY_VERIFY(!confirmation->isVisible());
+        QTest::qWait(100);
+        QCOMPARE(backend.syncNpub(), syncNpub());
+        QCOMPARE(backend.savedViews().size(), 1);
+
+        QVERIFY(QMetaObject::invokeMethod(dialog, "submit"));
+        QTRY_VERIFY(confirmation->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(drop, "clicked"));
+        QTRY_COMPARE(backend.syncNpub(), other);
+        QTRY_VERIFY(backend.savedViews().isEmpty());
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+    }
+
     // Sanitizer
 
     void sanitizerKeepsTheAllowedSubset()
@@ -8490,6 +8550,1552 @@ private slots:
 
     // A category's color is drawn only as a plain #rrggbb, and its icon
     // shown only as short plain text, whatever a relay sends.
+    // A view made here, of each kind of source, read state, and order, with
+    // keywords and mute words, lists what the web app's would.
+    void savedViewsMadeHereListTheirArticles()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.setFeedTags(first, {"news"}));
+        QVERIFY(store.setFeedTags(second, {"news", "tech"}));
+        QVERIFY(store.setStarred(articleIdOf(store, "older"), true));
+        QVERIFY(store.setStarred(articleIdOf(store, "second-b"), true));
+        const auto titles = [&store](const QString &source, const QStringList &tags, const QString &readState,
+                                     const QString &sort, const QString &include = {}, const QString &exclude = {}) {
+            SavedViews::Draft draft;
+            draft.name = "View";
+            draft.source = source;
+            draft.tags = tags;
+            draft.readState = readState;
+            draft.sort = sort;
+            draft.include = SavedViews::words(include);
+            draft.exclude = SavedViews::words(exclude);
+            QString error;
+            const std::optional<SavedView> view = SavedViews::build(draft, nullptr, &error);
+            if (!view)
+                return QStringList{"error: " + error};
+            ArticleFilter filter = SavedViews::evaluate(*view).filter;
+            filter.limit = 0;
+            return titlesOf(store.articles(filter));
+        };
+        QCOMPARE(titles("all", {}, "all", "newest"), (QStringList{"Newest", "Second A", "Older", "Second B", "Oldest"}));
+        QCOMPARE(titles("all", {}, "unread", "oldest"), (QStringList{"Oldest", "Older", "Second A", "Newest"}));
+        QCOMPARE(titles("all", {}, "read", "newest"), QStringList{"Second B"});
+        QCOMPARE(titles("favorites", {}, "all", "newest"), (QStringList{"Older", "Second B"}));
+        QCOMPARE(titles("favorites", {}, "unread", "oldest"), QStringList{"Older"});
+        QCOMPARE(titles("favorites", {}, "read", "newest"), QStringList{"Second B"});
+        QCOMPARE(titles("tags", {"news"}, "all", "oldest"),
+                 (QStringList{"Oldest", "Second B", "Older", "Second A", "Newest"}));
+        QCOMPARE(titles("tags", {"news", "tech"}, "unread", "newest"), QStringList{"Second A"});
+        QCOMPARE(titles("tags", {"tech"}, "read", "oldest"), QStringList{"Second B"});
+        QCOMPARE(titles("tags", {"nobody"}, "all", "newest"), QStringList());
+        // Any of the keywords, in the title or the text, and none of the
+        // mute words.
+        QCOMPARE(titles("all", {}, "all", "newest", "old, full"), (QStringList{"Newest", "Older", "Oldest"}));
+        QCOMPARE(titles("all", {}, "all", "oldest", "second", "second b"), QStringList{"Second A"});
+        QCOMPARE(titles("tags", {"news"}, "unread", "oldest", "old", "oldest"), QStringList{"Older"});
+        QCOMPARE(titles("favorites", {}, "all", "newest", {}, "older"), QStringList{"Second B"});
+    }
+
+    // A view made or edited here fits the web app's sanitizeView and caps,
+    // and one of a feed or a category from the web app keeps its source and
+    // whatever else it holds.
+    void savedViewsKeepTheWebAppsCaps()
+    {
+        SavedViews::Draft draft;
+        draft.name = "  Morning  ";
+        draft.source = "all";
+        QString error;
+        std::optional<SavedView> view = SavedViews::build(draft, nullptr, &error);
+        QVERIFY2(view, qPrintable(error));
+        QVERIFY2(QRegularExpression("^\\d{13}-[0-9a-z]{11}$").match(view->id).hasMatch(), qPrintable(view->id));
+        QVERIFY(SavedViews::newId() != SavedViews::newId());
+        QCOMPARE(view->view, (QJsonObject{{"id", view->id},
+                                          {"name", "Morning"},
+                                          {"order", 0},
+                                          {"source", QJsonObject{{"kind", "all"}}},
+                                          {"readState", "all"},
+                                          {"sort", "newest"}}));
+        QVERIFY(view->exclude.isEmpty());
+
+        const auto refused = [](const SavedViews::Draft &draft, const SavedView *base = nullptr) {
+            QString why;
+            return SavedViews::build(draft, base, &why) ? QString() : why;
+        };
+        SavedViews::Draft bad = draft;
+        bad.name = "   ";
+        QCOMPARE(refused(bad), QString("A view needs a name"));
+        bad.name = QString(61, 'n');
+        QCOMPARE(refused(bad), QString("A view's name can be at most 60 characters"));
+        bad.name = QString(60, 'n');
+        QCOMPARE(refused(bad), QString());
+        bad = draft;
+        bad.icon = QString(9, 'i');
+        QCOMPARE(refused(bad), QString("A view's icon can be at most 8 characters"));
+        bad.icon = QString(8, QChar(0x2600));
+        QCOMPARE(refused(bad), QString());
+        bad = draft;
+        bad.readState = "starred";
+        QCOMPARE(refused(bad), QString("A view lists all, unread, or read articles"));
+        bad = draft;
+        bad.sort = "random";
+        QCOMPARE(refused(bad), QString("A view sorts newest or oldest first"));
+        bad = draft;
+        bad.source = "feed";
+        QCOMPARE(refused(bad), QString("A view lists all articles, starred ones, or those of tags"));
+        bad.source = "";
+        QCOMPARE(refused(bad), QString("A view needs a source"));
+        bad.source = "tags";
+        QCOMPARE(refused(bad), QString("Pick at least one tag"));
+        bad.tags = {QString(201, 't')};
+        QCOMPARE(refused(bad), QString("A tag can be at most 200 characters"));
+        bad.tags = {QString(200, 't')};
+        QCOMPARE(refused(bad), QString());
+        bad.tags = {QString("news") + QChar(1)};
+        QVERIFY(refused(bad).startsWith("No feed can carry the tag"));
+        bad.tags.clear();
+        for (int i = 0; i <= SavedViews::maxWords; ++i)
+            bad.tags << QString::number(i);
+        QCOMPARE(refused(bad), QString("A view can have at most 50 tags"));
+        bad.tags.removeLast();
+        QCOMPARE(refused(bad), QString());
+        bad = draft;
+        for (int i = 0; i <= SavedViews::maxWords; ++i)
+            bad.include << QString::number(i);
+        QCOMPARE(refused(bad), QString("A view can have at most 50 keywords"));
+        bad.include = {QString(201, 'w')};
+        QCOMPARE(refused(bad), QString("A keyword can be at most 200 characters"));
+        bad = draft;
+        for (int i = 0; i <= SavedViews::maxWords; ++i)
+            bad.exclude << QString::number(i);
+        QCOMPARE(refused(bad), QString("A view can have at most 50 mute words"));
+        bad.exclude = {QString(201, 'w')};
+        QCOMPARE(refused(bad), QString("A mute word can be at most 200 characters"));
+
+        // Comma-separated words, trimmed and each once; the words of a view
+        // left as they were stay as they were, a comma in one too.
+        QCOMPARE(SavedViews::words(" a, b,,a ,"), (QStringList{"a", "b"}));
+        QCOMPARE(SavedViews::words("x,y, z", {"x,y", "z"}), (QStringList{"x,y", "z"}));
+        QCOMPARE(SavedViews::words("x, y, z", {"x,y", "z"}), (QStringList{"x", "y", "z"}));
+
+        // The keywords go into the view, the mute words never.
+        draft.include = {"rust"};
+        draft.exclude = {"spoiler"};
+        view = SavedViews::build(draft, nullptr, &error);
+        QVERIFY(view);
+        QCOMPARE(view->view.value("keywords").toObject(), (QJsonObject{{"include", QJsonArray{"rust"}}}));
+        QCOMPARE(view->exclude, QStringList{"spoiler"});
+        QVERIFY(!QJsonDocument(view->view).toJson().contains("spoiler"));
+
+        // A web view of a feed or a category, edited, keeps its source and
+        // the fields the web app gave it byte for byte.
+        for (const QJsonObject &source : {QJsonObject{{"kind", "feed"}, {"feedId", "clx1"}},
+                                          QJsonObject{{"kind", "category"}, {"categoryId", "cat9"}}}) {
+            const QJsonObject web{{"id", "web"},
+                                  {"name", "Web"},
+                                  {"order", 3},
+                                  {"source", source},
+                                  {"readState", "all"},
+                                  {"sort", "newest"},
+                                  {"organizationMode", "categories"},
+                                  {"keywords", QJsonObject{{"include", QJsonArray{"a,b"}}, {"later", 1}}},
+                                  {"future", QJsonObject{{"x", QJsonArray{1, "two"}}}}};
+            const SavedView base{"web", web, {"mine"}};
+            QVERIFY(!SavedViews::sourceEditable(base));
+            SavedViews::Draft edit = SavedViews::draftOf(base);
+            QCOMPARE(edit.source, source.value("kind").toString());
+            QCOMPARE(edit.include, QStringList{"a,b"});
+            QCOMPARE(edit.exclude, QStringList{"mine"});
+            edit.source.clear();
+            edit.name = "Renamed";
+            edit.icon = "★";
+            edit.readState = "unread";
+            edit.sort = "oldest";
+            edit.exclude = {"mine", "more"};
+            view = SavedViews::build(edit, &base, &error);
+            QVERIFY2(view, qPrintable(error));
+            QCOMPARE(view->id, QString("web"));
+            QJsonObject expected = web;
+            expected.insert("name", "Renamed");
+            expected.insert("icon", "★");
+            expected.insert("readState", "unread");
+            expected.insert("sort", "oldest");
+            QCOMPARE(QJsonDocument(view->view).toJson(QJsonDocument::Compact),
+                     QJsonDocument(expected).toJson(QJsonDocument::Compact));
+            QCOMPARE(QJsonDocument(view->view.value("source").toObject()).toJson(QJsonDocument::Compact),
+                     QJsonDocument(source).toJson(QJsonDocument::Compact));
+            QCOMPARE(view->exclude, (QStringList{"mine", "more"}));
+            // Only the web app can set its source.
+            edit.source = "all";
+            QCOMPARE(refused(edit, &base), QString("This view's source is set in the web app"));
+        }
+
+        // The list holds at most maxViews, each id once.
+        QList<SavedView> list;
+        const auto named = [](const QString &id) { return SavedView{id, QJsonObject{{"id", id}, {"name", id}}, {}}; };
+        for (int i = 0; i < Sync::maxViews; ++i)
+            QCOMPARE(SavedViews::add(list, named(QString::number(i))), QString());
+        QCOMPARE(SavedViews::add(list, named("extra")), QString("There can be at most 50 saved views"));
+        QCOMPARE(SavedViews::remove(list, "49"), QString());
+        QCOMPARE(SavedViews::add(list, named("3")), QString("A view with this id is there already"));
+        QCOMPARE(SavedViews::add(list, named("new"), 1), QString());
+        QCOMPARE(list.at(1).id, QString("new"));
+        QCOMPARE(SavedViews::remove(list, "nope"), QString("The view is gone"));
+        QCOMPARE(SavedViews::replace(list, named("nope")), QString("The view is gone"));
+        QCOMPARE(SavedViews::move(list, "nope", 0), QString("The view is gone"));
+        QCOMPARE(SavedViews::move(list, "0", 100), QString());
+        QCOMPARE(list.last().id, QString("0"));
+        QCOMPARE(SavedViews::move(list, "0", -5), QString());
+        QCOMPARE(list.first().id, QString("0"));
+    }
+
+    // A change to the views is saved with the mark to publish them in one
+    // transaction, goes out over a list the relays hold, without the mute
+    // words, and round-trips through what a pull reads.
+    void savedViewsEditedHerePublishWithoutMuteWords()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY(store.open(path));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const qint64 now = 1800000000;
+        const QString held = Sync::viewsContent({savedView("web", {{"name", "Web"}, {"order", 0}})}, now - 100);
+        QVERIFY(store.transaction([&] { return store.replaceSavedViews(*Sync::parseViews(held)); }));
+        QVERIFY(store.setSyncApplied(Sync::viewsTag, now - 100, QString(64, 'd')));
+        QVERIFY(store.setSyncRemote(Sync::viewsTag, QString(64, 'd'), held));
+        // Not edited here, they are not published over the list held, even
+        // when asked.
+        QVERIFY(store.markPublishPending(syncPubkey(), publishBit(Sync::viewsKind), true));
+        Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now);
+        QVERIFY(drafts.events.isEmpty());
+        QCOMPARE(drafts.unchanged, QList<int>{Sync::viewsKind});
+        QVERIFY(store.markPublishPending(syncPubkey(), publishBit(Sync::viewsKind), false));
+
+        // A change refused, or whose mark cannot be written, changes neither.
+        QString problem;
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            views.clear();
+            return QStringLiteral("refused");
+        }, &problem), 0);
+        QCOMPARE(problem, QString("refused"));
+        QCOMPARE(rawExec(path, "CREATE TRIGGER no_mark BEFORE UPDATE ON sync_account"
+                               " BEGIN SELECT RAISE(ABORT, 'no mark'); END"),
+                 QString());
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            views.clear();
+            return QString();
+        }, &problem), -1);
+        QVERIFY2(store.lastError().contains("no mark"), qPrintable(store.lastError()));
+        QCOMPARE(store.savedViews().size(), 1);
+        QCOMPARE(store.syncAccount().publishPending, 0);
+        QCOMPARE(rawExec(path, "DROP TRIGGER no_mark"), QString());
+
+        SavedViews::Draft draft;
+        draft.name = "Mine";
+        draft.source = "favorites";
+        draft.readState = "unread";
+        draft.include = {"rust"};
+        draft.exclude = {"secret-mute"};
+        const SavedView mine = *SavedViews::build(draft, nullptr, nullptr);
+        QCOMPARE(SavedViews::save(store, [&](QList<SavedView> &views) { return SavedViews::add(views, mine); }, &problem),
+                 1);
+        QCOMPARE(store.syncAccount().publishPending, publishBit(Sync::viewsKind) | viewsEditedBit);
+        const QList<SavedView> saved = store.savedViews();
+        QCOMPARE(saved.size(), 2);
+        QCOMPARE(saved.at(1).exclude, QStringList{"secret-mute"});
+        QCOMPARE(saved.at(1).view.value("order").toInt(), 1);
+
+        drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const QString content = drafts.events.first().content;
+        QVERIFY(!content.contains("secret-mute"));
+        QVERIFY(!content.contains("exclude"));
+        const std::optional<QList<SavedView>> parsed = Sync::parseViews(content);
+        QVERIFY(parsed);
+        QCOMPARE(parsed->size(), saved.size());
+        for (qsizetype i = 0; i < saved.size(); ++i) {
+            QCOMPARE(parsed->at(i).id, saved.at(i).id);
+            QCOMPARE(parsed->at(i).view, saved.at(i).view);
+            QVERIFY(parsed->at(i).exclude.isEmpty());
+        }
+
+        // Edited again while it was out, the views still wait to go out once
+        // it is recorded; recorded as drafted after the last edit, they go
+        // out no more. One recorded without the count it was drafted at
+        // (Sync::Drafts::viewsEdits) is never taken for the last edit.
+        const std::unique_ptr<LocalSigner> signer = LocalSigner::create(QByteArray(32, '\1'));
+        const NostrEvent sent = signer->signNow(drafts.events.first()).first;
+        const qint64 sentEdits = drafts.viewsEdits;
+        QCOMPARE(sentEdits, store.syncAccount().viewsEdits);
+        QCOMPARE(SavedViews::save(store, [&](QList<SavedView> &views) {
+            SavedView renamed = views.at(1);
+            renamed.view.insert("name", "Mine again");
+            return SavedViews::replace(views, renamed);
+        }, &problem), 1);
+        QCOMPARE(store.syncAccount().viewsEdits, sentEdits + 1);
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), sent, now, nullptr, nullptr, sentEdits), QString());
+        QVERIFY(store.syncAccount().publishPending & viewsEditedBit);
+        drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now + 1);
+        QCOMPARE(drafts.events.size(), 1);
+        QVERIFY(drafts.events.first().content.contains("Mine again"));
+        const NostrEvent again = signer->signNow(drafts.events.first()).first;
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), again, now + 1), QString());
+        QVERIFY(store.syncAccount().publishPending & viewsEditedBit);
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), again, now + 1, nullptr, nullptr, drafts.viewsEdits),
+                 QString());
+        QVERIFY(!(store.syncAccount().publishPending & viewsEditedBit));
+
+        // A view that does not come back from JSON as it went in, as a name
+        // holding half of an emoji, still counts as published once it is.
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            SavedView odd = views.at(0);
+            odd.view.insert("name", QString(QChar(0xD83D)) + "odd");
+            return SavedViews::replace(views, odd);
+        }, &problem), 1);
+        drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now + 2);
+        QCOMPARE(drafts.events.size(), 1);
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), signer->signNow(drafts.events.first()).first, now + 2,
+                                       nullptr, nullptr, drafts.viewsEdits),
+                 QString());
+        QVERIFY(!(store.syncAccount().publishPending & viewsEditedBit));
+        drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now + 3);
+        QVERIFY(drafts.events.isEmpty());
+        QCOMPARE(drafts.unchanged, QList<int>{Sync::viewsKind});
+
+        // Every view deleted here: an empty list goes out.
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            views.clear();
+            return QString();
+        }, &problem), 1);
+        drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now + 2);
+        QCOMPARE(drafts.events.size(), 1);
+        // Parsed as the web app would, so `{}` or a null list, which the web
+        // app refuses, cannot pass for an empty one.
+        const auto none = Sync::parseViews(drafts.events.first().content);
+        QVERIFY(none);
+        QVERIFY(none->isEmpty());
+    }
+
+    // A publish built before syncing stopped and started again with the
+    // same npub never counts an edit made since as published: the count of
+    // edits goes on rather than starting again.
+    void syncKeepsAViewEditOfALaterSessionToPublish()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        QString problem;
+        const auto name = [&](const QString &name) {
+            return SavedViews::save(store, [&](QList<SavedView> &views) {
+                if (views.isEmpty())
+                    return SavedViews::add(views, savedView("mine", {{"name", name}}));
+                SavedView renamed = views.at(0);
+                renamed.view.insert("name", name);
+                return SavedViews::replace(views, renamed);
+            }, &problem);
+        };
+        QCOMPARE(name("First"), 1);
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const std::unique_ptr<LocalSigner> signer = LocalSigner::create(QByteArray(32, '\1'));
+        const NostrEvent sent = signer->signNow(drafts.events.first()).first;
+
+        QVERIFY(store.clearSyncAccount());
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QCOMPARE(name("Second"), 1);
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), sent, now, nullptr, nullptr, drafts.viewsEdits),
+                 QString());
+        QVERIFY(store.syncAccount().publishPending & viewsEditedBit);
+    }
+
+    // The account and the views a draft is built from are read as one: a
+    // login as another npub that drops the views and makes one of its own
+    // meanwhile, as `readstr sync login --drop-views` and `readstr views
+    // add` would, waits for the draft, which holds the first npub's views.
+    void syncDraftsTheViewsOfTheAccountItRead()
+    {
+        QTemporaryDir dir;
+        const QString path = dir.path() + "/readstr.db";
+        Store store;
+        QVERIFY(store.open(path));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QString problem;
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            return SavedViews::add(views, savedView("a", {{"name", "Of A"}}));
+        }, &problem), 1);
+
+        const QString other = QString(64, 'd');
+        std::atomic<bool> switched = false, ok = false;
+        std::thread login;
+        const auto joined = qScopeGuard([&login] {
+            if (login.joinable())
+                login.join();
+        });
+        bool hooked = false;
+        Sync::draftsHook = [&] {
+            if (std::exchange(hooked, true))
+                return;
+            login = std::thread([&] {
+                Store cli;
+                QString why;
+                ok = cli.open(path) && cli.setSyncAccount(Nip19::npub(other), other, {}, true)
+                     && SavedViews::save(cli, [](QList<SavedView> &views) {
+                            return SavedViews::add(views, savedView("b", {{"name", "Of B"}}));
+                        }, &why) == 1;
+                switched = true;
+            });
+            // Long enough for the login to be done, unless it waits.
+            for (int i = 0; i < 100 && !switched; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        };
+        const auto unhook = qScopeGuard([] { Sync::draftsHook = nullptr; });
+        const Sync::Drafts drafts =
+            Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, QDateTime::currentSecsSinceEpoch());
+        // Checked before the join: a draft that failed before the hook
+        // never started the login, which join() would throw on.
+        QVERIFY2(drafts.error.isEmpty(), qPrintable(drafts.error));
+        QVERIFY(hooked);
+        login.join();
+        QVERIFY(ok);
+        QCOMPARE(drafts.events.size(), 1);
+        const auto views = Sync::parseViews(drafts.events.first().content);
+        QVERIFY(views);
+        QCOMPARE(views->size(), 1);
+        QCOMPARE(views->first().id, QString("a"));
+        QCOMPARE(store.syncAccount().pubkey, other);
+    }
+
+    // A pull after a change here merges as the web app's mergeViewLists
+    // does: the remote views first, with the mute words kept here, then the
+    // ones only here; and the change still goes out, merged.
+    void syncMergesAPullAfterAViewEditedHere()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        Sync::Outcome outcome = Sync::apply(
+            store, store.syncAccount(),
+            syncResult({viewsEvent({QJsonObject{{"id", "a"}, {"name", "A"}}, QJsonObject{{"id", "b"}, {"name", "B"}}},
+                                   now)}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        QCOMPARE(store.savedViews().size(), 2);
+
+        // Here: a renamed and given mute words, b deleted, c made.
+        QString problem;
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            SavedViews::Draft draft = SavedViews::draftOf(views.at(0));
+            draft.name = "A here";
+            draft.exclude = {"mute"};
+            const SavedView a = *SavedViews::build(draft, &views.at(0), nullptr);
+            SavedViews::Draft fresh;
+            fresh.name = "C";
+            fresh.source = "favorites";
+            SavedView c = *SavedViews::build(fresh, nullptr, nullptr);
+            c.id = "c";
+            c.view.insert("id", "c");
+            return SavedViews::replace(views, a) + SavedViews::remove(views, "b") + SavedViews::add(views, c);
+        }, &problem), 1);
+        const QList<SavedView> local = store.savedViews();
+        QCOMPARE(local.size(), 2);
+
+        // The web app, meanwhile: a renamed there, b kept, d made.
+        const QJsonObject newer = viewsEvent({QJsonObject{{"id", "d"}, {"name", "D"}},
+                                              QJsonObject{{"id", "a"}, {"name", "A web"}},
+                                              QJsonObject{{"id", "b"}, {"name", "B"}}},
+                                             now + 10);
+        outcome = Sync::apply(store, store.syncAccount(), syncResult({newer}));
+        QVERIFY2(outcome.error.isEmpty() && outcome.problems.isEmpty(), qPrintable(outcome.problems.join("; ")));
+        const QList<SavedView> merged = store.savedViews();
+        const QList<SavedView> expected =
+            Sync::mergeViews(local, *Sync::parseViews(newer.value("content").toString()));
+        QStringList ids;
+        for (const SavedView &view : merged)
+            ids << view.id;
+        // Numbered again by their order, as normalizeViews does, so c, second
+        // here, comes before b, third there.
+        QCOMPARE(ids, (QStringList{"d", "a", "c", "b"}));
+        QCOMPARE(merged.size(), expected.size());
+        for (qsizetype i = 0; i < merged.size(); ++i) {
+            QCOMPARE(merged.at(i).id, expected.at(i).id);
+            QCOMPARE(merged.at(i).view, expected.at(i).view);
+            QCOMPARE(merged.at(i).exclude, expected.at(i).exclude);
+        }
+        QCOMPARE(merged.at(1).view.value("name").toString(), QString("A web"));
+        QCOMPARE(merged.at(1).exclude, QStringList{"mute"});
+
+        QVERIFY(store.syncAccount().publishPending & viewsEditedBit);
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now + 20);
+        QCOMPARE(drafts.events.size(), 1);
+        QVERIFY(!drafts.events.first().content.contains("mute"));
+        QCOMPARE(Sync::parseViews(drafts.events.first().content)->size(), 4);
+    }
+
+    // A view the last list held and a newer one lacks was deleted in the
+    // web app: the pull drops it, so the next edit here does not publish it
+    // back. One made or changed here since stays, as does one only here.
+    void syncDropsViewsDeletedInTheWebApp()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        const auto pull = [&store](const QJsonArray &views, qint64 at) {
+            const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({viewsEvent(views, at)}));
+            return outcome.error + outcome.problems.join("; ");
+        };
+        const auto ids = [&store] {
+            QStringList list;
+            for (const SavedView &view : store.savedViews())
+                list << view.id;
+            return list;
+        };
+        const QJsonObject a{{"id", "a"}, {"name", "A"}}, b{{"id", "b"}, {"name", "B"}}, c{{"id", "c"}, {"name", "C"}};
+        QCOMPARE(pull({a, b, c}, now), QString());
+        QCOMPARE(ids(), (QStringList{"a", "b", "c"}));
+        // Mute words are kept here only, so they do not make b changed.
+        QString problem;
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            views[1].exclude = {"mute"};
+            SavedView renamed = views.at(2);
+            renamed.view.insert("name", "C here");
+            return SavedViews::replace(views, renamed);
+        }, &problem), 1);
+
+        // The web app deletes b and c; c, renamed here, stays.
+        QCOMPARE(pull({a}, now + 10), QString());
+        QCOMPARE(ids(), (QStringList{"a", "c"}));
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            SavedView renamed = views.at(0);
+            renamed.view.insert("name", "A here");
+            return SavedViews::replace(views, renamed);
+        }, &problem), 1);
+        Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now + 20);
+        QCOMPARE(drafts.events.size(), 1);
+        const QList<SavedView> parsed = Sync::parseViews(drafts.events.first().content).value_or(QList<SavedView>());
+        QStringList sent;
+        for (const SavedView &view : parsed)
+            sent << view.id;
+        QCOMPARE(sent, (QStringList{"a", "c"}));
+
+        // A view made here, which no list held, survives a pull of one
+        // without it; published and then deleted in the web app, it goes.
+        SavedViews::Draft fresh;
+        fresh.name = "Mine";
+        fresh.source = "favorites";
+        const SavedView mine = *SavedViews::build(fresh, nullptr, nullptr);
+        QCOMPARE(SavedViews::save(store, [&](QList<SavedView> &views) { return SavedViews::add(views, mine); },
+                                  &problem),
+                 1);
+        QCOMPARE(pull({a}, now + 30), QString());
+        QCOMPARE(ids(), (QStringList{"a", "c", mine.id}));
+        drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now + 40);
+        QCOMPARE(drafts.events.size(), 1);
+        const std::unique_ptr<LocalSigner> signer = LocalSigner::create(QByteArray(32, '\1'));
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), signer->signNow(drafts.events.first()).first, now + 40,
+                                       nullptr, nullptr, drafts.viewsEdits),
+                 QString());
+        QCOMPARE(pull({a, c}, now + 50), QString());
+        QCOMPARE(ids(), (QStringList{"a", "c"}));
+        QVERIFY(!(store.syncAccount().publishPending & viewsEditedBit));
+    }
+
+    // The list cached is taken for what the relays held before only when it
+    // is the one applied last: with none cached, as in a library from before
+    // publishing, or one cached behind it, a newer list lacking a view does
+    // not delete it.
+    void syncTakesNoViewForDeletedWithoutTheListAppliedLast()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const qint64 now = QDateTime::currentSecsSinceEpoch() - 3600;
+        const QJsonObject a{{"id", "a"}, {"name", "A"}}, b{{"id", "b"}, {"name", "B"}};
+        const QString both =
+            QString::fromUtf8(QJsonDocument(QJsonObject{{"views", QJsonArray{a, b}}, {"lastUpdated", now - 100}})
+                                  .toJson(QJsonDocument::Compact));
+        QVERIFY(store.transaction([&] { return store.replaceSavedViews(*Sync::parseViews(both)); }));
+        const auto pull = [&store](const QJsonArray &views, qint64 at) {
+            const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({viewsEvent(views, at)}));
+            return outcome.error + outcome.problems.join("; ");
+        };
+        const auto ids = [&store] {
+            QStringList list;
+            for (const SavedView &view : store.savedViews())
+                list << view.id;
+            return list;
+        };
+
+        // Applied but never cached.
+        QVERIFY(store.setSyncApplied(Sync::viewsTag, now - 100, QString(64, '1')));
+        QCOMPARE(pull({a}, now), QString());
+        QCOMPARE(ids(), (QStringList{"a", "b"}));
+
+        // Cached, but behind the list applied: it held b, and is not trusted.
+        QVERIFY(store.setSyncApplied(Sync::viewsTag, now + 5, QString(64, '2')));
+        QVERIFY(store.setSyncRemote(Sync::viewsTag, QString(64, '3'), both));
+        QCOMPARE(pull({a}, now + 10), QString());
+        QCOMPARE(ids(), (QStringList{"a", "b"}));
+
+        // Cached as applied, it is.
+        QVERIFY(store.setSyncApplied(Sync::viewsTag, now + 15, QString(64, '4')));
+        QVERIFY(store.setSyncRemote(Sync::viewsTag, QString(64, '4'), both));
+        QCOMPARE(pull({a}, now + 20), QString());
+        QCOMPARE(ids(), QStringList{"a"});
+    }
+
+    // Edited views wait for a pull every relay answered in full, and for
+    // the list applied last to be cached, before they replace what the
+    // relays hold.
+    void syncHoldsEditedViewsUntilThePullSettles()
+    {
+        Sync::Outcome outcome;
+        outcome.settled = false;
+        QCOMPARE(Sync::unsettledHold(outcome, Sync::viewsKind),
+                 QString("not every relay answered, so the saved views are not replaced"));
+        QCOMPARE(Sync::unsettledHold(outcome, Sync::readStatusKind),
+                 QString("not every relay answered, so the read status is not replaced"));
+        QCOMPARE(Sync::unsettledHold(outcome, Sync::subscriptionsKind), QString());
+        outcome.settled = true;
+        QCOMPARE(Sync::unsettledHold(outcome, Sync::viewsKind), QString());
+
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const qint64 now = 1800000000;
+        QString problem;
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            return SavedViews::add(views, savedView("mine", {{"order", 0}}));
+        }, &problem), 1);
+        // Applied, as in a library from before publishing, but not cached.
+        QVERIFY(store.setSyncApplied(Sync::viewsTag, now - 100, QString(64, 'a')));
+        Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now);
+        QVERIFY(drafts.events.isEmpty());
+        QCOMPARE(drafts.waiting, QList<int>{Sync::viewsKind});
+        QCOMPARE(drafts.viewsEdits, qint64(-1));
+        // Cached behind a newer one applied.
+        QVERIFY(store.setSyncRemote(Sync::viewsTag, QString(64, 'b'), Sync::viewsContent({}, now - 200)));
+        drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now);
+        QCOMPARE(drafts.waiting, QList<int>{Sync::viewsKind});
+        QVERIFY(store.setSyncRemote(Sync::viewsTag, QString(64, 'a'), Sync::viewsContent({}, now - 100)));
+        drafts = Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        QCOMPARE(drafts.viewsEdits, store.syncAccount().viewsEdits);
+    }
+
+    // The saved views belong to the account they were pulled or edited
+    // under, even once syncing stops: another npub, set directly or after
+    // Stop syncing, takes them only when told to drop them, mute words and
+    // unpublished edits included, so its first edit never publishes them.
+    // The same npub again keeps them, and views made before any account are
+    // the first one's.
+    void savedViewsGoWithAnotherAccount()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.transaction([&] { return store.replaceSavedViews({savedView("offline", {}, {"m"})}); }));
+        QCOMPARE(store.savedViewsOfAnother(syncPubkey()), std::optional<bool>(false));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QCOMPARE(store.savedViews().size(), 1);
+        QString problem;
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            return SavedViews::add(views, savedView("a", {}, {"secret"}));
+        }, &problem), 1);
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QCOMPARE(store.savedViews().size(), 2);
+        QVERIFY(store.syncAccount().publishPending & viewsEditedBit);
+
+        // A direct switch is refused, changing nothing, unless told.
+        const QString other(64, 'd');
+        QCOMPARE(store.savedViewsOfAnother(other), std::optional<bool>(true));
+        QVERIFY(!store.setSyncAccount(Nip19::npub(other), other, {}));
+        QCOMPARE(store.lastError(), QString("the saved views here belong to another npub"));
+        QCOMPARE(store.syncAccount().pubkey, syncPubkey());
+        QCOMPARE(store.savedViews().size(), 2);
+        QVERIFY(store.setSyncAccount(Nip19::npub(other), other, {}, true));
+        QVERIFY(store.savedViews().isEmpty());
+        QCOMPARE(store.syncAccount().publishPending, 0);
+        // The count of edits goes on from the last account's, so it never
+        // repeats one a publish was built at.
+        QCOMPARE(store.syncAccount().viewsEdits, qint64(1));
+        const Sync::Drafts drafts = Sync::drafts(store, other, {Sync::viewsKind}, {}, 1800000000);
+        QVERIFY(drafts.events.isEmpty());
+        // Marked for the account the edit was read under, never another.
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            return SavedViews::add(views, savedView("b", {}));
+        }, &problem), 1);
+        QCOMPARE(store.syncAccount().publishPending, publishBit(Sync::viewsKind) | viewsEditedBit);
+        QVERIFY(!store.markViewsEdited(syncPubkey()));
+        QCOMPARE(store.lastError(), QString("the sync account changed"));
+
+        // Stopped, the views are still that account's: an edit marks
+        // nothing, and the next npub cannot take them unasked; the same
+        // npub again keeps them.
+        QVERIFY(store.clearSyncAccount());
+        QCOMPARE(SavedViews::save(store, [](QList<SavedView> &views) {
+            return SavedViews::add(views, savedView("c", {}));
+        }, &problem), 1);
+        QCOMPARE(store.savedViews().size(), 2);
+        QCOMPARE(store.savedViewsOfAnother(syncPubkey()), std::optional<bool>(true));
+        QVERIFY(!store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QCOMPARE(store.savedViews().size(), 2);
+        QVERIFY(store.setSyncAccount(Nip19::npub(other), other, {}));
+        QCOMPARE(store.savedViews().size(), 2);
+        QVERIFY(store.clearSyncAccount());
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}, true));
+        QVERIFY(store.savedViews().isEmpty());
+        // With no views, there is nothing to ask about.
+        QCOMPARE(store.savedViewsOfAnother(other), std::optional<bool>(false));
+        QVERIFY(store.setSyncAccount(Nip19::npub(other), other, {}));
+    }
+
+    // A change worked out from a copy of a view read earlier refuses when
+    // the view changed since, whatever its place.
+    void savedViewsRefuseAStaleBase()
+    {
+        const SavedView a = savedView("a", {{"order", 0}}), b = savedView("b", {{"order", 1}});
+        QList<SavedView> views{a, b};
+        SavedView renamed = a;
+        renamed.view.insert("name", "A2");
+        SavedView moved = a;
+        moved.view.insert("order", 5);
+        QCOMPARE(SavedViews::replace(views, renamed, &moved), QString());
+        QCOMPARE(views.at(0).view.value("name").toString(), QString("A2"));
+        QCOMPARE(SavedViews::replace(views, a, &a), QString("The view changed; try again"));
+        QCOMPARE(SavedViews::remove(views, "a", &a), QString("The view changed; try again"));
+        SavedView muted = b;
+        muted.exclude = {"x"};
+        QCOMPARE(SavedViews::remove(views, "b", &muted), QString("The view changed; try again"));
+        QCOMPARE(SavedViews::remove(views, "b", &b), QString());
+        QCOMPARE(views.size(), 1);
+
+        // An icon cut through an emoji keeps only whole characters, and a
+        // tag past what the web app keeps whole cannot be listed.
+        SavedViews::Draft draft;
+        draft.name = "Cut";
+        draft.source = "all";
+        draft.icon = QString(7, 'i') + QChar(0xD83D);
+        const std::optional<SavedView> cut = SavedViews::build(draft, nullptr, nullptr);
+        QVERIFY(cut);
+        QCOMPARE(cut->view.value("icon").toString(), QString(7, 'i'));
+        QVERIFY(SavedViews::viewableTag(QString(200, 't')));
+        QVERIFY(!SavedViews::viewableTag(QString(201, 't')));
+        QVERIFY(Sync::storableTag(QString(201, 't')));
+    }
+
+    // The window makes, edits, moves, and deletes views through their
+    // forms, each of which undo() undoes and redo() does again.
+    void backendEditsSavedViewsAndUndoesTheEdits()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const auto [first, second] = seedLibrary();
+        const QJsonObject web{{"id", "web"},
+                              {"name", "Web"},
+                              {"order", 0},
+                              {"source", QJsonObject{{"kind", "category"}, {"categoryId", "cat9"}}},
+                              {"readState", "all"},
+                              {"sort", "newest"},
+                              {"future", "kept"}};
+        seedViews({SavedView{"web", web, {}}});
+        Store store;
+        QVERIFY(store.open());
+        Backend backend;
+        QSignalSpy viewsChanged(&backend, &Backend::viewsChanged);
+        const auto ids = [&backend] {
+            QStringList list;
+            for (const SavedView &view : backend.savedViews())
+                list << view.id;
+            return list;
+        };
+
+        QVariantMap form = backend.viewForm("");
+        QCOMPARE(form.value("source").toString(), QString("all"));
+        QVERIFY(form.value("sourceEditable").toBool());
+        QCOMPARE(backend.viewProblem("", form), QString("A view needs a name"));
+        QVERIFY(!backend.saveView("", form));
+        form.insert("name", "Firsts");
+        form.insert("readState", "unread");
+        form.insert("include", "newest, oldest");
+        form.insert("exclude", "oldest");
+        QCOMPARE(backend.viewProblem("", form), QString());
+        QVERIFY(backend.saveView("", form));
+        QTRY_COMPARE(backend.status(), QString("Created the view Firsts"));
+        QVERIFY(viewsChanged.count() > 0);
+        QCOMPARE(backend.savedViews().size(), 2);
+        const QString id = backend.savedViews().at(1).id;
+        // The new view is selected and lists its articles.
+        QCOMPARE(backend.selectedViewId(), id);
+        QCOMPARE(titlesOf(backend.articles()), QStringList{"Newest"});
+        QCOMPARE(store.savedViews().at(1).exclude, QStringList{"oldest"});
+        QCOMPARE(store.savedViews().at(1).view.value("keywords").toObject(),
+                 (QJsonObject{{"include", QJsonArray{"newest", "oldest"}}}));
+        QCOMPARE(store.syncAccount().publishPending, publishBit(Sync::viewsKind) | viewsEditedBit);
+
+        form = backend.viewForm(id);
+        QCOMPARE(form.value("include").toString(), QString("newest, oldest"));
+        QCOMPARE(form.value("exclude").toString(), QString("oldest"));
+        form.insert("name", "Old first");
+        form.insert("readState", "all");
+        form.insert("sort", "oldest");
+        form.insert("include", "");
+        form.insert("exclude", "");
+        QVERIFY(backend.saveView(id, form));
+        QTRY_COMPARE(backend.status(), QString("Saved the view Old first"));
+        QCOMPARE(backend.sourceTitle(), QString("Old first"));
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Oldest", "Second B", "Older", "Second A", "Newest"}));
+
+        // The web view of a category: its name changes, its source and the
+        // rest it holds stay.
+        form = backend.viewForm("web");
+        QCOMPARE(form.value("source").toString(), QString("category"));
+        QVERIFY(!form.value("sourceEditable").toBool());
+        form.insert("name", "Web renamed");
+        QVERIFY(backend.saveView("web", form));
+        QTRY_COMPARE(backend.status(), QString("Saved the view Web renamed"));
+        QJsonObject renamed = web;
+        renamed.insert("name", "Web renamed");
+        QCOMPARE(store.savedViews().at(0).view, renamed);
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: edited the view Web renamed"));
+        QCOMPARE(store.savedViews().at(0).view, web);
+        // Saved as it is, nothing changes, so the edit undone can still be
+        // redone.
+        QVERIFY(backend.canRedo());
+        QVERIFY(backend.saveView("web", backend.viewForm("web")));
+        QVERIFY(backend.canRedo());
+
+        // The source selected, saved as a view.
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Feed, first));
+        QVERIFY(!backend.canSaveSourceAsView());
+        QVERIFY(backend.sourceViewForm().isEmpty());
+        backend.selectSource(backend.sources()->rowOf(SourceModel::Kind::Starred));
+        QVERIFY(backend.canSaveSourceAsView());
+        form = backend.sourceViewForm();
+        QCOMPARE(form.value("source").toString(), QString("favorites"));
+        QCOMPARE(form.value("name").toString(), QString("Starred"));
+        QVERIFY(backend.saveView("", form));
+        QTRY_COMPARE(backend.status(), QString("Created the view Starred"));
+        const QString starred = backend.selectedViewId();
+        QCOMPARE(ids(), (QStringList{"web", id, starred}));
+
+        backend.moveView(starred, -1);
+        QTRY_COMPARE(ids(), (QStringList{"web", starred, id}));
+        QCOMPARE(backend.selectedViewId(), starred);
+        backend.moveView("web", -1);
+        // V steps through the views that can be selected, round the list.
+        backend.stepView(1);
+        QCOMPARE(backend.selectedViewId(), id);
+        backend.stepView(1);
+        QCOMPARE(backend.selectedViewId(), starred);
+        backend.stepView(-1);
+        QCOMPARE(backend.selectedViewId(), id);
+
+        backend.deleteView(id);
+        QTRY_COMPARE(backend.status(), QString("Deleted the view Old first"));
+        QCOMPARE(ids(), (QStringList{"web", starred}));
+        QCOMPARE(backend.sourceKind(), QString("all"));
+
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: deleted the view Old first"));
+        QCOMPARE(ids(), (QStringList{"web", starred, id}));
+        QCOMPARE(store.savedViews().at(2).view.value("sort").toString(), QString("oldest"));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: moved the view Starred"));
+        QCOMPARE(ids(), (QStringList{"web", id, starred}));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: created the view Starred"));
+        QCOMPARE(ids(), (QStringList{"web", id}));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: edited the view Old first"));
+        QCOMPARE(store.savedViews().at(1).view.value("name").toString(), QString("Firsts"));
+        QCOMPARE(store.savedViews().at(1).exclude, QStringList{"oldest"});
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: created the view Firsts"));
+        QCOMPARE(ids(), QStringList{"web"});
+        QVERIFY(!backend.canUndo());
+
+        for (const char *label : {"created the view Firsts", "edited the view Old first", "created the view Starred",
+                                  "moved the view Starred", "deleted the view Old first"}) {
+            backend.redo();
+            QTRY_COMPARE(backend.status(), QString("Redid: ") + label);
+        }
+        QCOMPARE(ids(), (QStringList{"web", starred}));
+        QCOMPARE(store.savedViews().at(1).view.value("source").toObject(), (QJsonObject{{"kind", "favorites"}}));
+
+        // Full: no more views.
+        QList<SavedView> full;
+        for (int i = 0; i < Sync::maxViews; ++i)
+            full << savedView(QString::number(i), {});
+        QVERIFY(store.transaction([&] { return store.replaceSavedViews(full); }));
+        Backend again;
+        QCOMPARE(again.savedViews().size(), Sync::maxViews);
+        form = again.viewForm("");
+        form.insert("name", "One more");
+        QCOMPARE(again.viewProblem("", form), QString("There can be at most 50 saved views"));
+        QVERIFY(!again.saveView("", form));
+    }
+
+    // Undoing a delete that a pull undid already does nothing more, and an
+    // edit worked out from a view that changed meanwhile refuses rather than
+    // put back an older copy. A tag a view cannot list is not offered.
+    void backendEditsOnlyTheViewItWorkedFrom()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        const auto [first, second] = seedLibrary();
+        const SavedView web = savedView("web", {{"order", 0}});
+        seedViews({web});
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.setFeedTags(first, {"news", QString(201, 't')}));
+        Backend backend;
+        QCOMPARE(backend.viewTags(), QStringList{"news"});
+
+        backend.deleteView("web");
+        QTRY_COMPARE(backend.status(), QString("Deleted the view web"));
+        QVERIFY(store.savedViews().isEmpty());
+        QVERIFY(store.transaction([&] { return store.replaceSavedViews({web}); }));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: deleted the view web"));
+        QCOMPARE(store.savedViews().size(), 1);
+
+        QVariantMap form = backend.viewForm("web");
+        form.insert("name", "Renamed");
+        SavedView pulled = web;
+        pulled.view.insert("name", "Pulled");
+        QVERIFY(store.transaction([&] { return store.replaceSavedViews({pulled}); }));
+        QVERIFY(backend.saveView("web", form));
+        QTRY_COMPARE(backend.status(), QString("Cannot save the view: The view changed; try again"));
+        QCOMPARE(store.savedViews().at(0).view.value("name").toString(), QString("Pulled"));
+
+        // Nor does an undo, which then cannot be tried again.
+        form = backend.viewForm("web");
+        QCOMPARE(form.value("name").toString(), QString("Pulled"));
+        form.insert("name", "Mine");
+        QVERIFY(backend.saveView("web", form));
+        QTRY_COMPARE(backend.status(), QString("Saved the view Mine"));
+        pulled.view.insert("name", "Pulled again");
+        QVERIFY(store.transaction([&] { return store.replaceSavedViews({pulled}); }));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Cannot undo: the view has changed since"));
+        QCOMPARE(store.savedViews().at(0).view.value("name").toString(), QString("Pulled again"));
+        QVERIFY(!backend.canUndo() && !backend.canRedo());
+    }
+
+    // The dialog's form is saved only over the view it was filled in from:
+    // a pull that changed the view while it was open, which the window
+    // shows, is not overwritten with the form's older values.
+    void backendRefusesAFormOfAViewAPullChanged()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        seedLibrary();
+        const SavedView web = savedView("web", {{"order", 0}, {"name", "Web"}});
+        seedViews({web});
+        Backend backend;
+        QVariantMap form = backend.viewForm("web");
+        form.insert("name", "Mine");
+
+        Store store;
+        QVERIFY(store.open());
+        SavedView pulled = web;
+        pulled.view.insert("name", "Pulled");
+        pulled.view.insert("sort", "oldest");
+        QVERIFY(store.transaction([&] { return store.replaceSavedViews({pulled}); }));
+        // The window reads the views again, as it does after a pull.
+        backend.selectArticle(0);
+        QTRY_COMPARE(backend.savedViews().value(0).view.value("name").toString(), QString("Pulled"));
+
+        QSignalSpy saved(&backend, &Backend::viewSaved);
+        QVERIFY(backend.saveView("web", form));
+        QVERIFY(saved.wait(10000));
+        QCOMPARE(saved.first().at(0).toBool(), false);
+        QCOMPARE(saved.first().at(1).toString(), QString("Cannot save the view: The view changed; try again"));
+        QCOMPARE(store.savedViews().at(0).view.value("name").toString(), QString("Pulled"));
+        QCOMPARE(store.savedViews().at(0).view.value("sort").toString(), QString("oldest"));
+        QVERIFY(!backend.canUndo());
+
+        // Filled in again, it saves.
+        form = backend.viewForm("web");
+        form.insert("name", "Mine");
+        QVERIFY(backend.saveView("web", form));
+        QVERIFY(saved.wait(10000));
+        QCOMPARE(saved.last().at(0).toBool(), true);
+        QCOMPARE(store.savedViews().at(0).view.value("name").toString(), QString("Mine"));
+        QCOMPARE(store.savedViews().at(0).view.value("sort").toString(), QString("oldest"));
+    }
+
+    // A move is undone or redone only over the order it left: one a pull
+    // changed since stays as the pull left it.
+    void backendUndoesAMoveOnlyOverTheOrderItLeft()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        seedLibrary();
+        const SavedView a = savedView("a", {}), b = savedView("b", {}), c = savedView("c", {});
+        seedViews({a, b, c});
+        Store store;
+        QVERIFY(store.open());
+        const auto ids = [&store] {
+            QStringList ids;
+            for (const SavedView &view : store.savedViews())
+                ids << view.id;
+            return ids;
+        };
+        const auto pull = [&store](const QList<SavedView> &views) {
+            return store.transaction([&] { return store.replaceSavedViews(views); });
+        };
+        Backend backend;
+
+        backend.moveView("c", -1);
+        QTRY_COMPARE(ids(), (QStringList{"a", "c", "b"}));
+        QVERIFY(pull({b, a, c}));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Cannot undo: the view has changed since"));
+        QCOMPARE(ids(), (QStringList{"b", "a", "c"}));
+        QVERIFY(!backend.canUndo() && !backend.canRedo());
+
+        backend.moveView("c", -1);
+        QTRY_COMPARE(ids(), (QStringList{"b", "c", "a"}));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: moved the view c"));
+        QCOMPARE(ids(), (QStringList{"b", "a", "c"}));
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Redid: moved the view c"));
+        QCOMPARE(ids(), (QStringList{"b", "c", "a"}));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: moved the view c"));
+        QVERIFY(pull({a, b, c}));
+        backend.redo();
+        QTRY_COMPARE(backend.status(), QString("Cannot redo: the view has changed since"));
+        QCOMPARE(ids(), (QStringList{"a", "b", "c"}));
+    }
+
+    // Another npub takes the saved views only when told to drop them, and
+    // once it is set, undo and redo no longer reach the views of the last
+    // one, which would come back marked to publish under it.
+    void backendForgetsViewUndoWithAnotherAccount()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        seedLibrary();
+        seedViews({savedView("web", {{"order", 0}})});
+        Backend backend;
+        backend.setRelays({relay.url()});
+        const QString other = Nip19::npub(QString(64, 'd'));
+        QVERIFY(!backend.syncNpubDropsViews(syncNpub()));
+        QVERIFY(backend.syncNpubDropsViews(other));
+        QVERIFY(backend.setSyncNpub(other));
+        QTRY_VERIFY(backend.status().contains("the saved views here belong to another npub"));
+        QCOMPARE(backend.syncNpub(), syncNpub());
+
+        backend.deleteView("web");
+        QTRY_COMPARE(backend.status(), QString("Deleted the view web"));
+        QVariantMap form = backend.viewForm("");
+        form.insert("name", "Mine");
+        QVERIFY(backend.saveView("", form));
+        QTRY_COMPARE(backend.status(), QString("Created the view Mine"));
+        backend.undo();
+        QTRY_COMPARE(backend.status(), QString("Undid: created the view Mine"));
+        QVERIFY(backend.canUndo() && backend.canRedo());
+
+        QVERIFY(!backend.syncNpubDropsViews(other));
+        QVERIFY(backend.setSyncNpub(other));
+        QTRY_COMPARE(backend.syncNpub(), other);
+        QVERIFY(!backend.canUndo());
+        QVERIFY(!backend.canRedo());
+        backend.undo();
+        QCOMPARE(backend.status(), QString("Nothing to undo"));
+        backend.redo();
+        QCOMPARE(backend.status(), QString("Nothing to redo"));
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.savedViews().isEmpty());
+        QVERIFY(!(store.syncAccount().publishPending & viewsEditedBit));
+    }
+
+    // An undo asked for while another npub is being set, and so queued on
+    // the worker before the window forgets the views' history, still never
+    // writes the last npub's views under the new one.
+    void backendRefusesAViewUndoQueuedBeforeAnotherAccount()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        seedLibrary();
+        seedViews({savedView("web", {{"order", 0}})});
+        Backend backend;
+        backend.setRelays({relay.url()});
+        QStringList statuses;
+        connect(&backend, &Backend::statusChanged, &backend, [&] { statuses << backend.status(); });
+        // Its last view deleted, the npub's views are no other's to drop.
+        backend.deleteView("web");
+        QTRY_COMPARE(backend.status(), QString("Deleted the view web"));
+        const QString other = Nip19::npub(QString(64, 'd'));
+        QVERIFY(!backend.syncNpubDropsViews(other));
+
+        QVERIFY(backend.setSyncNpub(other));
+        backend.undo();
+        Store store;
+        QVERIFY(store.open());
+        // Refused, it says so; written, it is in the library.
+        QTRY_VERIFY(statuses.contains("Cannot undo: the sync account changed") || !store.savedViews().isEmpty());
+        QVERIFY(store.savedViews().isEmpty());
+        QVERIFY(statuses.contains("Cannot undo: the sync account changed"));
+        QTRY_COMPARE(backend.syncNpub(), other);
+        QVERIFY(!backend.canUndo() && !backend.canRedo());
+        QVERIFY(!(store.syncAccount().publishPending & viewsEditedBit));
+    }
+
+    // An undo queued on the worker behind another write, and so reached
+    // only once the window has switched accounts and forgotten it, is
+    // skipped, and the window still says why.
+    void backendSaysWhyAViewUndoReachedAfterAnotherAccountIsSkipped()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        seedLibrary();
+        seedViews({savedView("web", {{"order", 0}})});
+        // The pass of a filter rule added after the login holds the worker
+        // until the window has the account, so the undos asked for
+        // meanwhile, of the rule and then of the delete, are reached only
+        // after it forgot the delete.
+        QSemaphore reached, go;
+        std::atomic<bool> armed{false};
+        Store::filterWriteHook = [&] {
+            if (!armed.exchange(false))
+                return;
+            reached.release();
+            go.tryAcquire(1, 60000);
+        };
+        const auto unhook = qScopeGuard([] { Store::filterWriteHook = nullptr; });
+        Backend backend;
+        // Even when a check fails, the worker goes on and is joined.
+        const auto release = qScopeGuard([&go] { go.release(); });
+        backend.setRelays({relay.url()});
+        QStringList statuses;
+        connect(&backend, &Backend::statusChanged, &backend, [&] { statuses << backend.status(); });
+        backend.deleteView("web");
+        QTRY_COMPARE(backend.status(), QString("Deleted the view web"));
+        const QString other = Nip19::npub(QString(64, 'd'));
+        QVERIFY(!backend.syncNpubDropsViews(other));
+
+        armed = true;
+        QVERIFY(backend.setSyncNpub(other));
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "oldest"}, {"target", "title"}, {"type", "contains"},
+                                            {"action", "hide"}}));
+        QVERIFY(reached.tryAcquire(1, 60000));
+        backend.undo();
+        backend.undo();
+        QTRY_COMPARE(backend.syncNpub(), other);
+        go.release();
+        QTRY_VERIFY(statuses.contains("Cannot undo: the sync account changed"));
+        QVERIFY(!backend.canUndo());
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.savedViews().isEmpty());
+        QVERIFY(!(store.syncAccount().publishPending & viewsEditedBit));
+    }
+
+    // A pull that not every relay answered may have missed a newer list
+    // from the web app, so views edited here wait, and the window says why.
+    void backendHoldsEditedViewsAfterAnUnsettledPull()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay, silent;
+        relay.honourFilters = true;
+        relay.keepPublished = true;
+        silent.silent = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount(true);
+        seedLibrary();
+        relay.events = {viewsEvent({QJsonObject{{"id", "web"}, {"name", "Web"}}},
+                                   QDateTime::currentSecsSinceEpoch() - 100)};
+        FakeKeyStore keys;
+        keys.keys.insert(syncNpub(), QByteArray(32, '\1'));
+        Backend backend;
+        backend.setRelays({relay.url(), silent.url()});
+        backend.setPublishDelays(30, 30);
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+        QSignalSpy synced(&backend, &Backend::syncFinished);
+        QVERIFY(backend.setSyncNpub(syncNpub()));
+        QVERIFY(synced.wait(30000));
+        QTRY_COMPARE(backend.savedViews().size(), 1);
+
+        QVariantMap form = backend.viewForm("");
+        form.insert("name", "Mine");
+        QVERIFY(backend.saveView("", form));
+        const QString held = "not every relay answered, so the saved views are not replaced";
+        QTRY_VERIFY_WITH_TIMEOUT(backend.publishError().contains(held), 30000);
+        QTRY_VERIFY(!backend.publishing());
+        QVERIFY2(backend.status().contains(held), qPrintable(backend.status()));
+        QVERIFY(relay.published.isEmpty());
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.syncAccount().publishPending & viewsEditedBit);
+    }
+
+    // A view made, deleted, or put back here goes out as kind 30406 over
+    // the list the relays hold, without its mute words.
+    void backendPublishesViewsEditedHere()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        relay.honourFilters = true;
+        relay.keepPublished = true;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount(true);
+        seedLibrary();
+        relay.events = {viewsEvent({QJsonObject{{"id", "web"}, {"name", "Web"}}},
+                                   QDateTime::currentSecsSinceEpoch() - 100)};
+        FakeKeyStore keys;
+        keys.keys.insert(syncNpub(), QByteArray(32, '\1'));
+        Backend backend;
+        backend.setRelays({relay.url()});
+        backend.setPublishDelays(30, 30);
+        backend.setKeyStore(&keys);
+        QTRY_VERIFY(backend.signingKeyStored());
+        QSignalSpy synced(&backend, &Backend::syncFinished);
+        QVERIFY(backend.setSyncNpub(syncNpub()));
+        QVERIFY(synced.wait(10000));
+        QTRY_COMPARE(backend.savedViews().size(), 1);
+        QVERIFY(relay.published.isEmpty());
+        const auto published = [&relay] {
+            QStringList names;
+            const QString content = relay.published.last().value("content").toString();
+            for (const QJsonValue &view :
+                 QJsonDocument::fromJson(content.toUtf8()).object().value("views").toArray())
+                names << view["name"].toString();
+            return names;
+        };
+
+        QVariantMap form = backend.viewForm("");
+        form.insert("name", "Mine");
+        form.insert("include", "rust");
+        form.insert("exclude", "secret-mute");
+        QVERIFY(backend.saveView("", form));
+        QTRY_COMPARE_WITH_TIMEOUT(relay.published.size(), 1, 10000);
+        QTRY_VERIFY(!backend.publishing());
+        QVERIFY2(backend.publishError().isEmpty(), qPrintable(backend.publishError()));
+        QCOMPARE(relay.published.last().value("kind").toInt(), Sync::viewsKind);
+        QCOMPARE(published(), (QStringList{"Web", "Mine"}));
+        QVERIFY(!relay.published.last().value("content").toString().contains("secret-mute"));
+        Store store;
+        QVERIFY(store.open());
+        QTRY_COMPARE(store.syncAccount().publishPending, 0);
+
+        backend.deleteView("web");
+        QTRY_COMPARE_WITH_TIMEOUT(relay.published.size(), 2, 10000);
+        QTRY_VERIFY(!backend.publishing());
+        QCOMPARE(published(), QStringList{"Mine"});
+        backend.undo();
+        QTRY_COMPARE_WITH_TIMEOUT(relay.published.size(), 3, 10000);
+        QTRY_VERIFY(!backend.publishing());
+        QCOMPARE(published(), (QStringList{"Web", "Mine"}));
+        QTRY_COMPARE(store.syncAccount().publishPending, 0);
+        QCOMPARE(store.savedViews().at(1).exclude, QStringList{"secret-mute"});
+    }
+
+    // The view dialog, keyboard first: Ctrl+Shift+N makes a view, F2 edits
+    // the one selected, Delete asks before it goes, and Ctrl+Z puts it back.
+    // A right click on a view the app cannot list still edits it.
+    void windowCreatesEditsAndDeletesSavedViews()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.setFeedTags(second, {"tech"}));
+        }
+        seedViews({savedView("tech", {{"name", "Tech"},
+                                      {"source", QJsonObject{{"kind", "feed"}, {"feedId", "clx"}}}})});
+        write(dir.path() + "/language", "en");
+        QTest::failOnWarning(QRegularExpression("Binding loop|qrc:/"));
+        LoadedWindow loaded(dir.path() + "/language");
+        QVERIFY(loaded.window);
+        QVERIFY(QTest::qWaitForWindowExposed(loaded.window));
+        Backend &backend = *loaded.backend;
+        QTRY_VERIFY(sourceRow(loaded.window, "view", "tech"));
+        const auto find = [&loaded](const QString &name) -> QObject * {
+            if (QObject *object = loaded.window->findChild<QObject *>(name))
+                return object;
+            QList<QQuickItem *> items{loaded.window->contentItem()};
+            while (!items.isEmpty()) {
+                QQuickItem *item = items.takeLast();
+                if (item->objectName() == name && item->isVisible())
+                    return item;
+                items << item->childItems();
+            }
+            return nullptr;
+        };
+        QObject *dialog = find("viewDialog");
+        QVERIFY(dialog);
+        auto *name = qobject_cast<QQuickItem *>(find("viewName"));
+        QVERIFY(name);
+        const auto type = [&loaded](const QByteArray &text) {
+            for (const char key : text)
+                QTest::keyClick(loaded.window, key);
+        };
+        // A JavaScript array of the dialog's, as strings.
+        const auto strings = [](const QVariant &value) {
+            return value.metaType() == QMetaType::fromType<QJSValue>()
+                       ? value.value<QJSValue>().toVariant().toStringList()
+                       : value.toStringList();
+        };
+
+        QTest::keyClick(loaded.window, Qt::Key_N, Qt::ControlModifier | Qt::ShiftModifier);
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QTRY_VERIFY(name->hasActiveFocus());
+        QCOMPARE(dialog->property("title").toString(), QString("New view"));
+        // Typed into the form, not the window: N would go to the next
+        // unread article, S star one.
+        type("second ns");
+        QCOMPARE(name->property("text").toString(), QString("second ns"));
+        // Tags: ticked with Space in their list.
+        QObject *source = find("viewSource");
+        QVERIFY(source);
+        source->setProperty("currentIndex", 2);
+        auto *tags = qobject_cast<QQuickItem *>(find("viewTags"));
+        QTRY_VERIFY(tags && tags->isVisible());
+        QCOMPARE(strings(dialog->property("tags")), QStringList{"tech"});
+        tags->forceActiveFocus();
+        QTest::keyClick(loaded.window, Qt::Key_Space);
+        QCOMPARE(strings(dialog->property("picked")), QStringList{"tech"});
+        find("viewInclude")->setProperty("text", "second");
+        find("viewExclude")->setProperty("text", "second b");
+        name->forceActiveFocus();
+        QTest::keyClick(loaded.window, Qt::Key_Return);
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QTRY_COMPARE(backend.status(), QString("Created the view second ns"));
+        const QString id = backend.selectedViewId();
+        QVERIFY(!id.isEmpty());
+        QTRY_VERIFY(sourceRow(loaded.window, "view", id));
+        QCOMPARE(titlesOf(backend.articles()), QStringList{"Second A"});
+        QCOMPARE(backend.savedViews().last().exclude, QStringList{"second b"});
+
+        // F2 edits the view selected, its form filled in.
+        QTest::keyClick(loaded.window, Qt::Key_F2);
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QCOMPARE(dialog->property("title").toString(), QString("Edit view"));
+        QCOMPARE(name->property("text").toString(), QString("second ns"));
+        QCOMPARE(find("viewInclude")->property("text").toString(), QString("second"));
+        QCOMPARE(find("viewExclude")->property("text").toString(), QString("second b"));
+        QCOMPARE(strings(dialog->property("picked")), QStringList{"tech"});
+        name->setProperty("text", "");
+        QVERIFY(QMetaObject::invokeMethod(find("viewSave"), "clicked"));
+        QCOMPARE(find("viewProblem")->property("text").toString(), QString("A view needs a name"));
+        QVERIFY(dialog->property("visible").toBool());
+        name->setProperty("text", "Seconds");
+        find("viewExclude")->setProperty("text", "");
+        QVERIFY(QMetaObject::invokeMethod(find("viewSave"), "clicked"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QTRY_COMPARE(backend.sourceTitle(), QString("Seconds"));
+        QCOMPARE(titlesOf(backend.articles()), (QStringList{"Second A", "Second B"}));
+
+        // Alt+Up moves it above the view of a feed; V and Shift+V step
+        // through the views, past the one that cannot be selected.
+        QTest::keyClick(loaded.window, Qt::Key_Up, Qt::AltModifier);
+        QTRY_COMPARE(backend.savedViews().first().id, id);
+        QTest::keyClick(loaded.window, Qt::Key_Down, Qt::AltModifier);
+        QTRY_COMPARE(backend.savedViews().last().id, id);
+        backend.selectSource(0);
+        QTest::keyClick(loaded.window, Qt::Key_V);
+        QCOMPARE(backend.selectedViewId(), id);
+        QTest::keyClick(loaded.window, Qt::Key_V, Qt::ShiftModifier);
+        QCOMPARE(backend.selectedViewId(), id);
+
+        // Delete asks first, then the view goes, and Ctrl+Z brings it back.
+        QObject *ask = find("deleteViewDialog");
+        QVERIFY(ask);
+        QTest::keyClick(loaded.window, Qt::Key_Delete);
+        QTRY_VERIFY(ask->property("opened").toBool());
+        QCOMPARE(backend.savedViews().size(), 2);
+        QTest::keyClick(loaded.window, Qt::Key_Return);
+        QTRY_VERIFY(!ask->property("visible").toBool());
+        QTRY_COMPARE(backend.status(), QString("Deleted the view Seconds"));
+        QTRY_VERIFY(!sourceRow(loaded.window, "view", id));
+        QCOMPARE(backend.sourceKind(), QString("all"));
+        QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ControlModifier);
+        QTRY_COMPARE(backend.status(), QString("Undid: deleted the view Seconds"));
+        QTRY_VERIFY(sourceRow(loaded.window, "view", id));
+
+        // The view of a feed cannot be selected, but its menu edits it,
+        // with its source as the web app set it.
+        QQuickItem *tech = sourceRow(loaded.window, "view", "tech");
+        QVERIFY(tech);
+        QTest::mouseClick(loaded.window, Qt::RightButton, {},
+                          tech->mapToScene(QPointF(tech->width() / 2, tech->height() / 2)).toPoint());
+        QObject *menu = find("viewMenu");
+        QVERIFY(menu);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QCOMPARE(backend.sourceKind(), QString("all"));
+        QVERIFY(QMetaObject::invokeMethod(find("viewMenuEdit"), "triggered"));
+        QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QCOMPARE(name->property("text").toString(), QString("Tech"));
+        QObject *fixed = find("viewFixedSource");
+        QVERIFY(fixed);
+        QCOMPARE(fixed->property("text").toString(), QString("Feed (set on the web)"));
+        QCOMPARE(fixed->property("textFormat").toInt(), int(Qt::PlainText));
+        name->setProperty("text", "Tech news");
+        QVERIFY(QMetaObject::invokeMethod(find("viewSave"), "clicked"));
+        QTRY_COMPARE(backend.status(), QString("Saved the view Tech news"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QCOMPARE(backend.savedViews().first().view.value("source").toObject(),
+                 (QJsonObject{{"kind", "feed"}, {"feedId", "clx"}}));
+
+        // A save the worker refuses, as for a view a pull changed while the
+        // dialog was open, leaves the dialog open with why and what was
+        // typed; once filled in again, it saves and closes.
+        backend.selectSource(backend.sources()->rowOfView(id));
+        QCOMPARE(backend.selectedViewId(), id);
+        QTest::keyClick(loaded.window, Qt::Key_F2);
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        name->setProperty("text", "Typed");
+        {
+            Store store;
+            QVERIFY(store.open());
+            QList<SavedView> views = store.savedViews();
+            const qsizetype at = SavedViews::indexOf(views, id);
+            QVERIFY(at >= 0);
+            views[at].view.insert("name", "Pulled");
+            QVERIFY(store.transaction([&] { return store.replaceSavedViews(views); }));
+        }
+        backend.selectArticle(0);
+        QTRY_COMPARE(backend.sourceTitle(), QString("Pulled"));
+        QVERIFY(QMetaObject::invokeMethod(find("viewSave"), "clicked"));
+        QTRY_COMPARE(find("viewProblem")->property("text").toString(),
+                     QString("Cannot save the view: The view changed; try again"));
+        QVERIFY(dialog->property("visible").toBool());
+        QCOMPARE(name->property("text").toString(), QString("Typed"));
+        QVERIFY(find("viewSave")->property("enabled").toBool());
+        QVERIFY(name->isEnabled());
+        QVERIFY(find("viewCancel")->property("enabled").toBool());
+        QCOMPARE(backend.sourceTitle(), QString("Pulled"));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "edit", Q_ARG(QVariant, id)));
+        QCOMPARE(name->property("text").toString(), QString("Pulled"));
+        QCOMPARE(find("viewProblem")->property("text").toString(), QString());
+        name->setProperty("text", "Typed");
+        QVERIFY(QMetaObject::invokeMethod(find("viewSave"), "clicked"));
+        // While it is written, the form is held as it was sent: it cannot
+        // be changed, closed, or loaded again.
+        QVERIFY(dialog->property("saving").toBool());
+        QVERIFY(!name->isEnabled());
+        QVERIFY(!qobject_cast<QQuickItem *>(find("viewExclude"))->isEnabled());
+        QVERIFY(!find("viewSave")->property("enabled").toBool());
+        QVERIFY(!find("viewCancel")->property("enabled").toBool());
+        QCOMPARE(dialog->property("closePolicy").toInt(), 0);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "edit", Q_ARG(QVariant, id)));
+        QCOMPARE(name->property("text").toString(), QString("Typed"));
+        QVERIFY(dialog->property("saving").toBool());
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QCOMPARE(backend.sourceTitle(), QString("Typed"));
+        QVERIFY(!dialog->property("saving").toBool());
+    }
+
+    // `readstr views add|edit|delete|move` change the views as the window
+    // does, marked to publish, and refuse what the web app would not take.
+    void cliEditsSavedViews()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedLibrary();
+        seedSyncAccount();
+        seedViews({savedView("web", {{"name", "Web"},
+                                     {"source", QJsonObject{{"kind", "feed"}, {"feedId", "clx"}}},
+                                     {"future", 1}})});
+        QString out, err;
+        QCOMPARE(run({"views", "add", "Firsts", "--read", "unread", "--include", "newest, oldest", "--mute", "oldest"},
+                     out, err),
+                 0);
+        QVERIFY2(err.isEmpty(), qPrintable(err));
+        QVERIFY2(out.startsWith("Created view ") && out.endsWith("  Firsts\n"), qPrintable(out));
+        Store store;
+        QVERIFY(store.open());
+        QCOMPARE(store.syncAccount().publishPending, publishBit(Sync::viewsKind) | viewsEditedBit);
+        const QString id = store.savedViews().at(1).id;
+        out.clear();
+        QCOMPARE(run({"articles", "--view", id}, out, err), 0);
+        QVERIFY2(out.contains("Newest") && !out.contains("Oldest"), qPrintable(out));
+
+        QCOMPARE(run({"views", "edit", id, "--name", "Starred old", "--source", "starred", "--sort", "oldest"}, out, err),
+                 0);
+        QCOMPARE(store.savedViews().at(1).view.value("source").toObject(), (QJsonObject{{"kind", "favorites"}}));
+        QCOMPARE(store.savedViews().at(1).exclude, QStringList{"oldest"});
+        QCOMPARE(run({"views", "edit", "web", "--name", "Web here"}, out, err), 0);
+        QCOMPARE(store.savedViews().at(0).view.value("future").toInt(), 1);
+        QCOMPARE(store.savedViews().at(0).view.value("source").toObject().value("feedId").toString(), QString("clx"));
+        err.clear();
+        QCOMPARE(run({"views", "edit", "web", "--source", "all"}, out, err), 1);
+        QVERIFY2(err.contains("This view's source is set in the web app"), qPrintable(err));
+        // Tags on a view that lists something else would be dropped unsaid.
+        err.clear();
+        QCOMPARE(run({"views", "edit", id, "--tags", "news"}, out, err), 1);
+        QVERIFY2(err.contains("--tags needs a view of tags"), qPrintable(err));
+        QCOMPARE(store.savedViews().at(1).view.value("source").toObject(), (QJsonObject{{"kind", "favorites"}}));
+        err.clear();
+        QCOMPARE(run({"views", "add", "Bad", "--read", "starred"}, out, err), 1);
+        QVERIFY2(err.contains("A view lists all, unread, or read articles"), qPrintable(err));
+        QCOMPARE(run({"views", "edit", "nope"}, out, err), 1);
+
+        QCOMPARE(run({"views", "move", id, "up"}, out, err), 0);
+        QCOMPARE(store.savedViews().at(0).id, id);
+        QCOMPARE(run({"views", "move", id, "sideways"}, out, err), 1);
+        QCOMPARE(run({"views", "delete", "web"}, out, err), 0);
+        QCOMPARE(store.savedViews().size(), 1);
+        err.clear();
+        QCOMPARE(run({"views", "delete", "web"}, out, err), 1);
+        QVERIFY2(err.contains("The view is gone"), qPrintable(err));
+
+        // Another npub takes them only with --drop-views.
+        const QString other = Nip19::npub(QString(64, 'b'));
+        err.clear();
+        QCOMPARE(run({"sync", "login", other}, out, err), 1);
+        QVERIFY2(err.contains("--drop-views"), qPrintable(err));
+        QCOMPARE(store.syncAccount().pubkey, syncPubkey());
+        QCOMPARE(store.savedViews().size(), 1);
+        QCOMPARE(run({"sync", "logout", "--drop-views"}, out, err), 1);
+        QCOMPARE(run({"sync", "login", other, "--drop-views"}, out, err), 0);
+        QCOMPARE(store.syncAccount().pubkey, QString(64, 'b'));
+        QVERIFY(store.savedViews().isEmpty());
+    }
+
     void syncShowsOnlySafeColorsAndIcons()
     {
         QCOMPARE(Sync::safeColor("#3B82F6"), QString("#3b82f6"));
@@ -8776,11 +10382,11 @@ private slots:
             QVERIFY(store.addFeed("https://a.example.com/feed", "A", "News"));
         }
         for (const char *statement : {"ALTER TABLE feeds DROP COLUMN tags", "ALTER TABLE categories DROP COLUMN color",
-                                      "ALTER TABLE categories DROP COLUMN icon", "PRAGMA user_version = 9"})
+                                      "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner", "PRAGMA user_version = 9"})
             QCOMPARE(rawExec(path, statement), QString());
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 10);
+        QCOMPARE(store.schemaVersion(), 11);
         QList<Feed> feeds = store.feeds();
         QCOMPARE(feeds.size(), 1);
         const qint64 id = feeds.first().id;
@@ -10120,7 +11726,10 @@ private slots:
         QCOMPARE(backend.nextAutoRefreshMs(), -1);
         backend.startAutoRefresh();
         const int next = backend.nextAutoRefreshMs();
-        QVERIFY2(next > 26 * 60 * 1000 && next <= 33 * 60 * 1000, qPrintable(QString::number(next)));
+        // The timer is a Qt::CoarseTimer, which for an interval this long
+        // Qt rounds to the nearest whole second, so the time it says is left
+        // can be up to half a second past the longest delay.
+        QVERIFY2(next > 26 * 60 * 1000 && next <= 33 * 60 * 1000 + 1000, qPrintable(QString::number(next)));
     }
 
     void backendImportsAndExportsOpml()
@@ -13334,7 +14943,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 10);
+        QCOMPARE(store.schemaVersion(), 11);
         QCOMPARE(store.articles({}).first().title, QString("Old"));
         QVERIFY(store.articles({}).first().starred);
         const SyncAccount none = store.syncAccount();
@@ -14756,7 +16365,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 10);
+        QCOMPARE(store.schemaVersion(), 11);
         QList<Article> articles = store.articles({});
         QCOMPARE(articles.size(), 1);
         QCOMPARE(articles.first().title, QString("Old"));
@@ -14819,7 +16428,7 @@ private slots:
         }
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
-        QCOMPARE(store.schemaVersion(), 10);
+        QCOMPARE(store.schemaVersion(), 11);
         const QList<Feed> feeds = store.feeds();
         QCOMPARE(feeds.size(), 2);
         for (const Feed &feed : feeds) {
@@ -15129,7 +16738,7 @@ private slots:
         {
             Store store;
             QVERIFY2(store.open(path), qPrintable(store.lastError()));
-            QCOMPARE(store.schemaVersion(), 10);
+            QCOMPARE(store.schemaVersion(), 11);
             const QList<Feed> feeds = store.feeds();
             QCOMPARE(feeds.size(), 1);
             QCOMPARE(feeds.first().title, QString("Ada"));
