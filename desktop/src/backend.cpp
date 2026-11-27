@@ -3524,19 +3524,23 @@ void Backend::changeViews(std::function<QString(QList<SavedView> &)> change, con
             return SavedViews::save(store, change, problem.get(), pubkey);
         },
         failure,
-        [this, failure, finished, problem, failed](const WriteResult &result) {
+        [this, failure, finished, problem, failed, pubkey](const WriteResult &result) {
             QString why;
             if (!result.error.isEmpty())
                 why = failure.arg(result.error);
             else if (!problem->isEmpty())
                 why = failure.arg(*problem);
-            // Skipped as the account changed (reloadSyncAccount()), which
-            // shows the status of its own.
+            // Skipped as reloadSyncAccount() forgot the command, the account
+            // having changed before the worker reached the write.
             else if (result.skipped)
                 why = failure.arg(SavedViews::accountChanged());
             else
                 schedulePublish(Sync::viewsKind);
-            if (!result.error.isEmpty() || !problem->isEmpty())
+            // reloadSyncAccount() says nothing of the command it forgot, so
+            // the skip is shown here. A write skipped only because an earlier
+            // one of its command failed stays quiet, as that failure was shown.
+            if (!result.error.isEmpty() || !problem->isEmpty()
+                || (result.skipped && pubkey != m_syncAccount.pubkey))
                 setStatus(why, true);
             // The account was set apart from this window, as by `readstr
             // sync login`, so the next change is worked out under it.

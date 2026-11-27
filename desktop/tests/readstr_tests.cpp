@@ -8958,10 +8958,12 @@ private slots:
         const auto unhook = qScopeGuard([] { Sync::draftsHook = nullptr; });
         const Sync::Drafts drafts =
             Sync::drafts(store, syncPubkey(), {Sync::viewsKind}, {}, QDateTime::currentSecsSinceEpoch());
-        login.join();
-        QVERIFY(hooked);
-        QVERIFY(ok);
+        // Checked before the join: a draft that failed before the hook
+        // never started the login, which join() would throw on.
         QVERIFY2(drafts.error.isEmpty(), qPrintable(drafts.error));
+        QVERIFY(hooked);
+        login.join();
+        QVERIFY(ok);
         QCOMPARE(drafts.events.size(), 1);
         const auto views = Sync::parseViews(drafts.events.first().content);
         QVERIFY(views);
@@ -9671,6 +9673,59 @@ private slots:
         QVERIFY(!(store.syncAccount().publishPending & viewsEditedBit));
     }
 
+    // An undo queued on the worker behind another write, and so reached
+    // only once the window has switched accounts and forgotten it, is
+    // skipped, and the window still says why.
+    void backendSaysWhyAViewUndoReachedAfterAnotherAccountIsSkipped()
+    {
+        QTemporaryDir dir;
+        FakeRelay relay;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        seedSyncAccount();
+        seedLibrary();
+        seedViews({savedView("web", {{"order", 0}})});
+        // The pass of a filter rule added after the login holds the worker
+        // until the window has the account, so the undos asked for
+        // meanwhile, of the rule and then of the delete, are reached only
+        // after it forgot the delete.
+        QSemaphore reached, go;
+        std::atomic<bool> armed{false};
+        Store::filterWriteHook = [&] {
+            if (!armed.exchange(false))
+                return;
+            reached.release();
+            go.tryAcquire(1, 60000);
+        };
+        const auto unhook = qScopeGuard([] { Store::filterWriteHook = nullptr; });
+        Backend backend;
+        // Even when a check fails, the worker goes on and is joined.
+        const auto release = qScopeGuard([&go] { go.release(); });
+        backend.setRelays({relay.url()});
+        QStringList statuses;
+        connect(&backend, &Backend::statusChanged, &backend, [&] { statuses << backend.status(); });
+        backend.deleteView("web");
+        QTRY_COMPARE(backend.status(), QString("Deleted the view web"));
+        const QString other = Nip19::npub(QString(64, 'd'));
+        QVERIFY(!backend.syncNpubDropsViews(other));
+
+        armed = true;
+        QVERIFY(backend.setSyncNpub(other));
+        QVERIFY(backend.saveFilterRule(-1, {{"pattern", "oldest"}, {"target", "title"}, {"type", "contains"},
+                                            {"action", "hide"}}));
+        QVERIFY(reached.tryAcquire(1, 60000));
+        backend.undo();
+        backend.undo();
+        QTRY_COMPARE(backend.syncNpub(), other);
+        go.release();
+        QTRY_VERIFY(statuses.contains("Cannot undo: the sync account changed"));
+        QVERIFY(!backend.canUndo());
+        Store store;
+        QVERIFY(store.open());
+        QVERIFY(store.savedViews().isEmpty());
+        QVERIFY(!(store.syncAccount().publishPending & viewsEditedBit));
+    }
+
     // A pull that not every relay answered may have missed a newer list
     // from the web app, so views edited here wait, and the window says why.
     void backendHoldsEditedViewsAfterAnUnsettledPull()
@@ -9949,14 +10004,28 @@ private slots:
         QVERIFY(dialog->property("visible").toBool());
         QCOMPARE(name->property("text").toString(), QString("Typed"));
         QVERIFY(find("viewSave")->property("enabled").toBool());
+        QVERIFY(name->isEnabled());
+        QVERIFY(find("viewCancel")->property("enabled").toBool());
         QCOMPARE(backend.sourceTitle(), QString("Pulled"));
         QVERIFY(QMetaObject::invokeMethod(dialog, "edit", Q_ARG(QVariant, id)));
         QCOMPARE(name->property("text").toString(), QString("Pulled"));
         QCOMPARE(find("viewProblem")->property("text").toString(), QString());
         name->setProperty("text", "Typed");
         QVERIFY(QMetaObject::invokeMethod(find("viewSave"), "clicked"));
+        // While it is written, the form is held as it was sent: it cannot
+        // be changed, closed, or loaded again.
+        QVERIFY(dialog->property("saving").toBool());
+        QVERIFY(!name->isEnabled());
+        QVERIFY(!qobject_cast<QQuickItem *>(find("viewExclude"))->isEnabled());
+        QVERIFY(!find("viewSave")->property("enabled").toBool());
+        QVERIFY(!find("viewCancel")->property("enabled").toBool());
+        QCOMPARE(dialog->property("closePolicy").toInt(), 0);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "edit", Q_ARG(QVariant, id)));
+        QCOMPARE(name->property("text").toString(), QString("Typed"));
+        QVERIFY(dialog->property("saving").toBool());
         QTRY_VERIFY(!dialog->property("visible").toBool());
         QCOMPARE(backend.sourceTitle(), QString("Typed"));
+        QVERIFY(!dialog->property("saving").toBool());
     }
 
     // `readstr views add|edit|delete|move` change the views as the window
@@ -11657,9 +11726,10 @@ private slots:
         QCOMPARE(backend.nextAutoRefreshMs(), -1);
         backend.startAutoRefresh();
         const int next = backend.nextAutoRefreshMs();
-        // The timer is a Qt::CoarseTimer, which Qt may fire up to 5% late,
-        // so the time it says is left can be past the longest delay.
-        QVERIFY2(next > 26 * 60 * 1000 && next <= 33 * 60 * 1000 * 105 / 100, qPrintable(QString::number(next)));
+        // The timer is a Qt::CoarseTimer, which for an interval this long
+        // Qt rounds to the nearest whole second, so the time it says is left
+        // can be up to half a second past the longest delay.
+        QVERIFY2(next > 26 * 60 * 1000 && next <= 33 * 60 * 1000 + 1000, qPrintable(QString::number(next)));
     }
 
     void backendImportsAndExportsOpml()

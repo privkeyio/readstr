@@ -29,6 +29,9 @@ Dialog {
     property string base: ""
     // A save is being written: the dialog waits for it, and closes only
     // once it is saved, so a refused or failed one keeps what was typed.
+    // Meanwhile the form cannot be changed, as the save holds what it was
+    // when sent, nor closed or loaded again, as the result that comes back
+    // belongs to this form.
     property bool saving: false
     // Why the last save was not written, until the form changes.
     property string saveError: ""
@@ -70,7 +73,7 @@ Dialog {
     // Opens on `form` (Backend::viewForm()) for the view `id`, or for a new
     // view when `id` is "".
     function load(id, values) {
-        if (!values || values.name === undefined)
+        if (saving || !values || values.name === undefined)
             return
         viewId = id
         attempted = false
@@ -122,10 +125,13 @@ Dialog {
         enabled: dialog.saving
         function onViewSaved(ok, why) {
             dialog.saving = false
-            if (ok)
+            if (ok) {
                 dialog.close()
-            else
+            } else {
                 dialog.saveError = why
+                // The form had the focus taken away while it was disabled.
+                nameField.forceActiveFocus()
+            }
         }
     }
 
@@ -135,6 +141,7 @@ Dialog {
     // The form scrolls in a window too short for it.
     height: Math.min(implicitHeight, parent.height - 32)
     modal: true
+    closePolicy: saving ? Popup.NoAutoClose : Popup.CloseOnEscape | Popup.CloseOnPressOutside
     title: viewId === "" ? qsTr("New view") : qsTr("Edit view")
     Material.roundedScale: theme.radius
 
@@ -210,6 +217,7 @@ Dialog {
             id: fields
             width: scroller.width
             spacing: 6
+            enabled: !dialog.saving
 
             // Room for the floating label of the name, which the scrolled
             // area would clip.
@@ -407,7 +415,9 @@ Dialog {
     footer: DialogButtonBox {
         background: null
         Button {
+            objectName: "viewCancel"
             text: qsTr("Cancel")
+            enabled: !dialog.saving
             flat: true
             focusPolicy: Qt.NoFocus
             Material.roundedScale: theme.radius
