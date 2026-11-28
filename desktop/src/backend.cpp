@@ -547,6 +547,7 @@ void Backend::selectSource(int row) {
     if (!m_sources.isSelectable(row))
         return;
     m_sourceIndex = row;
+    ++m_sourceSelections;
     m_article = Article{};
     renderArticle();
     emit sourceChanged();
@@ -3679,6 +3680,7 @@ int Backend::renameCategory(const QString &from, const QString &to) {
     const QString name = to.trimmed();
     const QString shown = FeedParser::cleanText(from);
     const bool selected = selectedCategory() == from;
+    const quint64 selection = m_sourceSelections;
     return organize(
         [shown, name](const OrganizeChange &change) {
             return change.merged ? tr("merged the category %1 into %2").arg(shown, name)
@@ -3688,11 +3690,13 @@ int Backend::renameCategory(const QString &from, const QString &to) {
             return store.renameCategory(from, name, change, pubkey);
         },
         failure,
-        [this, shown, name, selected](const OrganizeChange &change) {
+        [this, shown, name, selected, selection](const OrganizeChange &change) {
             setStatus(change.merged ? tr("Merged the category %1 into %2").arg(shown, name)
                                     : tr("Renamed the category %1 to %2").arg(shown, name));
-            // The category selected goes on being, under its new name.
-            if (const int row = m_sources.rowOfCategory(name); selected && m_sources.isSelectable(row))
+            // The category selected goes on being, under its new name,
+            // unless the user has picked another source since.
+            if (const int row = m_sources.rowOfCategory(name);
+                selected && selection == m_sourceSelections && m_sources.isSelectable(row))
                 selectSource(row);
         });
 }
@@ -3765,14 +3769,16 @@ int Backend::renameTag(const QString &name, const QString &to) {
         return refuseOrganize(failure, why);
     const QString tag = to.trimmed();
     const bool selected = selectedTag() == name;
+    const quint64 selection = m_sourceSelections;
     return organize([name, tag](const OrganizeChange &) { return tr("renamed the tag %1 to %2").arg(name, tag); },
              [name, tag](Store &store, OrganizeChange *change, const QString &pubkey) {
                  return store.renameTag(name, tag, change, pubkey);
              },
              failure,
-             [this, name, tag, selected](const OrganizeChange &) {
+             [this, name, tag, selected, selection](const OrganizeChange &) {
                  setStatus(tr("Renamed the tag %1 to %2").arg(name, tag));
-                 if (const int row = m_sources.rowOfTag(Sync::tagName(tag)); selected && m_sources.isSelectable(row))
+                 if (const int row = m_sources.rowOfTag(Sync::tagName(tag));
+                     selected && selection == m_sourceSelections && m_sources.isSelectable(row))
                      selectSource(row);
              });
 }

@@ -890,6 +890,9 @@ private:
     QHash<qint64, QStringList> m_feedTags;
     int m_feedCount = 0;
     int m_sourceIndex = 0;
+    // Counts the sources selected (selectSource()), so a rename that ends
+    // after the user picked another follows its source only if not.
+    quint64 m_sourceSelections = 0;
     QString m_searchQuery;
     int m_articleIndex = -1;
     Article m_article;

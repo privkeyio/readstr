@@ -1237,6 +1237,10 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
     // Feeds listed, and local feeds kept off the list.
     QSet<QString> listed, kept;
     QStringList deleted;
+    // The styles changed here, by cleaned name, which the entries carried
+    // below of the same category take too, so that stylesByName() finds no
+    // other once the list is back.
+    QHash<QString, QJsonObject> editedStyles;
     if (tooLong)
         *tooLong = 0;
     for (const Feed &feed : feeds) {
@@ -1284,6 +1288,15 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
             }
         }
         const QString name = cappedName(feed.category);
+        QJsonObject editedStyle;
+        if (feed.styleEdit) {
+            if (!feed.categoryColor.isEmpty())
+                editedStyle.insert("color", feed.categoryColor);
+            if (!feed.categoryIcon.isEmpty())
+                editedStyle.insert("icon", feed.categoryIcon);
+            if (const QString cleaned = FeedParser::cleanText(name); !cleaned.isEmpty())
+                editedStyles.insert(cleaned, editedStyle);
+        }
         if (name.isEmpty() || categories.size() >= maxFeeds)
             continue;
         // The category as the last list names it, so the publish neither
@@ -1304,11 +1317,7 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
         // merged here, it keeps the style it had, or takes the one it
         // joined.
         if (feed.styleEdit) {
-            category = QJsonObject();
-            if (!feed.categoryColor.isEmpty())
-                category.insert("color", feed.categoryColor);
-            if (!feed.categoryIcon.isEmpty())
-                category.insert("icon", feed.categoryIcon);
+            category = editedStyle;
         } else if (web.isEmpty() && !remoteListed && tagEntry == tagEntryOf.cend()) {
             // A category the list names nowhere keeps the style it has here
             // for a feed the list neither lists nor has tags for, as its
@@ -1349,8 +1358,19 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
         Carried item{entry, author, QJsonValue::Undefined, QJsonValue::Undefined};
         if (const auto fitting = tagsFitting(remoteTags.value(entry)); fitting && !fitting->isEmpty())
             item.tags = *fitting;
-        if (remoteCategories.value(entry).isObject())
-            item.category = remoteCategories.value(entry);
+        if (const QJsonValue value = remoteCategories.value(entry); value.isObject()) {
+            QJsonObject category = value.toObject();
+            const auto edited = isString(category.value("name"), 256)
+                ? editedStyles.constFind(FeedParser::cleanText(category.value("name").toString()))
+                : editedStyles.cend();
+            if (edited != editedStyles.cend()) {
+                category.remove("color");
+                category.remove("icon");
+                for (auto it = edited->begin(); it != edited->end(); ++it)
+                    category.insert(it.key(), it.value());
+            }
+            item.category = category;
+        }
         carried << item;
     };
     for (const QJsonValue &entry : list.value("rss").toArray())

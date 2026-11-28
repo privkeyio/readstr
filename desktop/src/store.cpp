@@ -943,8 +943,8 @@ bool Store::removeFeed(qint64 id, FeedSnapshot *snapshot, qsizetype maxBytes, in
         }
         query.finish();
         // Read under the same write as the tags and the style, so they are
-        // known to be that account's.
-        if (!query.exec(QStringLiteral("SELECT pubkey FROM sync_account WHERE id = 1")))
+        // known to be that owner's, signed out too.
+        if (!query.exec(QStringLiteral("SELECT pubkey FROM subscriptions_owner WHERE id = 1")))
             return fail(query.lastError().text());
         if (query.next())
             taken.account = query.value(0).toString();
@@ -1018,11 +1018,11 @@ bool Store::restoreFeed(const FeedSnapshot &snapshot, bool *lasting) {
         const qint64 category = categoryId(snapshot.category);
         if (category < 0)
             return false;
-        // The tags and the style came from the lists of the account synced
-        // when the feed went. Under another, a publish would carry them on
-        // into its list (Sync::subscriptionsContent()), as setSyncAccount()
-        // clears them to prevent.
-        if (!query.exec(QStringLiteral("SELECT pubkey FROM sync_account WHERE id = 1")))
+        // The tags and the style came from the lists of the owner of the
+        // metadata when the feed went. Under another, a publish would carry
+        // them on into its list (Sync::subscriptionsContent()), as
+        // setSyncAccount() clears them to prevent.
+        if (!query.exec(QStringLiteral("SELECT pubkey FROM subscriptions_owner WHERE id = 1")))
             return fail(query.lastError().text());
         const bool sameAccount = (query.next() ? query.value(0).toString() : QString()) == snapshot.account;
         query.finish();

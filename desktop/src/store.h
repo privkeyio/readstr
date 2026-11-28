@@ -101,8 +101,9 @@ struct ReadChange {
 struct FeedSnapshot {
     qint64 id = 0;
     QString category;
-    // The category's color and icon, and the pubkey of the sync account
-    // then, empty for none, as both came from that account's lists.
+    // The category's color and icon, and the pubkey of the owner of the
+    // tags and styles then (subscriptions_owner), empty for none, as both
+    // came from that account's lists.
     QString categoryColor;
     QString categoryIcon;
     QString account;
