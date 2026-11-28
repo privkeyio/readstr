@@ -11,7 +11,8 @@
 // then the feeds, those without a category first and then each category
 // under its own heading, by name, with its color and icon. Counts are unread
 // articles, except Starred's; views have none. A tag lists the articles of
-// the feeds that carry it, in any spelling that shows the same.
+// the feeds that carry it, in any spelling that shows the same, and a
+// category's heading those of its feeds.
 class SourceModel : public QAbstractListModel {
     Q_OBJECT
     Q_PROPERTY(int count READ count NOTIFY countChanged)
@@ -29,6 +30,9 @@ public:
         qint64 feedId = 0;
         QString title;
         QString url;
+        // A feed's category, cleaned to show; a category heading's name as
+        // the library keeps it, empty for the heading of the feeds without
+        // one, which is the only one that cannot be selected.
         QString category;
         QString lastError;
         int count = 0;
@@ -51,8 +55,9 @@ public:
         QString tag = {};
         QStringList tags = {};
         QString color = {};
-        // A tag row's feeds, by id, sorted, so a selected tag whose feeds
-        // change lists theirs, whether or not its spellings change too.
+        // A tag row's feeds, or a category heading's, by id, sorted, so a
+        // selected tag or category whose feeds change lists theirs, whether
+        // or not its spellings change too.
         QList<qint64> feedIds = {};
         // Same place in the list: a reload that keeps every row's identity
         // updates rows in place instead of resetting the view.
@@ -94,6 +99,8 @@ public:
     int rowOfView(const QString &viewId) const;
     // The row of the tag that shows as `name`.
     int rowOfTag(const QString &name) const;
+    // The heading of the category the library names `name`.
+    int rowOfCategory(const QString &name) const;
     // The row of the source `row` describes, or -1 when it is gone or can no
     // longer be selected.
     int rowOf(const Row &row) const;

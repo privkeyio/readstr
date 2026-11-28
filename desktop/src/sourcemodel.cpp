@@ -10,31 +10,7 @@
 #include "library.h"
 #include "nip19.h"
 #include "savedviews.h"
-
-namespace {
-// A tag as the sources pane names it: cleaned like a category's name, and
-// without the invisible format characters (zero-width spaces, byte order
-// marks, soft hyphens) that would make two different tags look the same,
-// save the zero-width joiner and the tag characters that emoji are built
-// from. The tags themselves are kept as the web app stored them, since a
-// saved view of tags matches them exactly.
-QString tagName(const QString &tag) {
-    const QString cleaned = FeedParser::cleanText(tag);
-    QString name;
-    name.reserve(cleaned.size());
-    for (qsizetype i = 0; i < cleaned.size();) {
-        const bool pair =
-            cleaned.at(i).isHighSurrogate() && i + 1 < cleaned.size() && cleaned.at(i + 1).isLowSurrogate();
-        const char32_t code = pair ? QChar::surrogateToUcs4(cleaned.at(i), cleaned.at(i + 1)) : cleaned.at(i).unicode();
-        const qsizetype length = pair ? 2 : 1;
-        if (QChar::category(code) != QChar::Other_Format || code == 0x200D || (code >= 0xE0020 && code <= 0xE007F))
-            name += QStringView(cleaned).mid(i, length);
-        i += length;
-    }
-    // A space each side of what was taken out is one space.
-    return name.simplified();
-}
-}
+#include "sync.h"
 
 SourceModel::SourceModel(QObject *parent) : QAbstractListModel(parent) {
     setLibrary({}, {});
@@ -129,7 +105,7 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
             byCategory[feed.category] << feed;
         QSet<QString> names;
         for (const QString &tag : feed.tags) {
-            const QString name = tagName(tag);
+            const QString name = Sync::tagName(tag);
             if (name.isEmpty())
                 continue;
             TagFeeds &entry = byTag[name];
@@ -215,8 +191,12 @@ void SourceModel::setLibrary(const QList<Feed> &feeds, const LibraryCounts &coun
         int unread = 0;
         for (const Feed &feed : members)
             unread += feed.unread;
-        const QString name = FeedParser::cleanText(category);
-        Row heading{Kind::Category, 0, name, {}, name, {}, unread};
+        // Shown cleaned, and known by the name the library keeps, which
+        // selects its articles and names it to rename or delete it.
+        Row heading{Kind::Category, 0, FeedParser::cleanText(category), {}, category, {}, unread};
+        for (const Feed &feed : members)
+            heading.feedIds << feed.id;
+        std::sort(heading.feedIds.begin(), heading.feedIds.end());
         // Every feed of a category has the category's own style.
         heading.icon = members.first().categoryIcon;
         heading.color = members.first().categoryColor;
@@ -252,8 +232,10 @@ bool SourceModel::isSelectable(int index) const {
     if (index < 0 || index >= m_rows.size())
         return false;
     const Row &row = m_rows.at(index);
-    return row.kind != Kind::Category && row.kind != Kind::ViewHeading && row.kind != Kind::TagHeading
-           && !row.unknownSource;
+    // The heading of the feeds without a category is no category to list.
+    if (row.kind == Kind::Category)
+        return !row.category.isEmpty();
+    return row.kind != Kind::ViewHeading && row.kind != Kind::TagHeading && !row.unknownSource;
 }
 
 int SourceModel::rowOf(Kind kind, qint64 feedId) const {
@@ -277,12 +259,21 @@ int SourceModel::rowOfTag(const QString &name) const {
     return -1;
 }
 
+int SourceModel::rowOfCategory(const QString &name) const {
+    for (qsizetype i = 0; i < m_rows.size(); ++i)
+        if (m_rows.at(i).kind == Kind::Category && m_rows.at(i).category == name)
+            return int(i);
+    return -1;
+}
+
 int SourceModel::rowOf(const Row &row) const {
     int found = -1;
     if (row.kind == Kind::View)
         found = rowOfView(row.viewId);
     else if (row.kind == Kind::Tag)
         found = rowOfTag(row.tag);
+    else if (row.kind == Kind::Category)
+        found = rowOfCategory(row.category);
     else
         found = rowOf(row.kind, row.feedId);
     // A view selected until its source turned to one that cannot list here

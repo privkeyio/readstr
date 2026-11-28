@@ -60,6 +60,13 @@ class Backend : public QObject {
     Q_PROPERTY(qint64 selectedFeedId READ selectedFeedId NOTIFY sourceChanged)
     // The selected saved view's id, empty when the source is not one.
     Q_PROPERTY(QString selectedViewId READ selectedViewId NOTIFY sourceChanged)
+    // The selected category's name as the library keeps it, and the
+    // selected tag's as it shows (Sync::tagName()), empty when the source is
+    // not one.
+    Q_PROPERTY(QString selectedCategory READ selectedCategory NOTIFY sourceChanged)
+    Q_PROPERTY(QString selectedTag READ selectedTag NOTIFY sourceChanged)
+    // The longest name a category made here can have.
+    Q_PROPERTY(int maxCategoryNameLength READ maxCategoryNameLength CONSTANT)
     // Whether the selected view's keywords were looked for in no more than
     // its first maxViewScanned articles, which left some unread for them.
     Q_PROPERTY(bool viewScanCapped READ viewScanCapped NOTIFY viewScanCappedChanged)
@@ -216,6 +223,9 @@ public:
     QString sourceTitle() const;
     qint64 selectedFeedId() const;
     QString selectedViewId() const;
+    QString selectedCategory() const;
+    QString selectedTag() const;
+    static int maxCategoryNameLength() { return Sync::maxCategoryNameLength; }
     bool viewScanCapped() const { return m_viewScanCapped; }
     int viewScanLimit() const { return m_maxViewScanned; }
     // For the tests, which cannot list maxViewScanned articles quickly.
@@ -314,13 +324,16 @@ public:
     Q_INVOKABLE void refreshAll();
     Q_INVOKABLE void refreshFeed(qint64 feedId);
     // Syncs with the npub or nprofile `text` from now on and pulls at once;
-    // false, changing nothing, when it is neither. Saved views of another
-    // account (syncNpubDropsViews()) make it fail unless `dropViews`, which
-    // deletes them.
+    // false, changing nothing, when it is neither. Saved views, or category
+    // and tag changes not published yet, of another account
+    // (syncNpubDropsViews()) make it fail unless `dropViews`, which deletes
+    // them.
     Q_INVOKABLE bool setSyncNpub(const QString &text, bool dropViews = false);
     // Whether syncing with `text` would delete saved views pulled or edited
     // under another account, even one no longer set, with their mute words
-    // and edits not published yet, which the window asks about first.
+    // and edits not published yet, or changes to the categories and tags
+    // that account made here and has not published, which the window asks
+    // about first.
     Q_INVOKABLE bool syncNpubDropsViews(const QString &text);
     // Forgets the sync account and, with `removeKey`, then deletes its
     // signing key from the keyring, saying in the status bar if that fails.
@@ -416,6 +429,42 @@ public:
     // Selects the next view that can be selected, `step` 1, or the one
     // before, -1, round the list, or from outside them the first or last.
     Q_INVOKABLE void stepView(int step);
+    // The names of the categories the feeds are in, as the library keeps
+    // them, in the order the sources show them.
+    Q_INVOKABLE QStringList categoryNames() const;
+    // The feed's category, as the library keeps it, and its tags as a
+    // comma-separated list (Sync::formatTagList()), as the dialogs edit
+    // them; empty for none.
+    Q_INVOKABLE QString feedCategory(qint64 feedId);
+    Q_INVOKABLE QString feedTags(qint64 feedId) const;
+    // How many feeds are in the category, or carry the tag that shows as
+    // `name`.
+    Q_INVOKABLE int categoryFeedCount(const QString &name) const;
+    Q_INVOKABLE int tagFeedCount(const QString &name) const;
+    // Why `name` cannot be a category's name, a list of tags for the feed
+    // `feedId`, whose own tags it may keep as they are, or a tag's name
+    // (Sync::categoryNameProblem(), Sync::parseTagList(),
+    // Sync::tagProblem()), or empty when it can.
+    Q_INVOKABLE QString categoryProblem(const QString &name) const;
+    Q_INVOKABLE QString tagListProblem(const QString &list, qint64 feedId = 0) const;
+    Q_INVOKABLE QString tagProblem(const QString &name) const;
+    // Changes to the categories and tags (Store::renameCategory() and the
+    // like), each saved on the worker with the mark to publish the
+    // subscription list, which goes out with them, and undo() can undo it,
+    // only under the sync account set when it was asked for. Each returns
+    // the id of the request, and organizeSaved() tells the outcome of that
+    // request exactly once, always after the call returns, so the caller
+    // can tell its own answer from that of another request still out: a
+    // name or tags refused at once, changing nothing, are told with the
+    // next turn of the event loop, and a write once it is done.
+    Q_INVOKABLE int renameCategory(const QString &from, const QString &to);
+    Q_INVOKABLE int deleteCategory(const QString &name);
+    // Puts the feed in the category `name`, made if need be, or in none for
+    // an empty one. A name categoryNames() has is taken as it is, unchecked.
+    Q_INVOKABLE int setFeedCategory(qint64 feedId, const QString &name);
+    Q_INVOKABLE int setFeedTags(qint64 feedId, const QString &list);
+    Q_INVOKABLE int renameTag(const QString &name, const QString &to);
+    Q_INVOKABLE int deleteTag(const QString &name);
     // Refreshes now and then every autoRefreshMinutes, give or take 10%,
     // for as long as the window is open.
     Q_INVOKABLE void startAutoRefresh();
@@ -503,6 +552,10 @@ signals:
     // The write of a saveView() that returned true is done: `ok` when it
     // was saved, or else `problem` says why not.
     void viewSaved(bool ok, const QString &problem);
+    // The change to the categories or tags of the request `request` (as
+    // renameCategory() returned it) is done: `ok` when it was saved, or
+    // else `problem` says why not.
+    void organizeSaved(int request, bool ok, const QString &problem);
 
 private:
     // Runs `work` on the worker thread with its Store, then `done` with the
@@ -577,8 +630,11 @@ private:
         // restore can, which holds the history still until it is done.
         bool mayRetry = false;
         // Whether it changes the saved views, which belong to the sync
-        // account they were made under (reloadSyncAccount()).
+        // account they were made under (reloadSyncAccount()), or the tags
+        // and category styles, which belong to the account whose lists they
+        // came from.
         bool savedViews = false;
+        bool organization = false;
     };
     // Keeps the command of an action just asked for, which clears what
     // could be redone.
@@ -673,6 +729,20 @@ private:
                              std::function<void(const QString &)> failed = {});
     // The saved view `id`, or null when there is none.
     const SavedView *savedView(const QString &id) const;
+    // Changes the categories or tags on the worker through `work`, only
+    // while the sync account is the one set now, as an action undo() can
+    // undo, labelled with `label`, then publishes the subscription list and
+    // shows the change, says in the status bar what `done` makes of it, and
+    // tells organizeSaved(). `failure` says why it could not. Returns the
+    // request's id.
+    using Organize = std::function<bool(Store &, OrganizeChange *, const QString &pubkey)>;
+    int organize(std::function<QString(const OrganizeChange &)> label, Organize work, const QString &failure,
+                 std::function<void(const OrganizeChange &)> done);
+    // Tells organizeSaved(), once the caller has the id this returns, that
+    // a change was refused, `failure` filled in with `why`.
+    int refuseOrganize(const QString &failure, const QString &why);
+    void restoreOrganization(const std::shared_ptr<const OrganizeChange> &change, bool undo,
+                             const std::shared_ptr<UndoState> &state, const Finished &finished);
     void loadArticles();
     ArticleFilter currentFilter() const;
     void showArticle(const Article &article);
@@ -792,6 +862,8 @@ private:
 
     Store m_store;
     bool m_storeOpen = false;
+    // The id of the last request to change the categories or tags.
+    int m_organizeRequests = 0;
     std::unique_ptr<Fetcher> m_fetcher;
     std::unique_ptr<RelayPool> m_relays;
     // Its own pool, as the sync events are allowed to be far larger than
@@ -818,6 +890,9 @@ private:
     QHash<qint64, QStringList> m_feedTags;
     int m_feedCount = 0;
     int m_sourceIndex = 0;
+    // Counts the sources selected (selectSource()), so a rename that ends
+    // after the user picked another follows its source only if not.
+    quint64 m_sourceSelections = 0;
     QString m_searchQuery;
     int m_articleIndex = -1;
     Article m_article;

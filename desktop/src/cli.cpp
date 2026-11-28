@@ -3,6 +3,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMap>
 #include <QSet>
 #include <algorithm>
 
@@ -26,6 +27,14 @@ struct Command {
 void usage(QTextStream &stream) {
     stream << "Usage: readstr [open]\n"
               "       readstr feeds [--json]\n"
+              "       readstr feeds category ID NAME|--none [--json]\n"
+              "       readstr feeds tags ID LIST [--json]\n"
+              "       readstr categories [--json]\n"
+              "       readstr categories rename NAME NEW [--json]\n"
+              "       readstr categories delete NAME [--json]\n"
+              "       readstr tags [--json]\n"
+              "       readstr tags rename TAG NEW [--json]\n"
+              "       readstr tags delete TAG [--json]\n"
               "       readstr articles [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]\n"
               "       readstr search QUERY [--feed ID] [--view ID] [--unread] [--starred] [--limit N] [--json]\n"
               "       readstr views [--json]\n"
@@ -174,12 +183,17 @@ QJsonObject articleJson(const Article &article) {
             {"starred", article.starred}};
 }
 
+int organizeFeed(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err);
+
 int feeds(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
+    const QString action = arguments.value(0);
+    if (action == QLatin1String("category") || action == QLatin1String("tags"))
+        return organizeFeed(command, arguments, out, err);
     Options options;
     if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
         return 1;
     if (!options.positional.isEmpty())
-        return fail(command, "takes no arguments", err);
+        return fail(command, "takes no arguments, or category or tags", err);
     Store store;
     if (!openStore(command, store, err))
         return 1;
@@ -559,9 +573,17 @@ int sync(const QString &command, const QStringList &arguments, QTextStream &out,
         const std::optional<bool> others = store.savedViewsOfAnother(account->pubkey);
         if (!others)
             return fail(command, store.lastError(), err);
+        const std::optional<bool> otherEdits = store.subscriptionEditsOfAnother(account->pubkey);
+        if (!otherEdits)
+            return fail(command, store.lastError(), err);
         if (*others && !dropViews)
             return fail(command,
                         "the saved views here belong to another npub, and their mute words and edits not "
+                        "published yet would be lost; add --drop-views to remove them and sync with this one",
+                        err);
+        if (*otherEdits && !dropViews)
+            return fail(command,
+                        "the categories and tags here were changed under another npub, and those changes not "
                         "published yet would be lost; add --drop-views to remove them and sync with this one",
                         err);
         if (!store.setSyncAccount(account->npub, account->pubkey, account->relays, dropViews))
@@ -847,6 +869,212 @@ int views(const QString &command, const QStringList &arguments, QTextStream &out
     return 0;
 }
 
+// `feeds category ID NAME|--none` and `feeds tags ID LIST`, which change
+// one feed as the window's "Move to category…" and "Tags…" do. Each change
+// is saved with the mark to publish the subscription list in one
+// transaction (Store::setFeedCategory()), so the window publishes it when it
+// next starts, as a subscription changed here is.
+int organizeFeed(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
+    const QString action = arguments.value(0);
+    const bool category = action == QLatin1String("category");
+    Options options;
+    if (!parseOptions(command, arguments.mid(1), category ? QStringList{"--json", "--none"} : QStringList{"--json"}, {},
+                      options, err))
+        return 1;
+    const bool none = options.flags.contains("--none");
+    if (category && options.positional.size() != (none ? 1 : 2))
+        return fail(command, "category needs a feed id and a category name, or --none", err);
+    if (!category && options.positional.size() != 2)
+        return fail(command, "tags needs a feed id and a comma-separated list of tags (\"\" for none)", err);
+    qint64 id = 0;
+    if (!parseId(command, options.positional.first(), id, err))
+        return 1;
+    Store store;
+    if (!openStore(command, store, err))
+        return 1;
+    const QString value = options.positional.value(1);
+    if (!(category ? store.setFeedCategory(id, none ? QString() : value) : store.setFeedTagList(id, value)))
+        return fail(command, store.lastError(), err);
+    const std::optional<Feed> feed = store.feed(id);
+    if (!feed)
+        return fail(command, store.lastError(), err);
+    if (options.json)
+        printJson(feedJson(*feed), out);
+    else if (category && feed->category.isEmpty())
+        out << printable(feed->title) << " has no category\n";
+    else if (category)
+        out << printable(feed->title) << " is in " << printable(feed->category) << "\n";
+    else
+        out << "Tags of " << printable(feed->title) << ": " << printable(Sync::formatTagList(feed->tags)) << "\n";
+    return 0;
+}
+
+// `categories rename NAME NEW` and `delete NAME`, and `tags rename TAG NEW`
+// and `delete TAG`, as the window's menus have them, with what changed.
+int organize(const QString &command, const QString &action, const QStringList &arguments, QTextStream &out,
+             QTextStream &err) {
+    const bool tags = command == QLatin1String("tags"), rename = action == QLatin1String("rename");
+    Options options;
+    if (!parseOptions(command, arguments.mid(1), {"--json"}, {}, options, err))
+        return 1;
+    if (options.positional.size() != (rename ? 2 : 1))
+        return fail(command, rename ? QStringLiteral("rename needs a name and the new one")
+                                    : QStringLiteral("delete needs a name"),
+                    err);
+    const QString name = options.positional.at(0), to = options.positional.value(1).trimmed();
+    Store store;
+    if (!openStore(command, store, err))
+        return 1;
+    OrganizeChange change;
+    bool done = false;
+    if (tags && rename)
+        done = store.renameTag(name, to, &change);
+    else if (tags)
+        done = store.deleteTag(name, &change);
+    else if (rename)
+        done = store.renameCategory(name, to, &change);
+    else
+        done = store.deleteCategory(name, &change);
+    if (!done)
+        return fail(command, store.lastError(), err);
+    if (options.json) {
+        QJsonObject object = rename ? QJsonObject{{"from", name}, {"to", to}} : QJsonObject{{"name", name}};
+        object.insert("feeds", change.feeds);
+        if (!tags && rename)
+            object.insert("merged", change.merged);
+        printJson(object, out);
+    } else if (tags) {
+        out << (rename ? "Renamed the tag " + printable(name) + " to " + printable(to) : "Deleted the tag " + printable(name))
+            << " on " << change.feeds << " feeds\n";
+    } else if (rename) {
+        out << (change.merged ? "Merged the category " : "Renamed the category ") << printable(name)
+            << (change.merged ? " into " : " to ") << printable(to) << " (" << change.feeds << " feeds)\n";
+    } else {
+        out << "Deleted the category " << printable(name) << " (" << change.feeds << " feeds left without one)\n";
+    }
+    return 0;
+}
+
+// The categories the feeds are in, with their color, icon, and counts, by
+// name, or with `rename` or `delete`, changes one.
+int categories(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
+    const QString action = arguments.value(0);
+    if (action == QLatin1String("rename") || action == QLatin1String("delete"))
+        return organize(command, action, arguments, out, err);
+    Options options;
+    if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
+        return 1;
+    if (!options.positional.isEmpty())
+        return fail(command, "takes no arguments, or rename or delete", err);
+    Store store;
+    if (!openStore(command, store, err))
+        return 1;
+    const QList<Feed> list = store.feeds();
+    if (!store.lastError().isEmpty())
+        return fail(command, store.lastError(), err);
+    struct Category {
+        QString color, icon;
+        int feeds = 0, unread = 0;
+    };
+    QMap<QString, Category> byName;
+    for (const Feed &feed : list) {
+        if (feed.category.isEmpty())
+            continue;
+        Category &category = byName[feed.category];
+        category.color = feed.categoryColor;
+        category.icon = feed.categoryIcon;
+        ++category.feeds;
+        category.unread += feed.unread;
+    }
+    QStringList names = byName.keys();
+    std::sort(names.begin(), names.end(), [](const QString &a, const QString &b) {
+        const int order = a.compare(b, Qt::CaseInsensitive);
+        return order != 0 ? order < 0 : a < b;
+    });
+    QJsonArray array;
+    for (const QString &name : std::as_const(names)) {
+        const Category &category = byName[name];
+        if (options.json) {
+            array << QJsonObject{{"name", name},
+                                 {"color", nullable(category.color)},
+                                 {"icon", nullable(category.icon)},
+                                 {"feeds", category.feeds},
+                                 {"unread", category.unread}};
+            continue;
+        }
+        out << printable(name) << "  " << category.feeds << " feeds, " << category.unread << " unread";
+        if (!category.color.isEmpty())
+            out << "  " << category.color;
+        if (!category.icon.isEmpty())
+            out << "  " << printable(category.icon);
+        out << "\n";
+    }
+    if (options.json)
+        printJson(array, out);
+    return 0;
+}
+
+// The tags the feeds carry, each by the name it shows as (Sync::tagName())
+// with its spellings and counts, or with `rename` or `delete`, changes one
+// on every feed.
+int tags(const QString &command, const QStringList &arguments, QTextStream &out, QTextStream &err) {
+    const QString action = arguments.value(0);
+    if (action == QLatin1String("rename") || action == QLatin1String("delete"))
+        return organize(command, action, arguments, out, err);
+    Options options;
+    if (!parseOptions(command, arguments, {"--json"}, {}, options, err))
+        return 1;
+    if (!options.positional.isEmpty())
+        return fail(command, "takes no arguments, or rename or delete", err);
+    Store store;
+    if (!openStore(command, store, err))
+        return 1;
+    const QList<Feed> list = store.feeds();
+    if (!store.lastError().isEmpty())
+        return fail(command, store.lastError(), err);
+    struct Tag {
+        QStringList spellings;
+        // The spellings again, so a library of many feeds with many tags
+        // each is not searched once per tag.
+        QSet<QString> spelled;
+        int feeds = 0, unread = 0;
+    };
+    QMap<QString, Tag> byName;
+    for (const Feed &feed : list) {
+        QSet<QString> counted;
+        for (const QString &spelling : feed.tags) {
+            const QString name = Sync::tagName(spelling);
+            if (name.isEmpty())
+                continue;
+            Tag &tag = byName[name];
+            if (!tag.spelled.contains(spelling)) {
+                tag.spelled.insert(spelling);
+                tag.spellings << spelling;
+            }
+            if (!counted.contains(name)) {
+                counted.insert(name);
+                ++tag.feeds;
+                tag.unread += feed.unread;
+            }
+        }
+    }
+    QJsonArray array;
+    for (auto it = byName.begin(); it != byName.end(); ++it) {
+        std::sort(it->spellings.begin(), it->spellings.end());
+        if (options.json) {
+            array << QJsonObject{{"name", it.key()},
+                                 {"spellings", QJsonArray::fromStringList(it->spellings)},
+                                 {"feeds", it->feeds},
+                                 {"unread", it->unread}};
+            continue;
+        }
+        out << "#" << printable(it.key()) << "  " << it->feeds << " feeds, " << it->unread << " unread\n";
+    }
+    if (options.json)
+        printJson(array, out);
+    return 0;
+}
+
 int help(const QString &, const QStringList &, QTextStream &out, QTextStream &) {
     usage(out);
     return 0;
@@ -858,6 +1086,8 @@ constexpr Command commands[] = {
     {"articles", articles},
     {"search", articles},
     {"views", views},
+    {"categories", categories},
+    {"tags", tags},
     {"subscribe", subscribe},
     {"unsubscribe", unsubscribe},
     {"refresh", refresh},

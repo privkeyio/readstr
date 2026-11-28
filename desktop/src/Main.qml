@@ -28,7 +28,9 @@ ApplicationWindow {
     // typing an address would star articles.
     readonly property bool dialogsClosed: !addDialog.visible && !unsubscribeDialog.visible && !syncDialog.visible
                                           && !settingsDialog.visible && !filtersDialog.visible && !viewDialog.visible
-                                          && !deleteViewDialog.visible && !sourcePane.menuOpen
+                                          && !deleteViewDialog.visible && !categoryDialog.visible && !tagsDialog.visible
+                                          && !deleteCategoryDialog.visible && !deleteTagDialog.visible
+                                          && !sourcePane.menuOpen
     // Nor behind the shortcuts overlay, which only ? and Esc close.
     readonly property bool keysFree: dialogsClosed && !helpVisible
     // A text field keeps Ctrl+Z and Ctrl+Shift+Z for undoing its own typing.
@@ -51,14 +53,14 @@ ApplicationWindow {
         { keys: "Ctrl+Shift+A", action: qsTr("Mark everything in the view read") },
         { keys: "V, Shift+V", action: qsTr("Next or previous saved view") },
         { keys: "Ctrl+Shift+N", action: qsTr("Create a saved view") },
-        { keys: "F2", action: qsTr("Edit the selected saved view") },
+        { keys: "F2", action: qsTr("Edit the selected saved view, or rename the selected category or tag") },
         { keys: "Alt+Up, Alt+Down", action: qsTr("Move the selected saved view up or down") },
         { keys: "Ctrl+Z", action: qsTr("Undo the last change") },
         { keys: "Ctrl+Shift+Z", action: qsTr("Redo what was undone") },
         { keys: "Ctrl+O", action: qsTr("Import OPML") },
         { keys: "Ctrl+Shift+E", action: qsTr("Export OPML") },
         { keys: "Ctrl+C", action: qsTr("Copy the selected text") },
-        { keys: "Delete", action: qsTr("Unsubscribe from the selected feed, or delete the selected view") },
+        { keys: "Delete", action: qsTr("Unsubscribe from the selected feed, or delete the selected view, category, or tag") },
         { keys: "?", action: qsTr("Show or hide the shortcuts") },
         { keys: "Ctrl+F", action: qsTr("Search the articles") },
         { keys: "Esc", action: qsTr("Close the shortcuts, or clear the search") },
@@ -70,12 +72,27 @@ ApplicationWindow {
             unsubscribeDialog.ask(feedId, feedTitle)
     }
 
-    // Delete acts on what is selected: a saved view, or a feed.
+    // Delete acts on what is selected: a saved view, a category, a tag, or
+    // a feed.
     function askDelete() {
         if (backend.selectedViewId !== "")
             deleteViewDialog.ask(backend.selectedViewId, backend.sourceTitle)
+        else if (backend.selectedCategory !== "")
+            deleteCategoryDialog.ask(backend.selectedCategory, backend.sourceTitle)
+        else if (backend.selectedTag !== "")
+            deleteTagDialog.ask(backend.selectedTag)
         else
             askUnsubscribe(backend.selectedFeedId, backend.sourceTitle)
+    }
+
+    // F2 edits the saved view selected, or renames the category or tag.
+    function renameSelected() {
+        if (backend.selectedViewId !== "")
+            viewDialog.edit(backend.selectedViewId)
+        else if (backend.selectedCategory !== "")
+            categoryDialog.rename(backend.selectedCategory, backend.sourceTitle)
+        else if (backend.selectedTag !== "")
+            tagsDialog.rename(backend.selectedTag)
     }
 
     function move(step) {
@@ -122,7 +139,7 @@ ApplicationWindow {
     Shortcut { sequence: "V"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: { win.activePane = "sources"; backend.stepView(1) } }
     Shortcut { sequence: "Shift+V"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: { win.activePane = "sources"; backend.stepView(-1) } }
     Shortcut { sequence: "Ctrl+Shift+N"; context: Qt.ApplicationShortcut; enabled: win.keysFree; onActivated: viewDialog.create() }
-    Shortcut { sequence: "F2"; context: Qt.ApplicationShortcut; enabled: win.keysFree && backend.selectedViewId !== ""; onActivated: viewDialog.edit(backend.selectedViewId) }
+    Shortcut { sequence: "F2"; context: Qt.ApplicationShortcut; enabled: win.keysFree && (backend.selectedViewId !== "" || backend.selectedCategory !== "" || backend.selectedTag !== ""); onActivated: win.renameSelected() }
     // Off in a text field, as for undo, which may take them itself.
     Shortcut { sequence: "Alt+Up"; context: Qt.ApplicationShortcut; enabled: win.keysFree && !win.editingText && backend.selectedViewId !== ""; onActivated: backend.moveView(backend.selectedViewId, -1) }
     Shortcut { sequence: "Alt+Down"; context: Qt.ApplicationShortcut; enabled: win.keysFree && !win.editingText && backend.selectedViewId !== ""; onActivated: backend.moveView(backend.selectedViewId, 1) }
@@ -159,6 +176,12 @@ ApplicationWindow {
                     onSaveSourceRequested: viewDialog.createFromSource()
                     onEditViewRequested: (viewId) => viewDialog.edit(viewId)
                     onDeleteViewRequested: (viewId, viewName) => deleteViewDialog.ask(viewId, viewName)
+                    onMoveFeedRequested: (feedId, feedTitle) => categoryDialog.moveFeed(feedId, feedTitle)
+                    onFeedTagsRequested: (feedId, feedTitle) => tagsDialog.editFeed(feedId, feedTitle)
+                    onRenameCategoryRequested: (category, title) => categoryDialog.rename(category, title)
+                    onDeleteCategoryRequested: (category, title) => deleteCategoryDialog.ask(category, title)
+                    onRenameTagRequested: (tag) => tagsDialog.rename(tag)
+                    onDeleteTagRequested: (tag) => deleteTagDialog.ask(tag)
                 }
 
                 Rectangle { Layout.fillHeight: true; Layout.preferredWidth: 1; color: Qt.alpha(theme.foreground, 0.1) }
@@ -244,4 +267,48 @@ ApplicationWindow {
     FiltersDialog { id: filtersDialog }
     ViewDialog { id: viewDialog }
     DeleteViewDialog { id: deleteViewDialog }
+    CategoryDialog { id: categoryDialog }
+    TagsDialog { id: tagsDialog }
+
+    // Asks before a category goes; its feeds stay, without one.
+    ConfirmDialog {
+        id: deleteCategoryDialog
+        objectName: "deleteCategoryDialog"
+        property string category: ""
+        property string categoryTitle: ""
+        property int feeds: 0
+        function ask(name, title) {
+            if (name === "")
+                return
+            category = name
+            categoryTitle = title
+            feeds = backend.categoryFeedCount(name)
+            open()
+        }
+        title: qsTr("Delete the category?")
+        message: qsTr("%1 will be deleted, and its %n feeds left without a category.", "", feeds).arg(categoryTitle)
+        confirmText: qsTr("Delete")
+        confirmObjectName: "deleteCategoryConfirm"
+        onConfirmed: backend.deleteCategory(category)
+    }
+
+    // Asks before a tag is taken off every feed that carries it.
+    ConfirmDialog {
+        id: deleteTagDialog
+        objectName: "deleteTagDialog"
+        property string tag: ""
+        property int feeds: 0
+        function ask(name) {
+            if (name === "")
+                return
+            tag = name
+            feeds = backend.tagFeedCount(name)
+            open()
+        }
+        title: qsTr("Delete the tag?")
+        message: qsTr("#%1 will be taken off the %n feeds that carry it.", "", feeds).arg(tag)
+        confirmText: qsTr("Delete")
+        confirmObjectName: "deleteTagConfirm"
+        onConfirmed: backend.deleteTag(tag)
+    }
 }

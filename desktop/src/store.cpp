@@ -241,7 +241,38 @@ const QList<QStringList> migrations = {
         " views_edits INTEGER NOT NULL DEFAULT 0)",
         "INSERT INTO saved_views_owner (id, pubkey) SELECT 1, pubkey FROM sync_account WHERE id = 1",
     },
+    {
+        // The pubkey of the account the feeds' tags and the categories'
+        // colors and icons were pulled or changed under, empty for none
+        // yet, kept when syncing stops as saved_views_owner is, so that
+        // signing in again with that account keeps them and another one
+        // starts afresh (setSyncAccount()). A library with no account set
+        // has its tags from the last one, which saved_views_owner names when
+        // it has a row; with none, the owner is not known, and the next
+        // account starts without them. With it, how many times the
+        // categories or tags were changed here (SyncAccount::
+        // subscriptionsEdits), counted for the library, so the number never
+        // repeats when syncing stops and starts again. Each change marks the
+        // feeds and categories it changed with its number, which a publish
+        // that carried them clears (PendingEdits): tags_edit for a feed's
+        // tags, category_edit for the category it is in, each apart so a
+        // pull still brings the other, and style_edit for a category's
+        // color, icon, and being.
+        "CREATE TABLE subscriptions_owner (id INTEGER PRIMARY KEY CHECK (id = 1), pubkey TEXT NOT NULL,"
+        " edits INTEGER NOT NULL DEFAULT 0)",
+        "INSERT INTO subscriptions_owner (id, pubkey) VALUES (1, COALESCE((SELECT pubkey FROM sync_account"
+        " WHERE id = 1), (SELECT pubkey FROM saved_views_owner WHERE id = 1), ''))",
+        "ALTER TABLE feeds ADD COLUMN tags_edit INTEGER",
+        "ALTER TABLE feeds ADD COLUMN category_edit INTEGER",
+        "ALTER TABLE categories ADD COLUMN style_edit INTEGER",
+    },
 };
+
+// Whether any feed or category is marked as changed here and not published
+// (PendingEdits).
+#define ANY_PENDING_EDIT                                                                                        \
+    "(EXISTS (SELECT 1 FROM feeds WHERE tags_edit IS NOT NULL OR category_edit IS NOT NULL)"                    \
+    " OR EXISTS (SELECT 1 FROM categories WHERE style_edit IS NOT NULL))"
 
 // The condition that leaves out an item a filter rule hides.
 #define NOT_HIDDEN(alias) "(" alias "filter_flags & 1) = 0"
@@ -383,7 +414,7 @@ const char feedColumns[] =
     " f.last_fetched_at, f.relay_hints, f.complete_at,"
     " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id AND i.is_read = 0 AND " NOT_HIDDEN("i.") "),"
     " (SELECT COUNT(*) FROM items i WHERE i.feed_id = f.id AND " NOT_HIDDEN("i.") "), f.incomplete, f.created_at,"
-    " f.tags, c.color, c.icon"
+    " f.tags, c.color, c.icon, f.category_id, f.tags_edit, f.category_edit, c.style_edit"
     " FROM feeds f LEFT JOIN categories c ON c.id = f.category_id";
 
 Feed feedFrom(const QSqlQuery &query) {
@@ -409,6 +440,10 @@ Feed feedFrom(const QSqlQuery &query) {
     feed.tags = QJsonDocument::fromJson(query.value(16).toString().toUtf8()).toVariant().toStringList();
     feed.categoryColor = query.value(17).toString();
     feed.categoryIcon = query.value(18).toString();
+    feed.categoryId = query.value(19).toLongLong();
+    feed.tagsEdit = query.value(20).toLongLong();
+    feed.placementEdit = query.value(21).toLongLong();
+    feed.styleEdit = query.value(22).toLongLong();
     return feed;
 }
 
@@ -908,8 +943,8 @@ bool Store::removeFeed(qint64 id, FeedSnapshot *snapshot, qsizetype maxBytes, in
         }
         query.finish();
         // Read under the same write as the tags and the style, so they are
-        // known to be that account's.
-        if (!query.exec(QStringLiteral("SELECT pubkey FROM sync_account WHERE id = 1")))
+        // known to be that owner's, signed out too.
+        if (!query.exec(QStringLiteral("SELECT pubkey FROM subscriptions_owner WHERE id = 1")))
             return fail(query.lastError().text());
         if (query.next())
             taken.account = query.value(0).toString();
@@ -944,7 +979,9 @@ bool Store::restoreFeed(const FeedSnapshot &snapshot, bool *lasting) {
                     urlColumn = column(snapshot.feedColumns, "url"),
                     categoryColumn = column(snapshot.feedColumns, "category_id"),
                     createdColumn = column(snapshot.feedColumns, "created_at"),
-                    tagsColumn = column(snapshot.feedColumns, "tags");
+                    tagsColumn = column(snapshot.feedColumns, "tags"),
+                    tagsEditColumn = column(snapshot.feedColumns, "tags_edit"),
+                    placementEditColumn = column(snapshot.feedColumns, "category_edit");
     if (snapshot.feed.size() != snapshot.feedColumns.size() || keyColumn < 0 || urlColumn < 0 || categoryColumn < 0
         || createdColumn < 0)
         return lastingFail(QStringLiteral("nothing to restore"));
@@ -981,11 +1018,11 @@ bool Store::restoreFeed(const FeedSnapshot &snapshot, bool *lasting) {
         const qint64 category = categoryId(snapshot.category);
         if (category < 0)
             return false;
-        // The tags and the style came from the lists of the account synced
-        // when the feed went. Under another, a publish would carry them on
-        // into its list (Sync::subscriptionsContent()), as setSyncAccount()
-        // clears them to prevent.
-        if (!query.exec(QStringLiteral("SELECT pubkey FROM sync_account WHERE id = 1")))
+        // The tags and the style came from the lists of the owner of the
+        // metadata when the feed went. Under another, a publish would carry
+        // them on into its list (Sync::subscriptionsContent()), as
+        // setSyncAccount() clears them to prevent.
+        if (!query.exec(QStringLiteral("SELECT pubkey FROM subscriptions_owner WHERE id = 1")))
             return fail(query.lastError().text());
         const bool sameAccount = (query.next() ? query.value(0).toString() : QString()) == snapshot.account;
         query.finish();
@@ -994,6 +1031,12 @@ bool Store::restoreFeed(const FeedSnapshot &snapshot, bool *lasting) {
         feed[createdColumn] = QDateTime::currentSecsSinceEpoch();
         if (!sameAccount && tagsColumn >= 0)
             feed[tagsColumn] = QVariant(QMetaType::fromType<QString>());
+        // Nor is a change made then still this account's to publish, as
+        // setSyncAccount() clears every mark for another account.
+        if (!sameAccount)
+            for (const qsizetype edit : {tagsEditColumn, placementEditColumn})
+                if (edit >= 0)
+                    feed[edit] = QVariant(QMetaType::fromType<qint64>());
         query.prepare(insertSql(QStringLiteral("feeds"), snapshot.feedColumns));
         for (const QVariant &value : std::as_const(feed))
             query.addBindValue(value);
@@ -1147,11 +1190,23 @@ bool Store::setFeedTags(qint64 id, const QStringList &tags) {
     return query.exec() || fail(query.lastError().text());
 }
 
+bool Store::placeFeed(qint64 id, const QString &name) {
+    const qint64 category = categoryId(name);
+    if (category < 0)
+        return false;
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("UPDATE feeds SET category_id = ? WHERE id = ?"));
+    query.addBindValue(category ? QVariant(category) : QVariant(QMetaType::fromType<qint64>()));
+    query.addBindValue(id);
+    return query.exec() || fail(query.lastError().text());
+}
+
 bool Store::replaceCategoryStyles(const QHash<QString, CategoryStyle> &styles, bool *wrote) {
     if (wrote)
         *wrote = false;
     QSqlQuery query(m_db);
-    if (!query.exec(QStringLiteral("SELECT id, name, color, icon FROM categories")))
+    // A category whose style was changed here keeps it until it goes out.
+    if (!query.exec(QStringLiteral("SELECT id, name, color, icon FROM categories WHERE style_edit IS NULL")))
         return fail(query.lastError().text());
     QHash<qint64, CategoryStyle> changed;
     while (query.next()) {
@@ -1434,13 +1489,23 @@ Article articleFrom(const QSqlQuery &query) {
     return article;
 }
 
-// The conditions that keep a list to the filter's feeds, its feedId and
-// its tags, which the open article (alsoId) is held to as well.
+// The conditions that keep a list to the filter's feeds, its feedId, its
+// category, and its tags, which the open article (alsoId) is held to as
+// well.
 QString scopeSql(const ArticleFilter &filter, QVariantList &values) {
     QString sql;
     if (filter.feedId) {
         sql += " AND i.feed_id = ?";
         values << filter.feedId;
+    }
+    if (!filter.category.isEmpty()) {
+        // A name SQLite would be given as broken UTF-8 could match another
+        // category's, so it matches none.
+        if (Sync::hasLoneSurrogate(filter.category))
+            return sql + QStringLiteral(" AND 0");
+        sql += " AND i.feed_id IN (SELECT f.id FROM feeds f JOIN categories c ON c.id = f.category_id"
+               " WHERE c.name = ?)";
+        values << filter.category;
     }
     if (!filter.tags.isEmpty()) {
         // One feed lookup for the list, rather than one for each article,
@@ -2057,7 +2122,10 @@ SyncAccount Store::syncAccount() {
     QSqlQuery query(m_db);
     if (!query.exec(QStringLiteral(
             "SELECT npub, pubkey, relay_hints, synced_at, publish_reads, publish_confirmed, publish_pending,"
-            " (SELECT views_edits FROM saved_views_owner WHERE id = 1) FROM sync_account WHERE id = 1"))) {
+            " (SELECT views_edits FROM saved_views_owner WHERE id = 1),"
+            " (SELECT edits FROM subscriptions_owner WHERE id = 1),"
+            " " ANY_PENDING_EDIT
+            " FROM sync_account WHERE id = 1"))) {
         fail(query.lastError().text());
         return account;
     }
@@ -2069,8 +2137,12 @@ SyncAccount Store::syncAccount() {
             account.syncedAt = QDateTime::fromSecsSinceEpoch(query.value(3).toLongLong(), QTimeZone::UTC);
         account.publishReads = query.value(4).toBool();
         account.publishConfirmed = query.value(5).toBool();
-        account.publishPending = query.value(6).toInt();
+        // The marks say whether a change to the categories or tags waits,
+        // so the bit holds exactly while one does.
+        account.publishPending =
+            (query.value(6).toInt() & ~subscriptionsEditedBit) | (query.value(9).toBool() ? subscriptionsEditedBit : 0);
         account.viewsEdits = query.value(7).toLongLong();
+        account.subscriptionsEdits = query.value(8).toLongLong();
     }
     query.finish();
     if (account.pubkey.isEmpty())
@@ -2099,6 +2171,19 @@ std::optional<bool> Store::savedViewsOfAnother(const QString &pubkey) {
     return query.next();
 }
 
+std::optional<bool> Store::subscriptionEditsOfAnother(const QString &pubkey) {
+    m_error.clear();
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("SELECT 1 FROM subscriptions_owner WHERE id = 1 AND pubkey <> '' AND pubkey <> ?"
+                                 " AND " ANY_PENDING_EDIT));
+    query.addBindValue(pubkey);
+    if (!query.exec()) {
+        fail(query.lastError().text());
+        return std::nullopt;
+    }
+    return query.next();
+}
+
 bool Store::setSyncAccount(const QString &npub, const QString &pubkey, const QStringList &relays,
                            bool dropOtherViews) {
     return transaction([&] {
@@ -2112,6 +2197,14 @@ bool Store::setSyncAccount(const QString &npub, const QString &pubkey, const QSt
         // when the caller says so, once the user has agreed.
         if (*others && !dropOtherViews)
             return fail(QStringLiteral("the saved views here belong to another npub"));
+        // Likewise for changes to the categories and tags that another
+        // account has not published yet, which go with the rest of its tags
+        // below, under the same agreement: nothing brings those back either.
+        const std::optional<bool> otherEdits = subscriptionEditsOfAnother(pubkey);
+        if (!otherEdits)
+            return false;
+        if (*otherEdits && !dropOtherViews)
+            return fail(QStringLiteral("the category and tag changes here belong to another npub"));
         QSqlQuery query(m_db);
         if (*others && !query.exec(QStringLiteral("DELETE FROM saved_views")))
             return fail(query.lastError().text());
@@ -2131,21 +2224,52 @@ bool Store::setSyncAccount(const QString &npub, const QString &pubkey, const QSt
         // one's events.
         if (!same && !clearSyncState())
             return false;
-        // Nor do its tags and category styles, which a publish carries on
-        // for a feed its list does not list (Sync::subscriptionsContent()),
-        // so they would otherwise go into this account's list.
-        if (!same)
-            for (const char *statement : {"UPDATE feeds SET tags = NULL WHERE tags IS NOT NULL",
-                                          "UPDATE categories SET color = NULL, icon = NULL"
-                                          " WHERE color IS NOT NULL OR icon IS NOT NULL"})
-                if (!query.exec(QString::fromLatin1(statement)))
-                    return fail(query.lastError().text());
+        // Nor do another account's tags and category styles, which a
+        // publish carries on for a feed its list does not list (Sync::
+        // subscriptionsContent()), so they would otherwise go into this
+        // account's list; nor its changes not published yet, which the
+        // marks would publish under this one. Those of this account, kept
+        // since it stopped syncing, stay with their marks, which a pull
+        // keeps and the next publish carries (Sync::mirrorList()). With no
+        // owner known, as for changes made before any account, or tags
+        // kept from before the owner was recorded, only the rows marked as
+        // changed here are surely this library's own, and become this
+        // account's; the rest may be an earlier account's, so they go.
+        if (!query.exec(QStringLiteral("SELECT pubkey FROM subscriptions_owner WHERE id = 1")))
+            return fail(query.lastError().text());
+        const QString owner = query.next() ? query.value(0).toString() : QString();
+        query.finish();
+        QList<const char *> wipe;
+        if (owner.isEmpty())
+            wipe = {"UPDATE feeds SET tags = NULL WHERE tags IS NOT NULL AND tags_edit IS NULL",
+                    "UPDATE categories SET color = NULL, icon = NULL"
+                    " WHERE (color IS NOT NULL OR icon IS NOT NULL) AND style_edit IS NULL"};
+        else if (owner != pubkey)
+            wipe = {"UPDATE feeds SET tags = NULL, tags_edit = NULL, category_edit = NULL"
+                    " WHERE tags IS NOT NULL OR tags_edit IS NOT NULL OR category_edit IS NOT NULL",
+                    "UPDATE categories SET color = NULL, icon = NULL, style_edit = NULL"
+                    " WHERE color IS NOT NULL OR icon IS NOT NULL OR style_edit IS NOT NULL"};
+        for (const char *statement : std::as_const(wipe))
+            if (!query.exec(QString::fromLatin1(statement)))
+                return fail(query.lastError().text());
+        query.prepare(QStringLiteral("INSERT INTO subscriptions_owner (id, pubkey) VALUES (1, ?)"
+                                     " ON CONFLICT(id) DO UPDATE SET pubkey = excluded.pubkey"));
+        query.addBindValue(pubkey);
+        if (!query.exec())
+            return fail(query.lastError().text());
         query.prepare(QStringLiteral("INSERT INTO sync_account (id, npub, pubkey, relay_hints) VALUES (1, ?, ?, ?)"
                                      " ON CONFLICT(id) DO UPDATE SET npub = excluded.npub, pubkey = excluded.pubkey,"
                                      " relay_hints = excluded.relay_hints"));
         query.addBindValue(npub);
         query.addBindValue(pubkey);
         query.addBindValue(jsonList(relays));
+        if (!query.exec())
+            return fail(query.lastError().text());
+        // Changes kept from before the account's row was made, as while no
+        // account was set, still wait to go out, under this one.
+        query.prepare(QStringLiteral("UPDATE sync_account SET publish_pending = publish_pending | ? WHERE id = 1"
+                                     " AND " ANY_PENDING_EDIT));
+        query.addBindValue(publishBit(Sync::subscriptionsKind));
         return query.exec() || fail(query.lastError().text());
     });
 }
@@ -2156,6 +2280,41 @@ bool Store::clearSyncState() {
          {"DELETE FROM sync_account", "DELETE FROM sync_applied", "DELETE FROM sync_read", "DELETE FROM sync_remote"})
         if (!query.exec(QString::fromLatin1(statement)))
             return fail(query.lastError().text());
+    return true;
+}
+
+std::optional<PendingEdits> Store::pendingEdits() {
+    m_error.clear();
+    PendingEdits edits;
+    QSqlQuery query(m_db);
+    for (const auto &[sql, into] :
+         {std::pair{"SELECT id, tags_edit FROM feeds WHERE tags_edit IS NOT NULL", &edits.tags},
+          std::pair{"SELECT id, category_edit FROM feeds WHERE category_edit IS NOT NULL", &edits.placements},
+          std::pair{"SELECT id, style_edit FROM categories WHERE style_edit IS NOT NULL", &edits.styles}}) {
+        if (!query.exec(QString::fromLatin1(sql))) {
+            fail(query.lastError().text());
+            return std::nullopt;
+        }
+        while (query.next())
+            into->insert(query.value(0).toLongLong(), query.value(1).toLongLong());
+    }
+    return edits;
+}
+
+bool Store::clearPendingEdits(const PendingEdits &carried) {
+    QSqlQuery query(m_db);
+    for (const auto &[sql, marks] :
+         {std::pair{"UPDATE feeds SET tags_edit = NULL WHERE id = ? AND tags_edit <= ?", &carried.tags},
+          std::pair{"UPDATE feeds SET category_edit = NULL WHERE id = ? AND category_edit <= ?", &carried.placements},
+          std::pair{"UPDATE categories SET style_edit = NULL WHERE id = ? AND style_edit <= ?", &carried.styles}}) {
+        query.prepare(QString::fromLatin1(sql));
+        for (auto it = marks->cbegin(); it != marks->cend(); ++it) {
+            query.addBindValue(it.key());
+            query.addBindValue(it.value());
+            if (!query.exec())
+                return fail(query.lastError().text());
+        }
+    }
     return true;
 }
 
@@ -2215,10 +2374,11 @@ bool Store::setPublishConfirmed(const QString &pubkey) {
 }
 
 bool Store::markPublishPending(const QString &pubkey, int mask, bool pending) {
+    // subscriptionsEditedBit is never stored: the marks say it.
     return updateSyncAccount(pubkey,
                              pending ? QStringLiteral("publish_pending = publish_pending | ?")
                                      : QStringLiteral("publish_pending = publish_pending & ~?"),
-                             {mask});
+                             {mask & ~subscriptionsEditedBit});
 }
 
 bool Store::rememberReadGuids(const QStringList &guids) {
@@ -2351,6 +2511,400 @@ bool Store::markViewsEdited(const QString &pubkey) {
     if (!query.exec())
         return fail(query.lastError().text());
     return query.numRowsAffected() == 1 || fail(QStringLiteral("the saved views belong to another npub"));
+}
+
+namespace {
+bool sameStyle(const std::optional<CategoryStyle> &a, const std::optional<CategoryStyle> &b) {
+    return a.has_value() == b.has_value() && (!a || (a->color == b->color && a->icon == b->icon));
+}
+
+// Whether the feeds and categories `now` has (organization() leaves out the
+// feeds that are gone) are as `expected` has them.
+bool sameOrganization(const Organization &now, const Organization &expected) {
+    for (auto it = now.feeds.cbegin(); it != now.feeds.cend(); ++it) {
+        const auto want = expected.feeds.constFind(it.key());
+        if (want == expected.feeds.cend() || want->category != it->category || want->tags != it->tags)
+            return false;
+    }
+    for (auto it = expected.categories.cbegin(); it != expected.categories.cend(); ++it)
+        if (!sameStyle(now.categories.value(it.key()), *it))
+            return false;
+    return true;
+}
+
+// How many of the feeds `after` has differ from `before`.
+int changedFeeds(const Organization &before, const Organization &after) {
+    int changed = 0;
+    for (auto it = after.feeds.cbegin(); it != after.feeds.cend(); ++it) {
+        const auto was = before.feeds.constFind(it.key());
+        changed += was == before.feeds.cend() || was->category != it->category || was->tags != it->tags;
+    }
+    return changed;
+}
+}
+
+bool Store::markSubscriptionsEdited(const QString &pubkey, const Organization &before, const Organization &after) {
+    if (!pubkey.isEmpty()
+        && !updateSyncAccount(pubkey, QStringLiteral("publish_pending = publish_pending | ?"),
+                              {publishBit(Sync::subscriptionsKind)}))
+        return false;
+    // Counted and marked even with no account set, so the account that
+    // signs in next publishes the change, when it is the one the tags
+    // belong to or the first one (setSyncAccount()).
+    QSqlQuery query(m_db);
+    if (!query.exec(QStringLiteral("UPDATE subscriptions_owner SET edits = edits + 1 WHERE id = 1"))
+        || !query.exec(QStringLiteral("SELECT edits FROM subscriptions_owner WHERE id = 1")))
+        return fail(query.lastError().text());
+    if (!query.next())
+        return fail(QStringLiteral("the subscription list's owner is missing"));
+    const qint64 edit = query.value(0).toLongLong();
+    query.finish();
+    // Only what this change changed, a feed's tags apart from its
+    // category, so a pull still brings what the web app changed of the
+    // rest, and a publish carries that on as it came.
+    for (auto it = after.feeds.cbegin(); it != after.feeds.cend(); ++it) {
+        const auto was = before.feeds.constFind(it.key());
+        const bool found = was != before.feeds.cend();
+        for (const auto &[changed, sql] :
+             {std::pair{!found || was->tags != it->tags, "UPDATE feeds SET tags_edit = ? WHERE id = ?"},
+              std::pair{!found || was->category != it->category, "UPDATE feeds SET category_edit = ? WHERE id = ?"}}) {
+            if (!changed)
+                continue;
+            query.prepare(QString::fromLatin1(sql));
+            query.addBindValue(edit);
+            query.addBindValue(it.key());
+            if (!query.exec())
+                return fail(query.lastError().text());
+        }
+    }
+    // A category gone has no row to mark: the feeds it moved are marked.
+    query.prepare(QStringLiteral("UPDATE categories SET style_edit = ? WHERE name = ?"));
+    for (auto it = after.categories.cbegin(); it != after.categories.cend(); ++it) {
+        if (!*it || sameStyle(before.categories.value(it.key()), *it))
+            continue;
+        query.addBindValue(edit);
+        query.addBindValue(it.key());
+        if (!query.exec())
+            return fail(query.lastError().text());
+    }
+    return true;
+}
+
+std::optional<Organization> Store::organization(const QList<qint64> &feedIds, const QStringList &names) {
+    Organization organization;
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("SELECT c.name, f.tags FROM feeds f LEFT JOIN categories c ON c.id = f.category_id"
+                                 " WHERE f.id = ?"));
+    for (const qint64 id : feedIds) {
+        query.addBindValue(id);
+        if (!query.exec()) {
+            fail(query.lastError().text());
+            return std::nullopt;
+        }
+        if (query.next())
+            organization.feeds.insert(
+                id, {query.value(0).toString(),
+                     QJsonDocument::fromJson(query.value(1).toString().toUtf8()).toVariant().toStringList()});
+        query.finish();
+    }
+    query.prepare(QStringLiteral("SELECT color, icon FROM categories WHERE name = ?"));
+    for (const QString &name : names) {
+        query.addBindValue(name);
+        if (!query.exec()) {
+            fail(query.lastError().text());
+            return std::nullopt;
+        }
+        organization.categories.insert(name, query.next() ? std::optional(CategoryStyle{query.value(0).toString(),
+                                                                                         query.value(1).toString()})
+                                                          : std::nullopt);
+        query.finish();
+    }
+    return organization;
+}
+
+bool Store::applyOrganization(const Organization &organization) {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("UPDATE feeds SET category_id = ?, tags = ? WHERE id = ?"));
+    for (auto it = organization.feeds.cbegin(); it != organization.feeds.cend(); ++it) {
+        const qint64 category = categoryId(it->category);
+        if (category < 0)
+            return false;
+        query.addBindValue(category ? QVariant(category) : QVariant(QMetaType::fromType<qint64>()));
+        query.addBindValue(jsonList(it->tags));
+        query.addBindValue(it.key());
+        if (!query.exec())
+            return fail(query.lastError().text());
+    }
+    for (auto it = organization.categories.cbegin(); it != organization.categories.cend(); ++it) {
+        if (*it) {
+            const qint64 category = categoryId(it.key());
+            if (category < 0)
+                return false;
+            query.prepare(QStringLiteral("UPDATE categories SET color = ?, icon = ? WHERE id = ?"));
+            query.addBindValue(text((*it)->color));
+            query.addBindValue(text((*it)->icon));
+            query.addBindValue(category);
+        } else {
+            // A feed this change did not touch that is in it still, as one
+            // a pull filed there since, keeps it.
+            query.prepare(QStringLiteral("DELETE FROM categories WHERE name = ?"
+                                         " AND NOT EXISTS (SELECT 1 FROM feeds WHERE category_id = categories.id)"));
+            query.addBindValue(it.key());
+        }
+        if (!query.exec())
+            return fail(query.lastError().text());
+    }
+    return true;
+}
+
+bool Store::reorganize(const std::function<bool(Organization &target, OrganizeChange &change)> &plan,
+                       OrganizeChange *change, const std::optional<QString> &expectedPubkey) {
+    OrganizeChange done;
+    const bool saved = transaction([&] {
+        const SyncAccount account = syncAccount();
+        if (!m_error.isEmpty())
+            return false;
+        if (expectedPubkey && account.pubkey != *expectedPubkey)
+            return fail(Sync::accountChanged());
+        done.account = account.pubkey;
+        Organization target;
+        if (!plan(target, done))
+            return false;
+        const auto before = organization(target.feeds.keys(), target.categories.keys());
+        if (!before || !applyOrganization(target))
+            return false;
+        const auto after = organization(target.feeds.keys(), target.categories.keys());
+        if (!after)
+            return false;
+        done.before = *before;
+        done.after = *after;
+        done.feeds = changedFeeds(done.before, done.after);
+        // Nothing changed, nothing to publish, and nothing to undo.
+        done.changed = done.feeds > 0 || !sameOrganization(done.after, done.before);
+        if (!done.changed)
+            return true;
+        return markSubscriptionsEdited(account.pubkey, done.before, done.after);
+    });
+    if (saved && change)
+        *change = done;
+    return saved;
+}
+
+bool Store::renameCategory(const QString &from, const QString &to, OrganizeChange *change,
+                           const std::optional<QString> &expectedPubkey) {
+    // SQLite would be given a name with half of a surrogate pair as broken
+    // UTF-8, which could match another category's, so no category has one.
+    if (Sync::hasLoneSurrogate(from))
+        return fail(Sync::noSuchCategory(from));
+    if (const QString why = Sync::categoryNameProblem(to); !why.isEmpty())
+        return fail(why);
+    const QString name = to.trimmed();
+    return reorganize(
+        [&](Organization &target, OrganizeChange &done) {
+            const auto found = organization({}, {from, name});
+            if (!found)
+                return false;
+            const std::optional<CategoryStyle> source = found->categories.value(from),
+                                               joined = found->categories.value(name);
+            if (!source)
+                return fail(Sync::noSuchCategory(from));
+            if (from == name)
+                return true;
+            const QList<Feed> feeds = this->feeds();
+            if (!m_error.isEmpty())
+                return false;
+            for (const Feed &feed : feeds)
+                if (feed.category == from)
+                    target.feeds.insert(feed.id, {name, feed.tags});
+            // A category no feed is in any more, which the sources do not
+            // show, is not one to merge with: its row takes the rename.
+            done.merged = joined && std::any_of(feeds.cbegin(), feeds.cend(),
+                                                [&](const Feed &feed) { return feed.category == name; });
+            const bool joinedStyled = done.merged && (!joined->color.isEmpty() || !joined->icon.isEmpty());
+            target.categories.insert(name, joinedStyled ? joined : source);
+            target.categories.insert(from, std::nullopt);
+            return true;
+        },
+        change, expectedPubkey);
+}
+
+bool Store::deleteCategory(const QString &name, OrganizeChange *change, const std::optional<QString> &expectedPubkey) {
+    // As in renameCategory().
+    if (Sync::hasLoneSurrogate(name))
+        return fail(Sync::noSuchCategory(name));
+    return reorganize(
+        [&](Organization &target, OrganizeChange &) {
+            const auto found = organization({}, {name});
+            if (!found)
+                return false;
+            if (!found->categories.value(name))
+                return fail(Sync::noSuchCategory(name));
+            const QList<Feed> feeds = this->feeds();
+            if (!m_error.isEmpty())
+                return false;
+            for (const Feed &feed : feeds)
+                if (feed.category == name)
+                    target.feeds.insert(feed.id, {QString(), feed.tags});
+            target.categories.insert(name, std::nullopt);
+            return true;
+        },
+        change, expectedPubkey);
+}
+
+bool Store::setFeedCategory(qint64 feedId, const QString &name, OrganizeChange *change,
+                            const std::optional<QString> &expectedPubkey) {
+    if (Sync::hasLoneSurrogate(name))
+        return fail(Sync::categoryNameProblem(name));
+    return reorganize(
+        [&](Organization &target, OrganizeChange &) {
+            const std::optional<Feed> feed = this->feed(feedId);
+            if (!feed)
+                return false;
+            // A category the library has already is taken by its name as it
+            // is kept, even one an imported OPML file named in a way that
+            // could not be typed here; only a new name is checked, and
+            // trimmed. An empty name means none, but one of spaces alone is
+            // refused, as for a rename.
+            const auto existing = name.isEmpty() ? std::optional<Organization>() : organization({}, {name});
+            if (!name.isEmpty() && !existing)
+                return false;
+            const bool known = existing && existing->categories.value(name);
+            if (!name.isEmpty() && !known)
+                if (const QString why = Sync::categoryNameProblem(name); !why.isEmpty())
+                    return fail(why);
+            const QString category = known ? name : name.trimmed();
+            target.feeds.insert(feedId, {category, feed->tags});
+            // Both kept as they are, so an undo puts back the category it
+            // came from with its style, even once that category is gone.
+            QStringList names;
+            if (!feed->category.isEmpty())
+                names << feed->category;
+            if (!category.isEmpty() && category != feed->category)
+                names << category;
+            const auto found = organization({}, names);
+            if (!found)
+                return false;
+            for (const QString &each : std::as_const(names))
+                target.categories.insert(each, found->categories.value(each).value_or(CategoryStyle{}));
+            return true;
+        },
+        change, expectedPubkey);
+}
+
+bool Store::setFeedTagList(qint64 feedId, const QString &list, OrganizeChange *change,
+                           const std::optional<QString> &expectedPubkey) {
+    return reorganize(
+        [&](Organization &target, OrganizeChange &) {
+            const std::optional<Feed> feed = this->feed(feedId);
+            if (!feed)
+                return false;
+            // Checked against the tags the feed has now, which are kept as
+            // they are where the list leaves them so (Sync::parseTagList()).
+            QString problem;
+            const std::optional<QStringList> tags = Sync::parseTagList(list, &problem, feed->tags);
+            if (!tags)
+                return fail(problem);
+            target.feeds.insert(feedId, {feed->category, *tags});
+            return true;
+        },
+        change, expectedPubkey);
+}
+
+namespace {
+// `tags` with every tag that shows as `name` (Sync::tagName()) in place of
+// `to`, or left out for an empty one, and of those that show the same, the
+// first.
+QStringList retagged(const QStringList &tags, const QString &name, const QString &to) {
+    QStringList out;
+    QSet<QString> names;
+    for (const QString &tag : tags) {
+        const bool renamed = Sync::tagName(tag) == name;
+        if (renamed && to.isEmpty())
+            continue;
+        const QString kept = renamed ? to : tag;
+        const QString shown = Sync::tagName(kept);
+        if (names.contains(shown))
+            continue;
+        names.insert(shown);
+        out << kept;
+    }
+    return out;
+}
+}
+
+bool Store::renameTag(const QString &name, const QString &to, OrganizeChange *change,
+                      const std::optional<QString> &expectedPubkey) {
+    // No feed carries a tag with half of a surrogate pair (Sync::
+    // storableTag()), and one would reach SQLite as broken UTF-8.
+    if (Sync::hasLoneSurrogate(name))
+        return fail(Sync::noSuchTag(name));
+    const QString tag = to.trimmed();
+    if (const QString why = Sync::tagProblem(tag); !why.isEmpty())
+        return fail(why);
+    return retagFeeds(name, tag, change, expectedPubkey);
+}
+
+bool Store::deleteTag(const QString &name, OrganizeChange *change, const std::optional<QString> &expectedPubkey) {
+    // As in renameTag().
+    if (Sync::hasLoneSurrogate(name))
+        return fail(Sync::noSuchTag(name));
+    return retagFeeds(name, {}, change, expectedPubkey);
+}
+
+bool Store::retagFeeds(const QString &name, const QString &to, OrganizeChange *change,
+                       const std::optional<QString> &expectedPubkey) {
+    const QString shown = Sync::tagName(name);
+    return reorganize(
+        [&](Organization &target, OrganizeChange &) {
+            const QList<Feed> feeds = this->feeds();
+            if (!m_error.isEmpty())
+                return false;
+            for (const Feed &feed : feeds)
+                if (std::any_of(feed.tags.cbegin(), feed.tags.cend(),
+                                [&](const QString &each) { return Sync::tagName(each) == shown; }))
+                    target.feeds.insert(feed.id, {feed.category, retagged(feed.tags, shown, to)});
+            return (!shown.isEmpty() && !target.feeds.isEmpty()) || fail(Sync::noSuchTag(name));
+        },
+        change, expectedPubkey);
+}
+
+bool Store::restoreOrganization(const OrganizeChange &change, bool undo, bool *lasting) {
+    if (lasting)
+        *lasting = false;
+    // A change that changed nothing, as a list of tags saved again as it
+    // was, has nothing to put back, and nothing to publish.
+    if (!change.changed)
+        return true;
+    const Organization &expected = undo ? change.after : change.before;
+    const Organization &wanted = undo ? change.before : change.after;
+    bool refused = false;
+    const bool restored = transaction([&] {
+        const SyncAccount account = syncAccount();
+        if (!m_error.isEmpty())
+            return false;
+        if (account.pubkey != change.account) {
+            refused = true;
+            return fail(Sync::accountChanged());
+        }
+        const auto now = organization(wanted.feeds.keys(), wanted.categories.keys());
+        if (!now)
+            return false;
+        if (!sameOrganization(*now, expected)) {
+            refused = true;
+            return fail(Sync::organizationChanged());
+        }
+        // The feeds unsubscribed since are left out.
+        Organization target = wanted;
+        target.feeds.removeIf(
+            [&](QHash<qint64, Organization::Placement>::iterator it) { return !now->feeds.contains(it.key()); });
+        if (!applyOrganization(target))
+            return false;
+        const auto after = organization(target.feeds.keys(), target.categories.keys());
+        return after && markSubscriptionsEdited(account.pubkey, *now, *after);
+    });
+    if (lasting)
+        *lasting = refused;
+    return restored;
 }
 
 std::optional<QList<KeywordFilter::Rule>> Store::filterRules(QStringList *dropped) {

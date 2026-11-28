@@ -20,7 +20,8 @@ Dialog {
     // Asking whether "Stop syncing" also removes the stored signing key.
     property bool confirmingStop: false
     // Asking whether another npub may delete the saved views of the last
-    // one, which nothing brings back.
+    // one, or its category and tag changes not published yet, which nothing
+    // brings back.
     property bool confirmingDrop: false
     readonly property bool asking: confirmingStop || confirmingDrop
 
@@ -579,7 +580,7 @@ Dialog {
 
                 Label {
                     Layout.fillWidth: true
-                    text: qsTr("The saved views here came from another npub. Syncing with this one removes them from this computer, with their mute words and any edits not published yet, and that cannot be undone.")
+                    text: qsTr("The saved views here, or category and tag changes not published yet, came from another npub. Syncing with this one removes them from this computer, with the views' mute words and any edits not published yet, and that cannot be undone.")
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                 }
@@ -601,7 +602,7 @@ Dialog {
                     }
                     Button {
                         objectName: "dropViewsButton"
-                        text: qsTr("Remove the views")
+                        text: qsTr("Remove them")
                         flat: true
                         Material.roundedScale: theme.radius
                         Keys.onReturnPressed: clicked()

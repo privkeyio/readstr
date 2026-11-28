@@ -42,5 +42,25 @@
   "Marked %n articles read (too large to undo)": {
     "one": "Marked %n article read (too large to undo)",
     "other": "Marked %n articles read (too large to undo)"
+  },
+  "Deleted the category %1 (%n feeds left without one)": {
+    "one": "Deleted the category %1 (%n feed left without one)",
+    "other": "Deleted the category %1 (%n feeds left without one)"
+  },
+  "Deleted the tag %1 from %n feeds": {
+    "one": "Deleted the tag %1 from %n feed",
+    "other": "Deleted the tag %1 from %n feeds"
+  },
+  "Renamed on the %n feeds that carry it.": {
+    "one": "Renamed on the %n feed that carries it.",
+    "other": "Renamed on the %n feeds that carry it."
+  },
+  "%1 will be deleted, and its %n feeds left without a category.": {
+    "one": "%1 will be deleted, and its %n feed left without a category.",
+    "other": "%1 will be deleted, and its %n feeds left without a category."
+  },
+  "#%1 will be taken off the %n feeds that carry it.": {
+    "one": "#%1 will be taken off the %n feed that carries it.",
+    "other": "#%1 will be taken off the %n feeds that carry it."
   }
 }
