@@ -27,6 +27,10 @@ Dialog {
     property bool attempted: false
     // As in ViewDialog: the form waits, locked, for its save to be written.
     property bool saving: false
+    // The id of the request its save is waiting on (Backend::organizeSaved()),
+    // so the answer to another request, such as a delete confirmed while
+    // this one is out, neither closes it nor takes its place.
+    property int request: 0
     property string saveError: ""
 
     readonly property bool typing: mode === "rename" || (choiceBox.currentIndex >= 0
@@ -96,16 +100,17 @@ Dialog {
             return
         }
         saving = true
-        const started = mode === "rename" ? backend.renameCategory(category, chosenName)
-                                          : backend.setFeedCategory(feedId, chosenName)
-        if (!started)
-            saving = false
+        request = mode === "rename" ? backend.renameCategory(category, chosenName)
+                                    : backend.setFeedCategory(feedId, chosenName)
     }
 
     Connections {
         target: backend
         enabled: dialog.saving
-        function onOrganizeSaved(ok, why) {
+        function onOrganizeSaved(request, ok, why) {
+            if (request !== dialog.request)
+                return
+            dialog.request = 0
             dialog.saving = false
             if (ok) {
                 dialog.close()

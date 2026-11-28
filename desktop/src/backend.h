@@ -451,19 +451,20 @@ public:
     // Changes to the categories and tags (Store::renameCategory() and the
     // like), each saved on the worker with the mark to publish the
     // subscription list, which goes out with them, and undo() can undo it,
-    // only under the sync account set when it was asked for. Those that
-    // return a bool return false, changing nothing, when the name or tags
-    // are refused, and tell organizeSaved() why at once; once true, they
-    // say whether they were saved with organizeSaved(), as the deletes do
-    // too.
-    Q_INVOKABLE bool renameCategory(const QString &from, const QString &to);
-    Q_INVOKABLE void deleteCategory(const QString &name);
+    // only under the sync account set when it was asked for. Each returns
+    // the id of the request, and organizeSaved() tells the outcome of that
+    // request exactly once, always after the call returns, so the caller
+    // can tell its own answer from that of another request still out: a
+    // name or tags refused at once, changing nothing, are told with the
+    // next turn of the event loop, and a write once it is done.
+    Q_INVOKABLE int renameCategory(const QString &from, const QString &to);
+    Q_INVOKABLE int deleteCategory(const QString &name);
     // Puts the feed in the category `name`, made if need be, or in none for
     // an empty one. A name categoryNames() has is taken as it is, unchecked.
-    Q_INVOKABLE bool setFeedCategory(qint64 feedId, const QString &name);
-    Q_INVOKABLE bool setFeedTags(qint64 feedId, const QString &list);
-    Q_INVOKABLE bool renameTag(const QString &name, const QString &to);
-    Q_INVOKABLE void deleteTag(const QString &name);
+    Q_INVOKABLE int setFeedCategory(qint64 feedId, const QString &name);
+    Q_INVOKABLE int setFeedTags(qint64 feedId, const QString &list);
+    Q_INVOKABLE int renameTag(const QString &name, const QString &to);
+    Q_INVOKABLE int deleteTag(const QString &name);
     // Refreshes now and then every autoRefreshMinutes, give or take 10%,
     // for as long as the window is open.
     Q_INVOKABLE void startAutoRefresh();
@@ -551,9 +552,10 @@ signals:
     // The write of a saveView() that returned true is done: `ok` when it
     // was saved, or else `problem` says why not.
     void viewSaved(bool ok, const QString &problem);
-    // A change to the categories or tags asked for is done: `ok` when it
-    // was saved, or else `problem` says why not.
-    void organizeSaved(bool ok, const QString &problem);
+    // The change to the categories or tags of the request `request` (as
+    // renameCategory() returned it) is done: `ok` when it was saved, or
+    // else `problem` says why not.
+    void organizeSaved(int request, bool ok, const QString &problem);
 
 private:
     // Runs `work` on the worker thread with its Store, then `done` with the
@@ -731,13 +733,14 @@ private:
     // while the sync account is the one set now, as an action undo() can
     // undo, labelled with `label`, then publishes the subscription list and
     // shows the change, says in the status bar what `done` makes of it, and
-    // tells organizeSaved(). `failure` says why it could not.
+    // tells organizeSaved(). `failure` says why it could not. Returns the
+    // request's id.
     using Organize = std::function<bool(Store &, OrganizeChange *, const QString &pubkey)>;
-    void organize(std::function<QString(const OrganizeChange &)> label, Organize work, const QString &failure,
-                  std::function<void(const OrganizeChange &)> done);
-    // Tells organizeSaved() that a change was refused, `failure` filled in
-    // with `why`, and returns false.
-    bool refuseOrganize(const QString &failure, const QString &why);
+    int organize(std::function<QString(const OrganizeChange &)> label, Organize work, const QString &failure,
+                 std::function<void(const OrganizeChange &)> done);
+    // Tells organizeSaved(), once the caller has the id this returns, that
+    // a change was refused, `failure` filled in with `why`.
+    int refuseOrganize(const QString &failure, const QString &why);
     void restoreOrganization(const std::shared_ptr<const OrganizeChange> &change, bool undo,
                              const std::shared_ptr<UndoState> &state, const Finished &finished);
     void loadArticles();
@@ -859,6 +862,8 @@ private:
 
     Store m_store;
     bool m_storeOpen = false;
+    // The id of the last request to change the categories or tags.
+    int m_organizeRequests = 0;
     std::unique_ptr<Fetcher> m_fetcher;
     std::unique_ptr<RelayPool> m_relays;
     // Its own pool, as the sync events are allowed to be far larger than

@@ -927,6 +927,8 @@ private slots:
                   "DROP TABLE filter_state", "ALTER TABLE items DROP COLUMN filter_flags",
                   "ALTER TABLE feeds DROP COLUMN tags", "ALTER TABLE categories DROP COLUMN color",
                   "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner", "DROP TABLE subscriptions_owner",
+                  "ALTER TABLE feeds DROP COLUMN tags_edit", "ALTER TABLE feeds DROP COLUMN category_edit",
+                  "ALTER TABLE categories DROP COLUMN style_edit",
                   "INSERT INTO items (feed_id, guid, title, content, created_at, address)"
                   " VALUES (1, 'nostr', 'Long form', 'See [the page](https://hidden.example.com/needle) on *bees*', 2,"
                   " '30023:abc:d')",
@@ -5838,6 +5840,8 @@ private slots:
              {"DROP TABLE filter_rules", "DROP TABLE filter_state", "ALTER TABLE items DROP COLUMN filter_flags",
               "ALTER TABLE feeds DROP COLUMN tags", "ALTER TABLE categories DROP COLUMN color",
               "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner", "DROP TABLE subscriptions_owner",
+              "ALTER TABLE feeds DROP COLUMN tags_edit", "ALTER TABLE feeds DROP COLUMN category_edit",
+              "ALTER TABLE categories DROP COLUMN style_edit",
               "PRAGMA user_version = 7"})
             QCOMPARE(rawExec(path, statement), QString());
         Store store;
@@ -5857,6 +5861,8 @@ private slots:
              {"ALTER TABLE filter_state DROP COLUMN saves", "ALTER TABLE feeds DROP COLUMN tags",
               "ALTER TABLE categories DROP COLUMN color", "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner",
               "DROP TABLE subscriptions_owner",
+              "ALTER TABLE feeds DROP COLUMN tags_edit", "ALTER TABLE feeds DROP COLUMN category_edit",
+              "ALTER TABLE categories DROP COLUMN style_edit",
               "PRAGMA user_version = 8"})
             QCOMPARE(rawExec(path, statement), QString());
         Store again;
@@ -10289,7 +10295,7 @@ private slots:
         QCOMPARE(feeds.value(syncNpub()).categoryIcon, QString("<b>P</b>"));
 
         // A newer list says otherwise: a's tags go, News takes its new
-        // color, and Art, which it names no more, has none.
+        // color, and b, which it lists with no category, leaves Art.
         QJsonObject second = first;
         second.insert("tags", QJsonObject{{b, QJsonArray{"art"}}});
         second.insert("categories", QJsonObject{{a, QJsonObject{{"name", "News"}, {"color", "#10b981"}}},
@@ -10302,7 +10308,7 @@ private slots:
         QCOMPARE(feeds.value(a).categoryColor, QString("#10b981"));
         QVERIFY(feeds.value(a).categoryIcon.isEmpty());
         QCOMPARE(feeds.value(b).tags, QStringList{"art"});
-        QCOMPARE(feeds.value(b).category, QString("Art"));
+        QVERIFY(feeds.value(b).category.isEmpty());
         QVERIFY(feeds.value(syncNpub()).tags.isEmpty());
         QCOMPARE(feeds.value(syncNpub()).categoryIcon, QString("P"));
         const QHash<QString, Feed> applied = feeds;
@@ -10385,7 +10391,9 @@ private slots:
         }
         for (const char *statement : {"ALTER TABLE feeds DROP COLUMN tags", "ALTER TABLE categories DROP COLUMN color",
                                       "ALTER TABLE categories DROP COLUMN icon", "DROP TABLE saved_views_owner",
-                                      "DROP TABLE subscriptions_owner", "PRAGMA user_version = 9"})
+                                      "DROP TABLE subscriptions_owner",
+                                      "ALTER TABLE feeds DROP COLUMN tags_edit", "ALTER TABLE feeds DROP COLUMN category_edit",
+                                      "ALTER TABLE categories DROP COLUMN style_edit", "PRAGMA user_version = 9"})
             QCOMPARE(rawExec(path, statement), QString());
         Store store;
         QVERIFY2(store.open(path), qPrintable(store.lastError()));
@@ -19235,7 +19243,8 @@ private slots:
         QCOMPARE(authors, expected);
         QVERIFY(!list.contains("deleted"));
         QVERIFY(!list.contains("tags"));
-        QCOMPARE(list.value("categories").toObject(), (QJsonObject{{urls[0], QJsonObject{{"name", "News"}}}}));
+        // The web app's list files no feed under a category, so none is.
+        QVERIFY(!list.contains("categories"));
     }
 
     // Read articles are published only once allowed, as the union of the
@@ -20278,9 +20287,21 @@ private slots:
         QCOMPARE(feeds.value(a).categoryColor, QString("#ff0000"));
         QCOMPARE(feeds.value(a).categoryIcon, QString("📰"));
         QCOMPARE(feeds.value(c).category, QString("Tech"));
+        // Only the rows it changed are marked, with the change's number: the
+        // feeds it moved and the category it made, not those left alone.
+        std::optional<PendingEdits> marks = store.pendingEdits();
+        QVERIFY(marks);
+        QCOMPARE(marks->placements, (QHash<qint64, qint64>{{a, 1}, {b, 1}}));
+        QVERIFY(marks->tags.isEmpty());
+        QCOMPARE(marks->styles, (QHash<qint64, qint64>{{feeds.value(a).categoryId, 1}}));
+        QCOMPARE(feeds.value(a).placementEdit, 1);
+        QCOMPARE(feeds.value(a).tagsEdit, 0);
+        QCOMPARE(feeds.value(a).styleEdit, 1);
+        QCOMPARE(feeds.value(c).placementEdit, 0);
+        QCOMPARE(feeds.value(c).styleEdit, 0);
 
         // Onto a styled category: its feeds join it, and it keeps its style.
-        QVERIFY(store.markPublishPending(syncPubkey(), edited, false));
+        QVERIFY(markAllPublished(store, syncPubkey()));
         QVERIFY(store.renameCategory("Daily", "Tech", &change));
         QVERIFY(change.merged);
         QCOMPARE(change.feeds, 2);
@@ -20309,7 +20330,7 @@ private slots:
         }
 
         // The same name again changes nothing, and marks nothing.
-        QVERIFY(store.markPublishPending(syncPubkey(), edited, false));
+        QVERIFY(markAllPublished(store, syncPubkey()));
         const qint64 edits = store.syncAccount().subscriptionsEdits;
         QVERIFY(store.renameCategory("Plain", "Plain", &change));
         QVERIFY(!change.changed);
@@ -20329,7 +20350,7 @@ private slots:
         QCOMPARE(store.lastError(), Sync::categoryNameProblem(QString(Sync::maxCategoryNameLength + 1, 'x')));
         QVERIFY(store.renameCategory("Plain", QString(Sync::maxCategoryNameLength, 'x')));
         QVERIFY(store.renameCategory(QString(Sync::maxCategoryNameLength, 'x'), "Plain"));
-        QVERIFY(store.markPublishPending(syncPubkey(), edited, false));
+        QVERIFY(markAllPublished(store, syncPubkey()));
         QVERIFY(!store.renameCategory("Plain", "Two  spaces"));
         QCOMPARE(pending(), 0);
         QCOMPARE(byId().value(a).category, QString("Plain"));
@@ -20355,12 +20376,17 @@ private slots:
         QVERIFY(byId().value(a).category.isEmpty());
         QVERIFY(!store.setFeedCategory(999, "Fresh"));
 
-        // With no account set, the change is made and nothing is marked.
+        // With no account set, the change is made and its rows marked for
+        // the account that signs in next, with no account to publish.
+        QVERIFY(markAllPublished(store, syncPubkey()));
+        const qint64 before = store.syncAccount().subscriptionsEdits;
         QVERIFY(store.clearSyncAccount());
         QVERIFY(store.setFeedCategory(a, "Fresh", &change));
         QVERIFY(change.account.isEmpty());
         QCOMPARE(byId().value(a).category, QString("Fresh"));
-        // Nor after another account is set, until the change was its own.
+        QCOMPARE(store.pendingEdits()->placements, (QHash<qint64, qint64>{{a, before + 1}}));
+        QVERIFY(store.pendingEdits()->tags.isEmpty());
+        // A change worked out under an account no longer set is refused.
         QVERIFY(store.renameCategory("Fresh", "Later", &change, QString()));
         QVERIFY(!store.renameCategory("Later", "Again", &change, syncPubkey()));
         QCOMPARE(store.lastError(), QString("the sync account changed"));
@@ -20433,9 +20459,14 @@ private slots:
         QCOMPARE(store.lastError(), QString("A tag needs a name"));
         QVERIFY(!store.renameTag("Art", QString("a") + QChar(0x7)));
         QCOMPARE(tagsOf(a), QStringList{"Art"});
-        // An empty list takes them all away.
+        // An empty list takes them all away, and marks the feed all the
+        // same, as none is what was changed here.
+        QVERIFY(markAllPublished(store, syncPubkey()));
         QVERIFY(store.setFeedTagList(a, " , "));
         QVERIFY(tagsOf(a).isEmpty());
+        QVERIFY(store.feed(a)->tagsEdit > 0);
+        QCOMPARE(store.pendingEdits()->tags.keys(), QList<qint64>{a});
+        QVERIFY(store.pendingEdits()->placements.isEmpty());
     }
 
     // The tags and category styles belong to the account they were pulled
@@ -20475,7 +20506,7 @@ private slots:
 
         // Published, then stopped: signed in again, nothing is marked, and
         // the tags pulled stay.
-        QVERIFY(store.markPublishPending(syncPubkey(), edited, false));
+        QVERIFY(markAllPublished(store, syncPubkey()));
         QVERIFY(store.clearSyncAccount());
         QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
         QCOMPARE(tagsOf(a), QStringList{"x"});
@@ -20510,7 +20541,7 @@ private slots:
 
         // Once published, another npub takes over unasked, still wiping.
         QVERIFY(store.setFeedTagList(a, "theirs"));
-        QVERIFY(store.markPublishPending(other, edited, false));
+        QVERIFY(markAllPublished(store, other));
         QCOMPARE(store.subscriptionEditsOfAnother(syncPubkey()), std::optional<bool>(false));
         QVERIFY(store.clearSyncAccount());
         QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
@@ -20520,8 +20551,8 @@ private slots:
 
     // Signed out with a tag changed here and signed in again with the same
     // npub, a pull still takes what the web app changed meanwhile of
-    // another feed, and the publish carries both, as the list pulled last
-    // is kept for the account while it is away.
+    // another feed, and the publish carries both, as the mark of the feed
+    // changed here stays while the account is away.
     void syncKeepsWebChangesAfterSigningInAgain()
     {
         const qint64 now = 1800000000;
@@ -20548,7 +20579,7 @@ private slots:
         QVERIFY(pull(syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag, list, now - 100)));
         QVERIFY(store.setFeedTagList(feedOf(y).id, "ylocal"));
         QVERIFY(store.clearSyncAccount());
-        QVERIFY(store.keptSubscriptionsBase().has_value());
+        QCOMPARE(store.pendingEdits()->tags.keys(), QList<qint64>{feedOf(y).id});
 
         // Meanwhile the web app changed x's tags and its category's color.
         list.insert("tags", QJsonObject{{x, QJsonArray{"web"}}, {y, QJsonArray{"y0"}}});
@@ -20569,13 +20600,639 @@ private slots:
         QCOMPARE(content.value("categories").toObject().value(x).toObject().value("color").toString(),
                  QString("#445566"));
 
-        // Another npub takes neither the tags nor the list kept.
+        // Another npub takes neither the tags nor the marks.
         const QString other(64, 'd');
         QVERIFY(store.clearSyncAccount());
         QVERIFY(store.setSyncAccount(Nip19::npub(other), other, {}, true));
-        QVERIFY(!store.keptSubscriptionsBase().has_value());
+        QVERIFY(store.pendingEdits()->isEmpty());
         QVERIFY(store.lastError().isEmpty());
         QVERIFY(feedOf(y).tags.isEmpty());
+        QCOMPARE(store.syncAccount().publishPending & subscriptionsEditedBit, 0);
+    }
+
+    // Tags and category styles kept with no owner known, as from before
+    // Readstr recorded whose they are, are not taken into the next
+    // account's list, save the rows changed here: only the feed whose tags
+    // were changed keeps them, and the first publish carries nothing else
+    // of the old ones.
+    void syncTakesOnlyTheChangedRowsOfAnUnknownOwner()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        const QString a = "https://a.invalid/feed", b = "https://b.invalid/feed";
+        const qint64 idA = store.addFeed(a, "A", "News"), idB = store.addFeed(b, "B", "Tech");
+        QVERIFY(store.setFeedTags(idA, {"old-a"}));
+        QVERIFY(store.setFeedTags(idB, {"old-b"}));
+        QVERIFY(store.replaceCategoryStyles({{"News", {"#ff0000", {}}}, {"Tech", {"#00ff00", {}}}}));
+        QCOMPARE(rawCount(dir.path() + "/readstr.db", "SELECT 1 FROM subscriptions_owner WHERE pubkey = ''"), 1);
+
+        // One change here, with no account set.
+        QVERIFY(store.setFeedTagList(idA, "old-a, mine"));
+        QCOMPARE(store.subscriptionEditsOfAnother(syncPubkey()), std::optional<bool>(false));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QCOMPARE(store.feed(idA)->tags, (QStringList{"old-a", "mine"}));
+        QVERIFY(store.feed(idB)->tags.isEmpty());
+        QVERIFY(store.feed(idA)->categoryColor.isEmpty());
+        QVERIFY(store.feed(idB)->categoryColor.isEmpty());
+        QCOMPARE(store.syncAccount().publishPending & subscriptionsEditedBit, subscriptionsEditedBit);
+
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const QJsonObject content = QJsonDocument::fromJson(drafts.events.first().content.toUtf8()).object();
+        QCOMPARE(content.value("tags").toObject(), (QJsonObject{{a, QJsonArray{"old-a", "mine"}}}));
+        QCOMPARE(content.value("categories").toObject(),
+                 (QJsonObject{{a, QJsonObject{{"name", "News"}}}, {b, QJsonObject{{"name", "Tech"}}}}));
+        QVERIFY(!drafts.events.first().content.contains("old-b"));
+        QVERIFY(!drafts.events.first().content.contains("#ff0000"));
+        QCOMPARE(drafts.subscriptionEdits.tags.keys(), QList<qint64>{idA});
+    }
+
+    // Two pulls that interleave, one caching its list only after the other
+    // mirrored a newer one, with a change pending here on another feed: the
+    // web app's change to the feed not changed here lands, as no pull reads
+    // a list cached by another to tell what was changed here.
+    void syncTakesWebChangesBetweenInterleavedPulls()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString x = "https://x.invalid/feed", y = "https://y.invalid/feed";
+        const auto list = [&](const char *tag, qint64 at) {
+            return syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                             QJsonObject{{"rss", QJsonArray{x, y}},
+                                         {"nostr", QJsonArray()},
+                                         {"tags", QJsonObject{{x, QJsonArray{tag}}, {y, QJsonArray{"y0"}}}},
+                                         {"lastUpdated", at}},
+                             at);
+        };
+        const auto pull = [&store](const QJsonObject &event) {
+            const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({event}));
+            return outcome.error.isEmpty() && outcome.problems.isEmpty();
+        };
+        const auto feedOf = [&store](const QString &url) {
+            for (const Feed &feed : store.feeds())
+                if (feed.url == url)
+                    return feed;
+            return Feed{};
+        };
+        QVERIFY(pull(list("x0", now - 300)));
+        QVERIFY(store.setFeedTagList(feedOf(y).id, "ylocal"));
+
+        // The first pull has mirrored x1 when the second applies x2.
+        int raced = 0;
+        bool second = false;
+        Sync::cacheHook = [&] {
+            if (raced++)
+                return;
+            QCOMPARE(feedOf(x).tags, QStringList{"x1"});
+            second = pull(list("x2", now - 100));
+        };
+        const auto unhook = qScopeGuard([] { Sync::cacheHook = nullptr; });
+        QVERIFY(pull(list("x1", now - 200)));
+        QVERIFY(second);
+        QCOMPARE(raced, 2);
+        QCOMPARE(feedOf(x).tags, QStringList{"x2"});
+        QCOMPARE(feedOf(y).tags, QStringList{"ylocal"});
+        // And once more, with the second list cached.
+        QVERIFY(pull(list("x2", now - 100)));
+        QCOMPARE(feedOf(x).tags, QStringList{"x2"});
+        QCOMPARE(feedOf(y).tags, QStringList{"ylocal"});
+    }
+
+    // A feed's last tag deleted here: a pull of a list that still gives it
+    // the tag does not bring it back, and the publish carries the feed
+    // with none.
+    void syncKeepsATagListEmptiedHere()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed";
+        const auto list = [&](qint64 at) {
+            return syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                             QJsonObject{{"rss", QJsonArray{a}},
+                                         {"nostr", QJsonArray()},
+                                         {"tags", QJsonObject{{a, QJsonArray{"only"}}}},
+                                         {"lastUpdated", at}},
+                             at);
+        };
+        const auto pull = [&store](const QJsonObject &event) {
+            const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({event}));
+            return outcome.error.isEmpty() && outcome.problems.isEmpty();
+        };
+        QVERIFY(pull(list(now - 100)));
+        const qint64 id = store.feeds().value(0).id;
+        QCOMPARE(store.feed(id)->tags, QStringList{"only"});
+        QVERIFY(store.deleteTag("only"));
+        QVERIFY(store.feed(id)->tags.isEmpty());
+
+        // The same list again, then a newer one with the tag still on it.
+        QVERIFY(pull(list(now - 100)));
+        QVERIFY(store.feed(id)->tags.isEmpty());
+        QVERIFY(pull(list(now - 50)));
+        QVERIFY(store.feed(id)->tags.isEmpty());
+
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const NostrEvent draft = drafts.events.first();
+        const QJsonObject content = QJsonDocument::fromJson(draft.content.toUtf8()).object();
+        QCOMPARE(content.value("rss").toArray(), QJsonArray{a});
+        QVERIFY(!content.value("tags").toObject().contains(a));
+        QVERIFY(!draft.content.contains("only"));
+        const QJsonObject published = signedEvent(draft.kind, draft.content, draft.tags, draft.createdAt);
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), *NostrEvent::fromJson(published), now, nullptr, nullptr,
+                                       -1, drafts.subscriptionEdits),
+                 QString());
+        QVERIFY(store.pendingEdits()->isEmpty());
+        QVERIFY(pull(published));
+        QVERIFY(store.feed(id)->tags.isEmpty());
+    }
+
+    // A list that files a feed here, not changed here, under another
+    // category moves it there, and one it lists under none takes it out of
+    // its own; a feed whose category was changed here keeps it, and one
+    // only this machine has keeps its own.
+    void syncMovesFeedsToTheCategoryOfTheList()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString moved = "https://moved.invalid/feed", mine = "https://mine.invalid/feed",
+                      loose = "https://loose.invalid/feed", local = "https://local.invalid/feed";
+        const auto pull = [&store](const QJsonObject &event) {
+            const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({event}));
+            return outcome.error.isEmpty() && outcome.problems.isEmpty();
+        };
+        const auto feedOf = [&store](const QString &url) {
+            for (const Feed &feed : store.feeds())
+                if (feed.url == url)
+                    return feed;
+            return Feed{};
+        };
+        const QJsonObject old{{"name", "Old"}};
+        QVERIFY(pull(syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                               QJsonObject{{"rss", QJsonArray{moved, mine, loose}},
+                                           {"nostr", QJsonArray()},
+                                           {"categories", QJsonObject{{moved, old}, {mine, old}, {loose, old}}},
+                                           {"lastUpdated", now - 100}},
+                               now - 100)));
+        store.addFeed(local, "Local", "Own");
+        for (const QString &url : {moved, mine, loose})
+            QCOMPARE(feedOf(url).category, QString("Old"));
+        QVERIFY(store.setFeedCategory(feedOf(mine).id, "Here"));
+
+        const QJsonObject web{{"name", "Web"}, {"color", "#123456"}};
+        QVERIFY(pull(syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                               QJsonObject{{"rss", QJsonArray{moved, mine, loose}},
+                                           {"nostr", QJsonArray()},
+                                           {"categories", QJsonObject{{moved, web}, {mine, web}}},
+                                           {"lastUpdated", now - 50}},
+                               now - 50)));
+        QCOMPARE(feedOf(moved).category, QString("Web"));
+        QCOMPARE(feedOf(moved).categoryColor, QString("#123456"));
+        QVERIFY(!feedOf(moved).placementEdit);
+        QCOMPARE(feedOf(mine).category, QString("Here"));
+        QVERIFY(feedOf(loose).category.isEmpty());
+        QCOMPARE(feedOf(local).category, QString("Own"));
+
+        // The publish carries the move here, and the web app's as it came.
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const QJsonObject categories =
+            QJsonDocument::fromJson(drafts.events.first().content.toUtf8()).object().value("categories").toObject();
+        QCOMPARE(categories.value(moved).toObject(), web);
+        QCOMPARE(categories.value(mine).toObject(), (QJsonObject{{"name", "Here"}}));
+        QVERIFY(!categories.contains(loose));
+        QCOMPARE(categories.value(local).toObject(), (QJsonObject{{"name", "Own"}}));
+    }
+
+    // A feed taken out of its category on one device comes out of it on
+    // the other too, through the list the first publishes, and the
+    // second's next publish does not put it back.
+    void syncTakesAFeedOutOfItsCategoryOnBothDevices()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        const QString a = "https://a.invalid/feed", b = "https://b.invalid/feed";
+        const QJsonObject start = syncEvent(
+            Sync::subscriptionsKind, Sync::subscriptionsTag,
+            QJsonObject{{"rss", QJsonArray{a, b}},
+                        {"nostr", QJsonArray()},
+                        {"categories", QJsonObject{{a, QJsonObject{{"name", "News"}}}, {b, QJsonObject{{"name", "News"}}}}},
+                        {"lastUpdated", now - 100}},
+            now - 100);
+        Store one, two;
+        QVERIFY(one.open(dir.path() + "/one.db"));
+        QVERIFY(two.open(dir.path() + "/two.db"));
+        const auto pull = [](Store &store, const QJsonObject &event) {
+            const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({event}));
+            return outcome.error.isEmpty() && outcome.problems.isEmpty();
+        };
+        const auto feedOf = [](Store &store, const QString &url) {
+            for (const Feed &feed : store.feeds())
+                if (feed.url == url)
+                    return feed;
+            return Feed{};
+        };
+        // Publishes what `store` has, records it, and returns the event.
+        const auto publish = [](Store &store, qint64 at) {
+            const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, at);
+            if (drafts.events.size() != 1)
+                return QJsonObject();
+            const NostrEvent draft = drafts.events.first();
+            const QJsonObject event = signedEvent(draft.kind, draft.content, draft.tags, draft.createdAt);
+            return Sync::recordPublished(store, syncPubkey(), *NostrEvent::fromJson(event), at, nullptr, nullptr, -1,
+                                         drafts.subscriptionEdits)
+                           .isEmpty()
+                       ? event
+                       : QJsonObject();
+        };
+        for (Store *store : {&one, &two}) {
+            QVERIFY(store->setSyncAccount(syncNpub(), syncPubkey(), {}));
+            QVERIFY(pull(*store, start));
+            QCOMPARE(feedOf(*store, a).category, QString("News"));
+        }
+
+        QVERIFY(one.setFeedCategory(feedOf(one, a).id, {}));
+        const QJsonObject fromOne = publish(one, now - 50);
+        QVERIFY(!fromOne.isEmpty());
+        QVERIFY(!QJsonDocument::fromJson(fromOne.value("content").toString().toUtf8())
+                     .object()
+                     .value("categories")
+                     .toObject()
+                     .contains(a));
+        QVERIFY(pull(two, fromOne));
+        QVERIFY(feedOf(two, a).category.isEmpty());
+        QCOMPARE(feedOf(two, b).category, QString("News"));
+
+        const QJsonObject fromTwo = publish(two, now);
+        QVERIFY(!fromTwo.isEmpty());
+        const QJsonObject categories =
+            QJsonDocument::fromJson(fromTwo.value("content").toString().toUtf8()).object().value("categories").toObject();
+        QVERIFY(!categories.contains(a));
+        QCOMPARE(categories.value(b).toObject(), (QJsonObject{{"name", "News"}}));
+        QVERIFY(pull(one, fromTwo));
+        QVERIFY(feedOf(one, a).category.isEmpty());
+    }
+
+    // A list whose map of categories is full may be one a publish cut short
+    // there, so a feed it lists with no entry keeps the category it has.
+    void syncKeepsCategoriesAListMayHaveCut()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed";
+        const qint64 id = store.addFeed(a, "A", "Mine");
+        QJsonArray rss{a};
+        QJsonObject categories;
+        for (int i = 0; i < Sync::maxFeeds; ++i) {
+            const QString url = QStringLiteral("https://f%1.invalid/").arg(i);
+            if (i < Sync::maxFeeds - 1)
+                rss << url;
+            categories.insert(url, QJsonObject{{"name", "Other"}});
+        }
+        const auto apply = [&](const QJsonObject &map, qint64 at) {
+            const Sync::Outcome outcome = Sync::apply(
+                store, store.syncAccount(),
+                syncResult({syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                                      QJsonObject{{"rss", rss}, {"nostr", QJsonArray()}, {"categories", map}},
+                                      at)}));
+            return outcome.error.isEmpty() && outcome.problems.isEmpty();
+        };
+        QVERIFY(apply(categories, now - 100));
+        QCOMPARE(store.feed(id)->category, QString("Mine"));
+        // One entry fewer, and the list says the feed has none.
+        categories.remove(categories.keys().constLast());
+        QVERIFY(apply(categories, now - 50));
+        QVERIFY(store.feed(id)->category.isEmpty());
+    }
+
+    // The tags and the category of a feed are marked apart: tags changed
+    // here survive a pull that moves the feed to another category, which
+    // the feed follows, and the publish carries both.
+    void syncKeepsTagsChangedHereAndTakesTheWebCategory()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed";
+        const auto list = [&](const char *category, qint64 at) {
+            return syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                             QJsonObject{{"rss", QJsonArray{a}},
+                                         {"nostr", QJsonArray()},
+                                         {"tags", QJsonObject{{a, QJsonArray{"web"}}}},
+                                         {"categories", QJsonObject{{a, QJsonObject{{"name", category}}}}},
+                                         {"lastUpdated", at}},
+                             at);
+        };
+        const auto pull = [&store](const QJsonObject &event) {
+            const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({event}));
+            return outcome.error.isEmpty() && outcome.problems.isEmpty();
+        };
+        QVERIFY(pull(list("Old", now - 100)));
+        const qint64 id = store.feeds().value(0).id;
+        QVERIFY(store.setFeedTagList(id, "here"));
+        QVERIFY(store.feed(id)->tagsEdit > 0);
+        QCOMPARE(store.feed(id)->placementEdit, 0);
+        QVERIFY(pull(list("Moved", now - 50)));
+        QCOMPARE(store.feed(id)->tags, QStringList{"here"});
+        QCOMPARE(store.feed(id)->category, QString("Moved"));
+
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const QJsonObject content = QJsonDocument::fromJson(drafts.events.first().content.toUtf8()).object();
+        QCOMPARE(content.value("tags").toObject(), (QJsonObject{{a, QJsonArray{"here"}}}));
+        QCOMPARE(content.value("categories").toObject(), (QJsonObject{{a, QJsonObject{{"name", "Moved"}}}}));
+    }
+
+    // A category name an OPML file made longer than a list carries goes out
+    // cut, never through a surrogate pair, and the mirror of that publish
+    // leaves the feed in the category it has.
+    void syncPublishesALongCategoryAndKeepsItsFeeds()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        // The cut falls between the two halves of the emoji.
+        const QString name = QString(Sync::maxCategoryNameLength - 1, 'x') + QString::fromUtf8("📰") + QString(43, 'y');
+        QCOMPARE(name.size(), 300);
+        const qint64 a = store.addFeed("https://a.invalid/feed", "A", name);
+        const qint64 b = store.addFeed("https://b.invalid/feed", "B", name);
+        const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, now);
+        QCOMPARE(drafts.events.size(), 1);
+        const NostrEvent draft = drafts.events.first();
+        const QJsonObject categories =
+            QJsonDocument::fromJson(draft.content.toUtf8()).object().value("categories").toObject();
+        const QString sent = categories.value("https://a.invalid/feed").toObject().value("name").toString();
+        QCOMPARE(sent, QString(Sync::maxCategoryNameLength - 1, 'x'));
+        QVERIFY(!Sync::hasLoneSurrogate(sent));
+        const QJsonObject event = signedEvent(draft.kind, draft.content, draft.tags, draft.createdAt);
+        QCOMPARE(Sync::recordPublished(store, syncPubkey(), *NostrEvent::fromJson(event), now, nullptr, nullptr, -1,
+                                       drafts.subscriptionEdits),
+                 QString());
+        QCOMPARE(store.feed(a)->category, name);
+        QCOMPARE(store.feed(b)->category, name);
+        // Pulled again, as the relays send it back.
+        const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({event}));
+        QVERIFY(outcome.error.isEmpty() && outcome.problems.isEmpty());
+        QCOMPARE(store.feed(a)->category, name);
+        QCOMPARE(store.feed(b)->category, name);
+    }
+
+    // A category's style mark: set by a change here, kept from a pull, and
+    // cleared by the publish that carries it, or by one built once none of
+    // its feeds is left in it.
+    void syncFollowsACategoryStyleMark()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed", b = "https://b.invalid/feed";
+        const auto list = [&](const char *color, qint64 at) {
+            return syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                             QJsonObject{{"rss", QJsonArray{a, b}},
+                                         {"nostr", QJsonArray()},
+                                         {"categories", QJsonObject{{a, QJsonObject{{"name", "News"}, {"color", color}}},
+                                                                    {b, QJsonObject{{"name", "Tech"}, {"color", color}}}}},
+                                         {"lastUpdated", at}},
+                             at);
+        };
+        const auto pull = [&store](const QJsonObject &event) {
+            const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({event}));
+            return outcome.error.isEmpty() && outcome.problems.isEmpty();
+        };
+        const auto feedOf = [&store](const QString &url) {
+            for (const Feed &feed : store.feeds())
+                if (feed.url == url)
+                    return feed;
+            return Feed{};
+        };
+        const auto publish = [&](qint64 at) {
+            const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, at);
+            if (drafts.events.size() != 1)
+                return QJsonObject();
+            const NostrEvent draft = drafts.events.first();
+            const QJsonObject event = signedEvent(draft.kind, draft.content, draft.tags, draft.createdAt);
+            return Sync::recordPublished(store, syncPubkey(), *NostrEvent::fromJson(event), at, nullptr, nullptr, -1,
+                                         drafts.subscriptionEdits)
+                           .isEmpty()
+                       ? QJsonDocument::fromJson(draft.content.toUtf8()).object()
+                       : QJsonObject();
+        };
+        QVERIFY(pull(list("#111111", now - 100)));
+        QCOMPARE(feedOf(a).categoryColor, QString("#111111"));
+
+        // Renamed here: the new category is marked, and a pull's color for
+        // it does not take its style.
+        QVERIFY(store.renameCategory("News", "Daily"));
+        const qint64 daily = feedOf(a).categoryId;
+        QCOMPARE(store.pendingEdits()->styles, (QHash<qint64, qint64>{{daily, feedOf(a).styleEdit}}));
+        QVERIFY(store.replaceCategoryStyles({{"Daily", {"#999999", {}}}, {"Tech", {"#222222", {}}}}));
+        QCOMPARE(feedOf(a).categoryColor, QString("#111111"));
+        QCOMPARE(feedOf(b).categoryColor, QString("#222222"));
+        QVERIFY(pull(list("#333333", now - 50)));
+        QCOMPARE(feedOf(a).categoryColor, QString("#111111"));
+        QCOMPARE(feedOf(b).categoryColor, QString("#333333"));
+
+        // The publish carries it, and clears the mark.
+        const QJsonObject content = publish(now);
+        QCOMPARE(content.value("categories").toObject().value(a).toObject(),
+                 (QJsonObject{{"name", "Daily"}, {"color", "#111111"}}));
+        QVERIFY(store.pendingEdits()->isEmpty());
+
+        // Made here, then emptied by moving its feed out before the list
+        // goes out: the mark goes with the publish all the same.
+        QVERIFY(store.setFeedCategory(feedOf(a).id, "Fresh"));
+        const qint64 fresh = feedOf(a).categoryId;
+        QVERIFY(store.pendingEdits()->styles.contains(fresh));
+        QVERIFY(store.setFeedCategory(feedOf(a).id, "Tech"));
+        QVERIFY(store.pendingEdits()->styles.contains(fresh));
+        QVERIFY(publish(now + 10).value("categories").toObject().contains(a));
+        QVERIFY(store.pendingEdits()->isEmpty());
+        QCOMPARE(store.syncAccount().publishPending & subscriptionsEditedBit, 0);
+    }
+
+    // Under another account, a feed brought back by an undo of its
+    // unsubscribe comes without the marks it had, as signing in as another
+    // clears every mark.
+    void storeRestoresAFeedWithoutAnotherAccountsMarks()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const qint64 a = store.addFeed("https://a.invalid/feed", "A");
+        const qint64 b = store.addFeed("https://b.invalid/feed", "B");
+        for (const qint64 id : {a, b}) {
+            QVERIFY(store.setFeedTagList(id, "mine"));
+            QVERIFY(store.setFeedCategory(id, "Here"));
+        }
+        FeedSnapshot same, other;
+        QVERIFY(store.removeFeed(a, &same));
+        QVERIFY(store.restoreFeed(same));
+        QVERIFY(store.feed(a)->tagsEdit > 0);
+        QVERIFY(store.feed(a)->placementEdit > 0);
+
+        QVERIFY(store.removeFeed(b, &other));
+        const QString pubkey(64, 'd');
+        QVERIFY(store.setSyncAccount(Nip19::npub(pubkey), pubkey, {}, true));
+        QVERIFY(store.pendingEdits()->isEmpty());
+        QVERIFY(store.restoreFeed(other));
+        QVERIFY(store.feed(b)->tags.isEmpty());
+        QCOMPARE(store.feed(b)->tagsEdit, 0);
+        QCOMPARE(store.feed(b)->placementEdit, 0);
+        QVERIFY(store.pendingEdits()->isEmpty());
+    }
+
+    // Another owner's tags, styles, and every kind of mark go when a
+    // different npub signs in; with an owner not known, a feed whose only
+    // mark is its category loses its tags of unknown origin.
+    void storeWipesMarksForAnotherOwner()
+    {
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const qint64 a = store.addFeed("https://a.invalid/feed", "A", "News");
+        QVERIFY(store.setFeedTagList(a, "mine"));
+        QVERIFY(store.renameCategory("News", "Daily"));
+        const PendingEdits marks = *store.pendingEdits();
+        QVERIFY(!marks.tags.isEmpty() && !marks.placements.isEmpty() && !marks.styles.isEmpty());
+        const QString other(64, 'd');
+        QVERIFY(store.setSyncAccount(Nip19::npub(other), other, {}, true));
+        QVERIFY(store.pendingEdits()->isEmpty());
+        QVERIFY(store.feed(a)->tags.isEmpty());
+        QCOMPARE(store.feed(a)->category, QString("Daily"));
+        QCOMPARE(store.syncAccount().publishPending & subscriptionsEditedBit, 0);
+
+        // No owner known, and only a's category changed here.
+        QTemporaryDir unknown;
+        Store fresh;
+        QVERIFY(fresh.open(unknown.path() + "/readstr.db"));
+        const qint64 b = fresh.addFeed("https://b.invalid/feed", "B");
+        QVERIFY(fresh.setFeedTags(b, {"unknown"}));
+        QVERIFY(fresh.setFeedCategory(b, "Moved"));
+        QVERIFY(fresh.feed(b)->placementEdit > 0);
+        QCOMPARE(fresh.feed(b)->tagsEdit, 0);
+        QVERIFY(fresh.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        QVERIFY(fresh.feed(b)->tags.isEmpty());
+        QCOMPARE(fresh.feed(b)->category, QString("Moved"));
+        QVERIFY(fresh.feed(b)->placementEdit > 0);
+    }
+
+    // A publish clears the marks of every row as it was when the list was
+    // built, those it left out too: a feed another device unsubscribed
+    // from, one on the local network, one whose address is too long, and a
+    // category none of whose feeds goes out, as no list from here would
+    // ever carry them. A row changed while the list was out stays marked
+    // until the next one.
+    void syncClearsTheMarksOfRowsNoListCarries()
+    {
+        const qint64 now = 1800000000;
+        QTemporaryDir dir;
+        Store store;
+        QVERIFY(store.open(dir.path() + "/readstr.db"));
+        QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
+        const QString a = "https://a.invalid/feed", b = "https://b.invalid/feed";
+        const auto pull = [&store](const QJsonObject &event) {
+            const Sync::Outcome outcome = Sync::apply(store, store.syncAccount(), syncResult({event}));
+            return outcome.error.isEmpty() && outcome.problems.isEmpty();
+        };
+        const auto idOf = [&store](const QString &url) {
+            for (const Feed &feed : store.feeds())
+                if (feed.url == url)
+                    return feed.id;
+            return qint64(0);
+        };
+        QVERIFY(pull(syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                               QJsonObject{{"rss", QJsonArray{a, b}},
+                                           {"nostr", QJsonArray()},
+                                           {"tags", QJsonObject{{a, QJsonArray{"x"}}, {b, QJsonArray{"y"}}}},
+                                           {"lastUpdated", now - 100}},
+                               now - 100)));
+        const qint64 idA = idOf(a), idB = idOf(b);
+        const qint64 local = store.addFeed("http://127.0.0.1/feed", "Local");
+        const qint64 longer = store.addFeed("https://long.invalid/" + QString(Sync::maxUrlLength, 'x'), "Long");
+        QVERIFY(store.setFeedTagList(idA, "a-here"));
+        QVERIFY(store.setFeedTagList(idB, "b-here"));
+        QVERIFY(store.setFeedTagList(local, "mine"));
+        QVERIFY(store.setFeedTagList(longer, "long"));
+        QVERIFY(store.setFeedCategory(local, "Private"));
+        const PendingEdits before = *store.pendingEdits();
+        QCOMPARE(before.tags.size(), 4);
+        QCOMPARE(before.placements.keys(), QList<qint64>{local});
+        QCOMPARE(before.styles.keys(), QList<qint64>{store.feed(local)->categoryId});
+
+        // The web app unsubscribed from a since.
+        QVERIFY(pull(syncEvent(Sync::subscriptionsKind, Sync::subscriptionsTag,
+                               QJsonObject{{"rss", QJsonArray{b}},
+                                           {"nostr", QJsonArray()},
+                                           {"deleted", QJsonArray{a}},
+                                           {"tags", QJsonObject{{b, QJsonArray{"y"}}}},
+                                           {"lastUpdated", now - 50}},
+                               now - 50)));
+        QCOMPARE(store.feed(idA)->tags, QStringList{"a-here"});
+        // Cached as stored after a was subscribed to here, whatever second
+        // this runs in, so a stays off the list.
+        QCOMPARE(rawExec(dir.path() + "/readstr.db", QStringLiteral("UPDATE sync_remote SET stored_at = %1")
+                                                          .arg(QDateTime::currentSecsSinceEpoch() + 1000)),
+                 QString());
+
+        const auto publish = [&](qint64 at, const std::function<void()> &meanwhile) {
+            const Sync::Drafts drafts = Sync::drafts(store, syncPubkey(), {Sync::subscriptionsKind}, {}, at);
+            if (drafts.events.size() != 1)
+                return QJsonObject();
+            const NostrEvent draft = drafts.events.first();
+            meanwhile();
+            const QJsonObject event = signedEvent(draft.kind, draft.content, draft.tags, draft.createdAt);
+            if (!Sync::recordPublished(store, syncPubkey(), *NostrEvent::fromJson(event), at, nullptr, nullptr, -1,
+                                       drafts.subscriptionEdits)
+                     .isEmpty())
+                return QJsonObject();
+            return QJsonDocument::fromJson(draft.content.toUtf8()).object();
+        };
+        // b changed again while the list is out.
+        const QJsonObject first = publish(now, [&] { QVERIFY(store.setFeedTagList(idB, "b-later")); });
+        QCOMPARE(first.value("rss").toArray(), QJsonArray{b});
+        QCOMPARE(first.value("deleted").toArray(), QJsonArray{a});
+        QCOMPARE(first.value("tags").toObject(), (QJsonObject{{b, QJsonArray{"b-here"}}}));
+        QVERIFY(!first.contains("categories"));
+        PendingEdits after = *store.pendingEdits();
+        QCOMPARE(after.tags.keys(), QList<qint64>{idB});
+        QVERIFY(after.tags.value(idB) > before.tags.value(idB));
+        QVERIFY(after.placements.isEmpty());
+        QVERIFY(after.styles.isEmpty());
+        QVERIFY(store.syncAccount().publishPending & subscriptionsEditedBit);
+        QCOMPARE(store.subscriptionEditsOfAnother(QString(64, 'd')), std::optional<bool>(true));
+
+        // The next one carries b's last change, and nothing is left marked.
+        const QJsonObject second = publish(now + 10, [] {});
+        QCOMPARE(second.value("tags").toObject(), (QJsonObject{{b, QJsonArray{"b-later"}}}));
+        QVERIFY(store.pendingEdits()->isEmpty());
+        QCOMPARE(store.syncAccount().publishPending & subscriptionsEditedBit, 0);
+        QCOMPARE(store.subscriptionEditsOfAnother(QString(64, 'd')), std::optional<bool>(false));
+        // What was changed here stays, as no list names those feeds.
+        QCOMPARE(store.feed(idA)->tags, QStringList{"a-here"});
+        QCOMPARE(store.feed(local)->tags, QStringList{"mine"});
+        QCOMPARE(store.feed(longer)->tags, QStringList{"long"});
+        QCOMPARE(store.feed(local)->category, QString("Private"));
     }
 
     // A library from before version 12 with no account set has its tags
@@ -20594,7 +21251,9 @@ private slots:
             QVERIFY(store.setFeedTags(a, {"pulled"}));
             QVERIFY(store.clearSyncAccount());
         }
-        for (const char *statement : {"DROP TABLE subscriptions_owner", "PRAGMA user_version = 11"})
+        for (const char *statement : {"DROP TABLE subscriptions_owner",
+                                      "ALTER TABLE feeds DROP COLUMN tags_edit", "ALTER TABLE feeds DROP COLUMN category_edit",
+                                      "ALTER TABLE categories DROP COLUMN style_edit", "PRAGMA user_version = 11"})
             QCOMPARE(rawExec(path, statement), QString());
         QVERIFY(QFile::copy(path, dir.path() + "/copy.db"));
         {
@@ -20626,7 +21285,9 @@ private slots:
             QVERIFY(store.setFeedTags(a, {"pulled"}));
         }
         for (const char *statement :
-             {"DROP TABLE subscriptions_owner", "DELETE FROM saved_views_owner", "PRAGMA user_version = 11"})
+             {"DROP TABLE subscriptions_owner",
+              "ALTER TABLE feeds DROP COLUMN tags_edit", "ALTER TABLE feeds DROP COLUMN category_edit",
+              "ALTER TABLE categories DROP COLUMN style_edit", "DELETE FROM saved_views_owner", "PRAGMA user_version = 11"})
             QCOMPARE(rawExec(unknown, statement), QString());
         Store store;
         QVERIFY2(store.open(unknown), qPrintable(store.lastError()));
@@ -20705,22 +21366,28 @@ private slots:
         Backend backend;
         QSignalSpy saved(&backend, &Backend::organizeSaved);
         QVERIFY(backend.categoryNames().contains(bidi));
-        QVERIFY(backend.setFeedCategory(a, bidi));
+        const int moved = backend.setFeedCategory(a, bidi);
+        QVERIFY(moved > 0);
         QTRY_COMPARE(saved.size(), 1);
-        QCOMPARE(saved.last().at(0).toBool(), true);
+        QCOMPARE(saved.last().at(0).toInt(), moved);
+        QCOMPARE(saved.last().at(1).toBool(), true);
         QCOMPARE(backend.status(), QString("Moved A to News"));
         Store store;
         QVERIFY(store.open());
         QCOMPARE(store.feed(a)->category, bidi);
-        // A name typed anew is refused at once, saying why.
-        QVERIFY(!backend.setFeedCategory(b, "New  one"));
-        QCOMPARE(saved.size(), 2);
-        QCOMPARE(saved.last().at(0).toBool(), false);
-        QCOMPARE(saved.last().at(1).toString(), "Cannot move the feed: " + Sync::categoryNameProblem("New  one"));
-        QVERIFY(!backend.setFeedTags(b, "\"open"));
-        QCOMPARE(saved.size(), 3);
-        QVERIFY2(saved.last().at(1).toString().startsWith("Cannot change the tags: A tag in quotes"),
-                 qPrintable(saved.last().at(1).toString()));
+        // A name typed anew is refused at once, saying why, once the caller
+        // has the request's id.
+        const int refused = backend.setFeedCategory(b, "New  one");
+        QVERIFY(refused > moved);
+        QCOMPARE(saved.size(), 1);
+        QTRY_COMPARE(saved.size(), 2);
+        QCOMPARE(saved.last().at(0).toInt(), refused);
+        QCOMPARE(saved.last().at(1).toBool(), false);
+        QCOMPARE(saved.last().at(2).toString(), "Cannot move the feed: " + Sync::categoryNameProblem("New  one"));
+        QVERIFY(backend.setFeedTags(b, "\"open") > refused);
+        QTRY_COMPARE(saved.size(), 3);
+        QVERIFY2(saved.last().at(2).toString().startsWith("Cannot change the tags: A tag in quotes"),
+                 qPrintable(saved.last().at(2).toString()));
         QCOMPARE(store.feed(b)->category, bidi);
     }
 
@@ -20800,7 +21467,7 @@ private slots:
         QSignalSpy saved(&backend, &Backend::organizeSaved);
         QVERIFY(backend.setFeedTags(b, backend.feedTags(b) + ", more"));
         QTRY_COMPARE(saved.size(), 1);
-        QVERIFY(saved.last().at(0).toBool());
+        QVERIFY(saved.last().at(1).toBool());
         Store library;
         QVERIFY(library.open());
         QCOMPARE(library.feed(b)->tags, remote + QStringList{"more"});
@@ -20817,8 +21484,7 @@ private slots:
         QVERIFY(store.setSyncAccount(syncNpub(), syncPubkey(), {}));
         const qint64 a = store.addFeed("https://a.invalid/feed", "A", "News");
         QVERIFY(store.setFeedTagList(a, "a, b"));
-        const int edited = publishBit(Sync::subscriptionsKind) | subscriptionsEditedBit;
-        QVERIFY(store.markPublishPending(syncPubkey(), edited, false));
+        QVERIFY(markAllPublished(store, syncPubkey()));
         const qint64 edits = store.syncAccount().subscriptionsEdits;
         OrganizeChange change;
         QVERIFY(store.setFeedTagList(a, "a,b", &change));
@@ -20915,8 +21581,20 @@ private slots:
         for (const Opml::Outline &outline : outlines)
             QCOMPARE(outline.folder, QString("Daily reads"));
         QVERIFY(store.deleteCategory("Daily reads"));
+        error.clear();
         opml = Library::exportOpml(store, &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
         QVERIFY(!opml.contains("Daily reads"));
+        QString parseError;
+        const QList<Opml::Outline> after = Opml::parse(opml, &parseError);
+        QVERIFY2(parseError.isEmpty(), qPrintable(parseError));
+        QStringList urls;
+        for (const Opml::Outline &outline : after) {
+            urls << outline.xmlUrl;
+            QVERIFY2(outline.folder.isEmpty(), qPrintable(outline.folder));
+        }
+        urls.sort();
+        QCOMPARE(urls, (QStringList{"https://a.invalid/feed", "https://b.invalid/feed"}));
     }
 
     // A category renamed and tags set here go out in the next subscription
@@ -21017,7 +21695,7 @@ private slots:
         // an older one, mirrors what it carries.
         QVERIFY(store.syncAccount().publishPending & subscriptionsEditedBit);
         QCOMPARE(Sync::recordPublished(store, syncPubkey(), *NostrEvent::fromJson(published), now, nullptr, nullptr,
-                                       -1, drafts.subscriptionsEdits),
+                                       -1, drafts.subscriptionEdits),
                  QString());
         QVERIFY(!(store.syncAccount().publishPending & subscriptionsEditedBit));
         QVERIFY(pull(published));
@@ -21031,7 +21709,7 @@ private slots:
         const QJsonObject second = signedEvent(drafts.events.first().kind, drafts.events.first().content,
                                                drafts.events.first().tags, drafts.events.first().createdAt);
         QCOMPARE(Sync::recordPublished(store, syncPubkey(), *NostrEvent::fromJson(second), now + 10, nullptr, nullptr,
-                                       -1, drafts.subscriptionsEdits),
+                                       -1, drafts.subscriptionEdits),
                  QString());
         QVERIFY(store.syncAccount().publishPending & subscriptionsEditedBit);
         QCOMPARE(feeds(store).value(b).tags, QStringList{"late"});
@@ -21075,6 +21753,8 @@ private slots:
             QVERIFY(store.open());
             QVERIFY(store.setFeedCategory(first, "News"));
             QVERIFY(store.setFeedCategory(second, "Tech"));
+            // Seeded as a pull would leave them, with nothing changed here.
+            QVERIFY(store.clearPendingEdits(*store.pendingEdits()));
             QVERIFY(store.replaceCategoryStyles({{"News", {"#ff0000", "📰"}}}));
             QVERIFY(store.setFeedTags(first, {"tech"}));
             QVERIFY(store.setFeedTags(second, {"tech", "art"}));
@@ -21099,7 +21779,7 @@ private slots:
 
         QVERIFY(backend.renameCategory("News", "Daily"));
         QTRY_COMPARE(saved.size(), 1);
-        QCOMPARE(saved.last().at(0).toBool(), true);
+        QCOMPARE(saved.last().at(1).toBool(), true);
         QCOMPARE(backend.status(), QString("Renamed the category News to Daily"));
         QVERIFY(store.syncAccount().publishPending & subscriptionsEditedBit);
         undoRedo(
@@ -21175,22 +21855,22 @@ private slots:
         // Refused: the dialog hears why, at once or once the worker has
         // tried, and nothing changes or is undone.
         const int before = int(saved.size());
-        QVERIFY(!backend.setFeedTags(first, QString("bad") + QChar(1)));
-        QCOMPARE(saved.size(), before + 1);
-        QCOMPARE(saved.last().at(0).toBool(), false);
-        QVERIFY2(saved.last().at(1).toString().startsWith("Cannot change the tags: The tag bad"),
-                 qPrintable(saved.last().at(1).toString()));
-        QVERIFY(!backend.renameCategory("Nope", "Two  spaces"));
-        QCOMPARE(saved.size(), before + 2);
-        QCOMPARE(saved.last().at(1).toString(),
+        QVERIFY(backend.setFeedTags(first, QString("bad") + QChar(1)));
+        QTRY_COMPARE(saved.size(), before + 1);
+        QCOMPARE(saved.last().at(1).toBool(), false);
+        QVERIFY2(saved.last().at(2).toString().startsWith("Cannot change the tags: The tag bad"),
+                 qPrintable(saved.last().at(2).toString()));
+        QVERIFY(backend.renameCategory("Nope", "Two  spaces"));
+        QTRY_COMPARE(saved.size(), before + 2);
+        QCOMPARE(saved.last().at(2).toString(),
                  QString("Cannot rename the category: A category name cannot hold control characters, direction "
                          "marks, or several spaces in a row"));
-        QVERIFY(!backend.renameTag("technology", QString("a") + QChar(0x200B) + "b"));
-        QCOMPARE(saved.size(), before + 3);
+        QVERIFY(backend.renameTag("technology", QString("a") + QChar(0x200B) + "b"));
+        QTRY_COMPARE(saved.size(), before + 3);
         QVERIFY(backend.renameCategory("Nope", "Other"));
         QTRY_COMPARE(saved.size(), before + 4);
-        QCOMPARE(saved.last().at(0).toBool(), false);
-        QCOMPARE(saved.last().at(1).toString(), QString("Cannot rename the category: There is no category Nope"));
+        QCOMPARE(saved.last().at(1).toBool(), false);
+        QCOMPARE(saved.last().at(2).toString(), QString("Cannot rename the category: There is no category Nope"));
         QCOMPARE(backend.categoryProblem(" "), QString("A category needs a name"));
         QCOMPARE(backend.tagListProblem("a, , b"), QString());
 
@@ -21226,6 +21906,46 @@ private slots:
         QCOMPARE(feed(first).category, QString("Last"));
     }
 
+    // Each request to change the categories or tags gets its own id, and
+    // exactly one answer carrying it, after the call returns: a refusal
+    // with the next turn of the event loop, a write once it is done, in
+    // whatever order they come.
+    void backendAnswersEachOrganizeRequestOnce()
+    {
+        QTemporaryDir dir;
+        const EnvironmentGuard guard({"READSTR_HOME"});
+        qputenv("READSTR_HOME", dir.path().toUtf8());
+        const auto [first, second] = seedLibrary();
+        {
+            Store store;
+            QVERIFY(store.open());
+            QVERIFY(store.setFeedCategory(first, "News"));
+        }
+        Backend backend;
+        QSignalSpy saved(&backend, &Backend::organizeSaved);
+        const int deleted = backend.deleteCategory("News");
+        const int tagged = backend.setFeedTags(second, "x");
+        const int refused = backend.renameCategory("News", "Two  spaces");
+        const int missing = backend.deleteTag("nope");
+        QVERIFY(deleted > 0);
+        QCOMPARE(QSet<int>({deleted, tagged, refused, missing}).size(), 4);
+        QCOMPARE(saved.size(), 0);
+        QTRY_COMPARE(saved.size(), 4);
+        QTest::qWait(50);
+        QCOMPARE(saved.size(), 4);
+        QHash<int, QList<QVariant>> answers;
+        for (const QList<QVariant> &answer : saved)
+            answers.insert(answer.at(0).toInt(), answer);
+        QCOMPARE(answers.keys().size(), 4);
+        QCOMPARE(answers.value(deleted).at(1).toBool(), true);
+        QCOMPARE(answers.value(tagged).at(1).toBool(), true);
+        QCOMPARE(answers.value(refused).at(1).toBool(), false);
+        QCOMPARE(answers.value(refused).at(2).toString(),
+                 "Cannot rename the category: " + Sync::categoryNameProblem("Two  spaces"));
+        QCOMPARE(answers.value(missing).at(1).toBool(), false);
+        QCOMPARE(answers.value(missing).at(2).toString(), QString("Cannot delete the tag: No feed has the tag nope"));
+    }
+
     // The window publishes what was changed, and the mark that kept it
     // from a pull goes once that publish is recorded.
     void backendPublishesCategoryAndTagChanges()
@@ -21251,24 +21971,25 @@ private slots:
         backend.setRelays({relay.url()});
         backend.setPublishDelays(100, 100);
 
+        // Asked for together, both are written before the publish they
+        // schedule reads the library on the same worker.
         QVERIFY(backend.renameCategory("News", "Daily"));
-        QTRY_COMPARE(backend.status(), QString("Renamed the category News to Daily"));
         QVERIFY(backend.setFeedTags(firstId, "tech"));
+        QTRY_COMPARE(backend.status(), QString("Changed the tags of First"));
         QTRY_COMPARE_WITH_TIMEOUT(relay.published.size(), 1, 10000);
         QTRY_VERIFY(!backend.publishing());
         QVERIFY2(backend.publishError().isEmpty(), qPrintable(backend.publishError()));
-        // Both changes in the one list, whichever came first.
-        const auto carriesBoth = [&] {
-            const QJsonObject content =
-                QJsonDocument::fromJson(relay.published.last().value("content").toString().toUtf8()).object();
-            return content.value("categories").toObject().value(first).toObject() == QJsonObject{{"name", "Daily"}}
-                   && content.value("tags").toObject().value(first).toArray() == QJsonArray{"tech"};
-        };
-        QTRY_VERIFY_WITH_TIMEOUT(carriesBoth(), 10000);
-        QTRY_VERIFY(!backend.publishing());
+        // Both changes in the one list, as the burst goes out once.
+        QCOMPARE(relay.published.size(), 1);
+        const QJsonObject content =
+            QJsonDocument::fromJson(relay.published.first().value("content").toString().toUtf8()).object();
+        QCOMPARE(content.value("categories").toObject().value(first).toObject(), (QJsonObject{{"name", "Daily"}}));
+        QCOMPARE(content.value("tags").toObject().value(first).toArray(), QJsonArray{"tech"});
         Store store;
         QVERIFY(store.open());
         QTRY_COMPARE(store.syncAccount().publishPending, 0);
+        QVERIFY(store.pendingEdits()->isEmpty());
+        QCOMPARE(relay.published.size(), 1);
     }
 
     // The command line changes categories and tags as the window does,
@@ -21422,6 +22143,8 @@ private slots:
             QVERIFY(store.open());
             QVERIFY(store.setFeedCategory(first, "News"));
             QVERIFY(store.setFeedCategory(second, "Tech"));
+            // Seeded as a pull would leave them, with nothing changed here.
+            QVERIFY(store.clearPendingEdits(*store.pendingEdits()));
             QVERIFY(store.replaceCategoryStyles({{"News", {"#ff0000", {}}}}));
             QVERIFY(store.setFeedTags(first, {"tech"}));
             QVERIFY(store.setFeedTags(second, {"tech", "art"}));
@@ -21455,6 +22178,7 @@ private slots:
         };
         const auto heading = [&](const QString &name) { return rowOf("category", "category", name); };
         const auto click = [&](QQuickItem *row, Qt::MouseButton button = Qt::LeftButton) {
+            QVERIFY(row);
             QTest::mouseClick(loaded.window, button, {},
                               row->mapToScene(QPointF(row->width() / 2, row->height() / 2)).toPoint());
         };
@@ -21473,6 +22197,7 @@ private slots:
         const auto feedTags = [&store](qint64 id) { return store.feed(id).value_or(Feed{}).tags; };
         const auto feedCategory = [&store](qint64 id) { return store.feed(id).value_or(Feed{}).category; };
         const auto openMenu = [&](QQuickItem *row, const char *menuName, const char *item) {
+            QVERIFY(row);
             click(row, Qt::RightButton);
             QObject *menu = find(menuName);
             QVERIFY(menu);
@@ -21571,7 +22296,11 @@ private slots:
         QCOMPARE(feedCategory(first), QString("Daily"));
 
         // The feed's menu moves it: to a new category, then to none.
-        openMenu(rowOf("feed", "title", "First"), "feedMenu", "feedMenuMove");
+        // The row is waited for, so a missing one fails here rather than
+        // being clicked through a null pointer.
+        QQuickItem *firstRow = nullptr;
+        QTRY_VERIFY((firstRow = rowOf("feed", "title", "First")));
+        openMenu(firstRow, "feedMenu", "feedMenuMove");
         QTRY_VERIFY(categoryDialog->property("opened").toBool());
         QCOMPARE(categoryDialog->property("title").toString(), QString("Move First to a category"));
         QObject *choice = find("categoryChoice");
@@ -21588,7 +22317,8 @@ private slots:
         QTRY_VERIFY(!categoryDialog->property("visible").toBool());
         QCOMPARE(feedCategory(first), QString("Fresh"));
         QTRY_VERIFY(heading("Fresh"));
-        openMenu(rowOf("feed", "title", "First"), "feedMenu", "feedMenuMove");
+        QTRY_VERIFY((firstRow = rowOf("feed", "title", "First")));
+        openMenu(firstRow, "feedMenu", "feedMenuMove");
         QTRY_VERIFY(categoryDialog->property("opened").toBool());
         choice->setProperty("currentIndex", 0);
         QCOMPARE(choice->property("displayText").toString(), QString("No category"));
@@ -21599,7 +22329,9 @@ private slots:
 
         // The feed's menu edits its tags; a tag that cannot be kept is
         // refused, with the list kept as typed.
-        openMenu(rowOf("feed", "title", "Second"), "feedMenu", "feedMenuTags");
+        QQuickItem *secondRow = nullptr;
+        QTRY_VERIFY((secondRow = rowOf("feed", "title", "Second")));
+        openMenu(secondRow, "feedMenu", "feedMenuTags");
         QTRY_VERIFY(tagsDialog->property("opened").toBool());
         QTRY_VERIFY(tagsField->hasActiveFocus());
         QCOMPARE(tagsDialog->property("title").toString(), QString("Tags of Second"));
@@ -21654,6 +22386,36 @@ private slots:
         QTest::keyClick(loaded.window, Qt::Key_Z, Qt::ShiftModifier | Qt::ControlModifier);
         QTRY_COMPARE(backend.status(), QString("Redid: deleted the tag art"));
         QCOMPARE(feedTags(second), (QStringList{"technology", "news"}));
+
+        // A delete confirmed earlier, still out when an editor saves, fails
+        // after the editor asked: its answer neither closes the editor nor
+        // shows there, and the editor's own answer closes it.
+        QTRY_VERIFY((secondRow = rowOf("feed", "title", "Second")));
+        openMenu(secondRow, "feedMenu", "feedMenuTags");
+        QTRY_VERIFY(tagsDialog->property("opened").toBool());
+        tagsField->setProperty("text", "technology, news, later");
+        QSignalSpy answers(&backend, &Backend::organizeSaved);
+        bool editorWaited = false;
+        int deleted = 0;
+        const QMetaObject::Connection watch = connect(&backend, &Backend::organizeSaved, this, [&](int request) {
+            if (request == deleted)
+                editorWaited = tagsDialog->property("saving").toBool() && tagsDialog->property("visible").toBool();
+        });
+        deleted = backend.deleteTag("nope");
+        QVERIFY(QMetaObject::invokeMethod(find("tagsSave"), "clicked"));
+        QVERIFY(tagsDialog->property("saving").toBool());
+        const int edited = tagsDialog->property("request").toInt();
+        QVERIFY(edited > deleted);
+        QTRY_COMPARE(answers.size(), 2);
+        disconnect(watch);
+        QCOMPARE(answers.at(0).at(0).toInt(), deleted);
+        QCOMPARE(answers.at(0).at(1).toBool(), false);
+        QCOMPARE(answers.at(1).at(0).toInt(), edited);
+        QCOMPARE(answers.at(1).at(1).toBool(), true);
+        QVERIFY(editorWaited);
+        QTRY_VERIFY(!tagsDialog->property("visible").toBool());
+        QCOMPARE(find("tagsProblem")->property("text").toString(), QString());
+        QCOMPARE(feedTags(second), (QStringList{"technology", "news", "later"}));
     }
 
 private:
@@ -21974,6 +22736,16 @@ private:
     // The test key's public key and npub, which the sync tests pull for.
     static QString syncPubkey() { return signedEvent(1, "", {}, 1).value("pubkey").toString(); }
     static QString syncNpub() { return Nip19::npub(syncPubkey()); }
+
+    // As though a subscription list carrying every change made here had
+    // gone out for `pubkey`: its kind's bit and every mark (PendingEdits)
+    // are cleared.
+    static bool markAllPublished(Store &store, const QString &pubkey)
+    {
+        const std::optional<PendingEdits> pending = store.pendingEdits();
+        return pending && store.markPublishPending(pubkey, publishBit(Sync::subscriptionsKind), false)
+               && store.clearPendingEdits(*pending);
+    }
 
     // A sync event as the web app publishes it: `content` as JSON, with its
     // d tag and client tag.

@@ -247,13 +247,14 @@ QStringList publishedReadGuids(const QStringList &local, const QStringList &remo
 // when this library's own feeds do not fit. What `remote` carries with a user
 // name or password is dropped too. A local feed whose URL is past
 // maxUrlLength is left out, and counted in `tooLong`.
-// With `edited`, when the categories or tags were changed here since the
-// list last went out (subscriptionsEditedBit), a feed whose tags, or whose
-// category's color and icon, are not what the last list gives it as the
-// library shows that list (mirrorList()) carries the library's instead:
-// those are the ones changed here.
+// A feed whose tags were changed here, and a category whose color and icon
+// or being were, not published yet (Feed::tagsEdit and styleEdit,
+// PendingEdits), carries the library's instead, which are the ones changed
+// here. A feed's category is the library's, which a pull leaves the list's
+// unless it was changed here (mirrorList()); a name longer than
+// maxCategoryNameLength is cut, never through a surrogate pair.
 std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QString &remote, qint64 remoteStoredAt,
-                                            qint64 now, int *tooLong = nullptr, bool edited = false);
+                                            qint64 now, int *tooLong = nullptr);
 QString readStatusContent(const QStringList &guids, qint64 now);
 // Kind 30406's content: the views without their mute words, which never
 // leave this machine.
@@ -280,9 +281,11 @@ struct Drafts {
     // SyncAccount::viewsEdits when the saved views were drafted, for
     // recordPublished(); -1 when they were not.
     qint64 viewsEdits = -1;
-    // SyncAccount::subscriptionsEdits when the subscription list was
-    // drafted, likewise.
-    qint64 subscriptionsEdits = -1;
+    // Every mark (PendingEdits) when the subscription list was drafted, with
+    // the number of each part's last change, for recordPublished(): all of
+    // them count as carried, as the list holds what was changed here of
+    // each row it lists, and a row it leaves out no list from here carries.
+    PendingEdits subscriptionEdits;
 };
 // Unsigned events of `kinds` from the library, each dated past the newest
 // version seen of it: its watermark, or what `seen` (Outcome::newest) says
@@ -294,16 +297,17 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
 // its content to build the next one on, for a read status its GUIDs as the
 // last list (marking nothing read), and for saved views that they went out
 // as edited (viewsEditedBit) when `viewsEdits`, Drafts::viewsEdits, says
-// no edit came after the draft, and for a subscription list likewise that
-// the categories and tags went out as edited (subscriptionsEditedBit) when
-// `subscriptionsEdits` says so. Empty on success, else why not.
+// no edit came after the draft, and for a subscription list that the rows
+// of `carried`, Drafts::subscriptionEdits, went out as changed here, which
+// clears each mark not changed again since (Store::clearPendingEdits()).
+// Empty on success, else why not.
 // `superseded` says whether a newer version applied meanwhile won instead,
 // so what this one carried may be missing from what the relays hold, and
 // `mirrored` whether a subscription list changed the feeds' tags or a
 // category's color or icon here, which the window then shows.
 QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &event, qint64 builtAt,
                         bool *superseded = nullptr, bool *mirrored = nullptr, qint64 viewsEdits = -1,
-                        qint64 subscriptionsEdits = -1);
+                        const PendingEdits &carried = {});
 #ifdef READSTR_TESTS
 // Only in the test build: called by apply() once it has found the list it
 // mirrors still the one applied, and by recordPublished() once it has
@@ -313,5 +317,9 @@ inline std::function<void()> mirrorHook;
 // Only in the test build: called by drafts() once it has read the account,
 // before it reads the library, on its thread.
 inline std::function<void()> draftsHook;
+// Only in the test build: called by apply() once it has mirrored what it
+// applied, before the transaction that caches it for publishing, on its
+// thread.
+inline std::function<void()> cacheHook;
 #endif
 }

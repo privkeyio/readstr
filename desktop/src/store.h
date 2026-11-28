@@ -38,10 +38,20 @@ struct Feed {
     // When it was subscribed to on this machine.
     QDateTime createdAt = {};
     // Its tags, and its category's color (Sync::safeColor()) and icon
-    // (Sync::safeIcon()), as the last subscription list applied gave them.
+    // (Sync::safeIcon()), as the last subscription list applied gave them,
+    // or as they were changed here since.
     QStringList tags = {};
     QString categoryColor = {};
     QString categoryIcon = {};
+    // Its category's id, 0 for none.
+    qint64 categoryId = 0;
+    // The number of the last change here (SyncAccount::subscriptionsEdits)
+    // not published yet, or 0 for none (PendingEdits): to its tags, to the
+    // category it is in, and to its category's color and icon or that
+    // category's being.
+    qint64 tagsEdit = 0;
+    qint64 placementEdit = 0;
+    qint64 styleEdit = 0;
 };
 
 struct Article {
@@ -139,8 +149,27 @@ struct SyncAccount {
     qint64 viewsEdits = 0;
     // How many times the categories or tags were changed here
     // (Store::renameCategory() and the like), likewise, for the
-    // subscription list, counted whether or not an account was set.
+    // subscription list, counted whether or not an account was set. Each
+    // change marks the feeds and categories it changed with its number
+    // (PendingEdits).
     qint64 subscriptionsEdits = 0;
+};
+
+// What was changed here and not published yet, each with the number of its
+// last change (SyncAccount::subscriptionsEdits): the feeds, by id, whose
+// tags were changed, those moved to another category, and the categories,
+// by id, whose color and icon, or being, were. Each is marked apart, so a
+// pull leaves only what was changed here as it is (Sync::mirrorList()) and
+// a publish carries only that as it is here (Sync::subscriptionsContent()),
+// while the rest follows the list. A published list clears each mark it
+// carried, unless that part was changed again after the list was built
+// (Store::clearPendingEdits()). Marks belong to the library, so they stay
+// when syncing stops.
+struct PendingEdits {
+    QHash<qint64, qint64> tags;
+    QHash<qint64, qint64> placements;
+    QHash<qint64, qint64> styles;
+    bool isEmpty() const { return tags.isEmpty() && placements.isEmpty() && styles.isEmpty(); }
 };
 
 // The bit of `kind` in SyncAccount::publishPending, 0 for an unknown kind.
@@ -151,11 +180,11 @@ int publishBit(int kind);
 // (Sync::drafts()), and only a publish built after the last edit clears it
 // (SyncAccount::viewsEdits, Sync::recordPublished()).
 inline constexpr int viewsEditedBit = 8;
-// Also in SyncAccount::publishPending: the categories or the tags were
-// changed here since the subscription list last went out. While it is set,
-// a pull keeps what was changed (Sync::mirrorList()) and a publish carries
-// it (Sync::subscriptionsContent()); only a publish built after the last
-// change clears it (SyncAccount::subscriptionsEdits).
+// Also in SyncAccount::publishPending, as Store::syncAccount() reads it:
+// some feed or category is marked as changed here and not published yet
+// (PendingEdits). It is never stored, but worked out from the marks each
+// time, so it holds while any mark does, across restarts and sign-ins, and
+// goes once the last one is cleared.
 inline constexpr int subscriptionsEditedBit = 16;
 
 // The content of the newest event of a d tag the relays are known to hold,
@@ -313,11 +342,14 @@ public:
     bool setRelayHints(qint64 id, const QStringList &relays);
     // The feed's tags as a subscription list carries them; none clears them.
     bool setFeedTags(qint64 id, const QStringList &tags);
-    // Gives each category the color and icon `styles` has for its name as
-    // FeedParser::cleanText() leaves it, and the others none, writing only
-    // those that change, and says in `wrote` whether any did. Neither is
-    // checked here: callers pass them through Sync::safeColor() and
-    // Sync::safeIcon().
+    // Puts the feed in the category `name`, made if need be, as a
+    // subscription list files it, marking nothing (PendingEdits).
+    bool placeFeed(qint64 id, const QString &name);
+    // Gives each category not marked as changed here (PendingEdits) the
+    // color and icon `styles` has for its name as FeedParser::cleanText()
+    // leaves it, and the others none, writing only those that change, and
+    // says in `wrote` whether any did. Neither is checked here: callers pass
+    // them through Sync::safeColor() and Sync::safeIcon().
     bool replaceCategoryStyles(const QHash<QString, CategoryStyle> &styles, bool *wrote = nullptr);
     // Every relay answered a refresh that started at `time`.
     bool recordComplete(qint64 id, const QDateTime &time);
@@ -380,35 +412,38 @@ public:
     // become `pubkey`'s; when they are another account's
     // (savedViewsOfAnother()), it fails unless `dropOtherViews`, which
     // deletes them, mute words and unpublished edits included. The feeds'
-    // tags and the categories' colors and icons become `pubkey`'s too:
-    // those of another account, even one no longer set, are deleted, and
-    // when it changed them here and has not published that yet
-    // (subscriptionEditsOfAnother()), only with `dropOtherViews`; those of
-    // `pubkey` itself, or changed before any account, are kept, and a
-    // change of them not published yet is marked to publish again. Those of
-    // an owner not known (none kept, and not changed here) are deleted.
+    // tags and the categories' colors and icons become `pubkey`'s too
+    // (subscriptions_owner): those of `pubkey` itself are kept, with their
+    // marks (PendingEdits), which publish them; those of another account,
+    // even one no longer set, are deleted with every mark, and when some
+    // mark is pending (subscriptionEditsOfAnother()), only with
+    // `dropOtherViews`. Of those whose account is not known, as for changes
+    // made before any account was set, only the marked ones are kept, as
+    // changes made here for the first account to take; the rest, which
+    // could be an earlier account's, are deleted.
     bool setSyncAccount(const QString &npub, const QString &pubkey, const QStringList &relays,
                         bool dropOtherViews = false);
-    // Whether the categories or tags were changed here under an account
-    // other than `pubkey`, even one no longer set, and that change has not
-    // been published; null on failure. Changes made before any account was
-    // set are nobody's.
+    // Whether the tags and category styles are those of an account other
+    // than `pubkey`, even one no longer set, and some feed or category is
+    // marked as changed here and not published (PendingEdits); null on
+    // failure. Changes made before any account was set are nobody's.
     std::optional<bool> subscriptionEditsOfAnother(const QString &pubkey);
     // Whether there are saved views pulled or edited under an account other
     // than `pubkey`, even one no longer set; null on failure. Views made
     // before any account was set are nobody's.
     std::optional<bool> savedViewsOfAnother(const QString &pubkey);
-    // The content of the subscription list the tags were last mirrored
-    // from under their owner, kept when syncing stopped
-    // (subscriptions_owner), or null when there is none, or on failure,
-    // with lastError() set. Sync::mirrorList() reads it while no list is
-    // cached for the account (syncRemote()).
-    std::optional<QString> keptSubscriptionsBase();
+    // Every feed and category marked as changed here and not published,
+    // with the number of its last change; null on failure.
+    std::optional<PendingEdits> pendingEdits();
+    // Clears the marks of `carried`, the rows a published subscription list
+    // carried, each only where it is still at or below the number recorded,
+    // so a row changed again after that list was built stays marked.
+    bool clearPendingEdits(const PendingEdits &carried);
     // Forgets the account and what was pulled for it; subscriptions, read
     // marks, saved views, tags, and category styles stay, still those of
     // the account (Store::savedViewsOfAnother(),
-    // subscriptionEditsOfAnother()), with whether the categories and tags
-    // were changed since they last went out.
+    // subscriptionEditsOfAnother()), with the marks of the changes made here
+    // not published yet (PendingEdits).
     bool clearSyncAccount();
     // Moves the d tag's watermark up to the event `createdAt` and
     // `eventId`, never down, in NostrEvent::isNewerThan's order.
@@ -446,10 +481,11 @@ public:
     // part way rolls the delete back with the rest.
     bool replaceSavedViews(const QList<SavedView> &views);
     // Changes to the categories and tags, each in one transaction that
-    // marks the subscription list to publish for the sync account set, if
-    // any (publishBit() and subscriptionsEditedBit), or for the next one to
-    // sign in that takes them (setSyncAccount()), and counts the change
-    // (SyncAccount::subscriptionsEdits). With `expectedPubkey`, each fails
+    // counts the change (SyncAccount::subscriptionsEdits), marks each feed
+    // and category it changed with that number (PendingEdits), and marks
+    // the subscription list to publish for the sync account set, if any
+    // (publishBit()), or for the next one to sign in that takes the marks
+    // (setSyncAccount()). With `expectedPubkey`, each fails
     // when the account set is another, saying so, as the change was worked
     // out under that one. `change` gets what each did, for an undo. A name
     // or a tag refused says why in lastError(): Sync::categoryNameProblem(),
@@ -485,7 +521,8 @@ public:
     bool deleteTag(const QString &name, OrganizeChange *change = nullptr,
                    const std::optional<QString> &expectedPubkey = std::nullopt);
     // Puts back what `change` found, with `undo`, or what it left, in one
-    // transaction marked to publish as the change was, skipping the feeds
+    // transaction marked to publish as the change was, the rows it changes
+    // back marked as a change of their own, skipping the feeds
     // that are gone. Fails, setting `lasting` as no later try changes that,
     // when the sync account is not the one the change was made under, as
     // the tags and the styles are that account's, or when the feeds and
@@ -596,10 +633,12 @@ private:
     // or takes it off for an empty `to`, failing when no feed carries it.
     bool retagFeeds(const QString &name, const QString &to, OrganizeChange *change,
                     const std::optional<QString> &expectedPubkey);
-    // Marks the subscription list, its categories or tags changed here, to
-    // publish for `pubkey`, or, for an empty one, for the account that signs
-    // in next and takes them, and counts the change.
-    bool markSubscriptionsEdited(const QString &pubkey);
+    // Counts a change to the categories or tags, marks the feeds and
+    // categories of `after` that differ from `before` with its number
+    // (PendingEdits), and marks the subscription list to publish for
+    // `pubkey`, or, for an empty one, for the account that signs in next and
+    // takes the marks.
+    bool markSubscriptionsEdited(const QString &pubkey, const Organization &before, const Organization &after);
     bool clearSyncState();
     // Puts the item `id` in the search index, or puts it there again in
     // place of what it had, with `insert` prepared by prepareIndex().

@@ -666,10 +666,13 @@ QStringList storableTags(const QJsonValue &entry) {
 struct ListIndex {
     explicit ListIndex(const QJsonObject &list)
         : tagMap(list.value("tags").toObject()), tagEntryOf(entriesOf(tagMap)), listed(listedKeys(list)),
-          byName(stylesByName(list.value("categories").toObject())) {}
+          categories(list.value("categories").toObject()), categoryEntryOf(entriesOf(categories)),
+          byName(stylesByName(categories)) {}
     QJsonObject tagMap;
     QHash<QString, QString> tagEntryOf;
     QSet<QString> listed;
+    QJsonObject categories;
+    QHash<QString, QString> categoryEntryOf;
     QHash<QString, QJsonObject> byName;
 };
 
@@ -711,55 +714,61 @@ QHash<QString, CategoryStyle> mirroredStyles(const ListIndex &list, const QList<
     return styles;
 }
 
-bool sameStyle(const CategoryStyle &a, const CategoryStyle &b) { return a.color == b.color && a.icon == b.icon; }
+// A category's name as a subscription list carries it: the first
+// maxCategoryNameLength UTF-16 units, without the half of a surrogate pair
+// the cut would leave, as an OPML file can name a category at any length.
+QString cappedName(const QString &name) {
+    QString capped = name.left(maxCategoryNameLength);
+    if (capped.size() < name.size() && !capped.isEmpty() && capped.back().isHighSurrogate())
+        capped.chop(1);
+    return capped;
+}
 
-// Gives every feed here the tags mirroredTags() finds for it, and every
-// category the color and icon mirroredStyles() does, so the sidebar shows
-// what a publish from here builds on. A feed the list lists or has tags
-// for, and a category it names, has only what the list gives, as they come
-// from a list unless changed here. A tag that is listed twice is shown
-// once, and one that storableTag() refuses not at all; a color or an icon
-// that is not safe to show is left out. Only what differs is written, and
-// `wrote` says whether anything was.
+// Whether the library's category `local` is the one a list names `listed`,
+// cleaned as the import files it: the same name cleaned, or cut as a
+// publish from here cuts it (cappedName()), so a long name the list was
+// given from here is not taken for another category.
+bool sameCategory(const QString &local, const QString &listed) {
+    return FeedParser::cleanText(local) == listed || FeedParser::cleanText(cappedName(local)) == listed;
+}
+
+// The category the list files `feed` under, cleaned as the import files a
+// new feed, empty for none, or null when the list says nothing of it, which
+// leaves the feed its own. The web app says a feed it lists has no category
+// only by giving it no entry, so a feed it lists with none, or with a name
+// that cleans to nothing, has none; but a list whose map of categories is
+// full may be one a publish cut short (subscriptionsContent() stops at
+// maxFeeds entries), so a missing entry there says nothing. A feed the list
+// does not list keeps its own, as for its tags (mirroredTags()).
+std::optional<QString> mirroredCategory(const ListIndex &list, const Feed &feed) {
+    const QString key = feedKey(feed);
+    const auto entry = list.categoryEntryOf.constFind(key);
+    if (entry != list.categoryEntryOf.cend())
+        return FeedParser::cleanText(list.categories.value(*entry).toObject().value("name").toString());
+    if (!list.listed.contains(key) || list.categories.size() >= maxFeeds)
+        return std::nullopt;
+    return QString();
+}
+
+// Gives every feed here the tags mirroredTags() finds for it, the category
+// mirroredCategory() does, and every category the color and icon
+// mirroredStyles() does, so the sidebar shows what a publish from here
+// builds on. A feed the list lists or has tags for, and a category it names,
+// has only what the list gives, as they come from a list unless changed
+// here. A tag that is listed twice is shown once, and one that
+// storableTag() refuses not at all; a color or an icon that is not safe to
+// show is left out. Only what differs is written, and `wrote` says whether
+// anything was.
 //
-// While the categories or tags were changed here and have not gone out yet
-// (subscriptionsEditedBit), a pull must not take those changes back: the
-// list it brings, the same one again or a newer one from the web app, was
-// made without them. So a feed whose tags, or a category whose style, are
-// not what the list the library was mirrored from last gave them (the one
-// cached for publishing, which a pull caches only after this) keeps what
-// it has, and only the rest follow the list: what the web app changed of
-// the feeds not changed here still shows, and the next publish carries
-// both (subscriptionsContent()). With no such list cached, the one kept
-// when the account last stopped syncing stands for it (Store::
-// keptSubscriptionsBase()); with neither, as after changes made before any
-// account, every feed with tags and every category with a style keeps its
-// own.
+// What was changed here and not published yet (PendingEdits), a feed's
+// tags, the category it is in, or a category's style, each apart, stays as
+// it is: the list, the same one again or a newer one from the web app, was
+// made without that change, which the next publish carries
+// (subscriptionsContent()). Everything else follows the list, whatever was
+// changed elsewhere, so nothing here depends on which list came before.
 bool mirrorList(Store &store, const QJsonObject &list, bool *wrote = nullptr) {
     if (wrote)
         *wrote = false;
-    const SyncAccount account = store.syncAccount();
-    if (!store.lastError().isEmpty())
-        return false;
-    const bool edited = (account.publishPending & subscriptionsEditedBit) != 0;
-    std::optional<ListIndex> base;
-    if (edited) {
-        const auto cached = store.syncRemote(QString::fromLatin1(subscriptionsTag));
-        if (!store.lastError().isEmpty())
-            return false;
-        // None is cached after the account signed in again, until this
-        // pull caches one: the list kept for the owner when it stopped
-        // syncing is the one the tags were mirrored from.
-        std::optional<QString> content = cached ? std::optional(cached->content) : std::nullopt;
-        if (!content) {
-            content = store.keptSubscriptionsBase();
-            if (!store.lastError().isEmpty())
-                return false;
-        }
-        if (content)
-            if (const auto object = parseObject(*content))
-                base.emplace(*object);
-    }
     const ListIndex index(list);
     const QList<Feed> feeds = store.feeds();
     if (!store.lastError().isEmpty())
@@ -768,28 +777,24 @@ bool mirrorList(Store &store, const QJsonObject &list, bool *wrote = nullptr) {
         const std::optional<QStringList> tags = mirroredTags(index, feed);
         if (!tags)
             continue;
-        if (edited) {
-            const std::optional<QStringList> before = base ? mirroredTags(*base, feed) : std::nullopt;
-            if (before ? feed.tags != *before : !feed.tags.isEmpty())
-                continue;
-        }
-        if (*tags != feed.tags) {
+        if (!feed.tagsEdit && *tags != feed.tags) {
             if (!store.setFeedTags(feed.id, *tags))
                 return false;
             if (wrote)
                 *wrote = true;
         }
-    }
-    QHash<QString, CategoryStyle> styles = mirroredStyles(index, feeds);
-    if (edited) {
-        const QHash<QString, CategoryStyle> before = base ? mirroredStyles(*base, feeds) : QHash<QString, CategoryStyle>();
-        for (const Feed &feed : feeds) {
-            const QString category = FeedParser::cleanText(feed.category);
-            const CategoryStyle now{feed.categoryColor, feed.categoryIcon};
-            if (!category.isEmpty() && !sameStyle(now, before.value(category)))
-                styles.insert(category, now);
+        // A category the library keeps under a name the list spells
+        // cleaned, as an OPML file can name it, is the same one.
+        if (const auto category = mirroredCategory(index, feed);
+            !feed.placementEdit && category
+            && (category->isEmpty() ? !feed.category.isEmpty() : !sameCategory(feed.category, *category))) {
+            if (!store.placeFeed(feed.id, *category))
+                return false;
+            if (wrote)
+                *wrote = true;
         }
     }
+    const QHash<QString, CategoryStyle> styles = mirroredStyles(index, feeds);
     bool restyled = false;
     if (!store.replaceCategoryStyles(styles, &restyled))
         return false;
@@ -1095,6 +1100,10 @@ Outcome apply(Store &store, const SyncAccount &account, const NostrResult &resul
     // before, which a library from before publishing has no content for.
     // Checked under the write, so another process switching the account or
     // applying a newer one meanwhile is never cached over.
+#ifdef READSTR_TESTS
+    if (cacheHook)
+        cacheHook();
+#endif
     const bool cached = store.transaction([&] {
         const SyncAccount after = store.syncAccount();
         if (!store.lastError().isEmpty())
@@ -1205,7 +1214,7 @@ bool hasUserInfo(const QString &entry) { return !QUrl(entry).userInfo().isEmpty(
 }
 
 std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QString &remote, qint64 remoteStoredAt,
-                                            qint64 now, int *tooLong, bool edited) {
+                                            qint64 now, int *tooLong) {
     const QJsonObject list = parseObject(remote).value_or(QJsonObject{});
     const QJsonObject remoteTags = list.value("tags").toObject(),
                       remoteCategories = list.value("categories").toObject();
@@ -1262,20 +1271,19 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
         // whose unsubscribe was undone after a list without it was
         // published, keeps the tags it has here, which only ever came from
         // a list (mirrorList()). One the list lists with no tags has none.
-        // Edited here, a feed whose tags are not what the list gives it
-        // carries its own: they are the ones changed here.
+        // A feed whose tags were changed here (PendingEdits) carries its
+        // own, even none: they are the ones changed here.
         const auto tagEntry = tagEntryOf.constFind(key);
         const bool remoteListed = remoteKeys.contains(key);
         if (tags.size() < maxFeeds) {
-            if (tagEntry != tagEntryOf.cend()
-                && !(edited && feed.tags != storableTags(remoteTags.value(*tagEntry)))) {
+            if (tagEntry != tagEntryOf.cend() && !feed.tagsEdit) {
                 if (const auto fitting = tagsFitting(remoteTags.value(*tagEntry)); fitting && !fitting->isEmpty())
                     tags.insert(feed.url, *fitting);
-            } else if ((edited || !remoteListed) && !feed.tags.isEmpty()) {
+            } else if ((feed.tagsEdit || !remoteListed) && !feed.tags.isEmpty()) {
                 tags.insert(feed.url, QJsonArray::fromStringList(feed.tags));
             }
         }
-        const QString name = feed.category.left(256);
+        const QString name = cappedName(feed.category);
         if (name.isEmpty() || categories.size() >= maxFeeds)
             continue;
         // The category as the last list names it, so the publish neither
@@ -1291,16 +1299,11 @@ std::optional<QString> subscriptionsContent(const QList<Feed> &feeds, const QStr
                                        && FeedParser::cleanText(own.value("name").toString()) == cleaned;
         const QJsonObject web = ownIsThisCategory ? own : byName.value(cleaned);
         QJsonObject category = categoryStyle(web);
-        // Edited here, a category whose color and icon are not the ones the
-        // list gives it as the sidebar shows them (stylesByName(), through
-        // safeColor() and safeIcon()) carries its own: renamed or merged
-        // here, it keeps the style it had, or takes the one it joined.
-        const QJsonObject shown = categoryStyle(byName.value(cleaned));
-        const bool restyled =
-            edited && !sameStyle(CategoryStyle{safeColor(shown.value("color").toString()),
-                                               safeIcon(shown.value("icon").toString())},
-                                 CategoryStyle{feed.categoryColor, feed.categoryIcon});
-        if (restyled) {
+        // A category whose color and icon, or whose being, were changed
+        // here (PendingEdits) carries them as they are here: renamed or
+        // merged here, it keeps the style it had, or takes the one it
+        // joined.
+        if (feed.styleEdit) {
             category = QJsonObject();
             if (!feed.categoryColor.isEmpty())
                 category.insert("color", feed.categoryColor);
@@ -1516,8 +1519,8 @@ Drafts draftsInTransaction(Store &store, const QString &pubkey, const QList<int>
             if (!store.lastError().isEmpty())
                 return failed();
             int tooLong = 0;
-            const auto built = subscriptionsContent(feeds, remoteContent, remote ? remote->storedAt : 0, now,
-                                                    &tooLong, (account.publishPending & subscriptionsEditedBit) != 0);
+            const auto built =
+                subscriptionsContent(feeds, remoteContent, remote ? remote->storedAt : 0, now, &tooLong);
             if (!built) {
                 out.failed << kind;
                 out.errors << tr("the subscription list is too large for the relays (over 60,000 bytes)");
@@ -1527,7 +1530,18 @@ Drafts draftsInTransaction(Store &store, const QString &pubkey, const QList<int>
                 out.notes << tr("%n feeds are left out of the subscription list, as their addresses are too long",
                                 tooLong);
             content = *built;
-            out.subscriptionsEdits = account.subscriptionsEdits;
+            // Every mark, read in the same transaction as the feeds, counts
+            // as carried: what the content holds of a marked row is what
+            // was changed here, and a row it leaves out (a feed on the local
+            // network, with an address past maxUrlLength, past maxFeeds, or
+            // unsubscribed on another device; a category none of whose
+            // feeds goes out) is one no list from here will ever carry, so
+            // its mark would otherwise hold it against every pull, and keep
+            // the list to publish, for good.
+            const std::optional<PendingEdits> pending = store.pendingEdits();
+            if (!pending)
+                return failed();
+            out.subscriptionEdits = *pending;
         } else if (kind == readStatusKind) {
             // Allowed when the run began, but maybe not any more.
             if (!account.publishReads) {
@@ -1617,7 +1631,7 @@ Drafts drafts(Store &store, const QString &pubkey, const QList<int> &kinds, cons
 }
 
 QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &event, qint64 builtAt,
-                        bool *superseded, bool *mirrored, qint64 viewsEdits, qint64 subscriptionsEdits) {
+                        bool *superseded, bool *mirrored, qint64 viewsEdits, const PendingEdits &carried) {
     const QString tag = QString::fromLatin1(dTag(event.kind));
     bool changed = false, lost = false, wrote = false;
     const bool saved = store.transaction([&] {
@@ -1648,11 +1662,12 @@ QString recordPublished(Store &store, const QString &pubkey, const NostrEvent &e
         if (event.kind == viewsKind && (account.publishPending & viewsEditedBit) && viewsEdits >= 0
             && viewsEdits == account.viewsEdits && !store.markPublishPending(pubkey, viewsEditedBit, false))
             return false;
-        // So are the categories and tags, after which a pull mirrors the
-        // list as it comes (mirrorList()), this one first.
-        if (event.kind == subscriptionsKind && (account.publishPending & subscriptionsEditedBit)
-            && subscriptionsEdits >= 0 && subscriptionsEdits == account.subscriptionsEdits
-            && !store.markPublishPending(pubkey, subscriptionsEditedBit, false))
+        // So are the feeds and categories it carried as changed here, each
+        // unless it was changed again after the draft, after which a pull
+        // mirrors them as the list has them (mirrorList()), this one first.
+        // One it left out, as a feed another device unsubscribed from, stays
+        // marked, as what was changed of it has not gone out.
+        if (event.kind == subscriptionsKind && !store.clearPendingEdits(carried))
             return false;
         // Stamped with when the content was built, not now: a feed
         // subscribed while this run signed and published is not in it.

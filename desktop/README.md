@@ -210,13 +210,15 @@ it. Tags that would look the same, such as one with an invisible zero-width
 space, are listed once, and select the feeds that carry any of them. At most
 500 tags are listed, those carried by the most feeds. A category's heading
 shows its color as a dot and its icon before its name. Both are shown as the
-last subscription list applied has them, pulled or published here, so a
+last subscription list applied has them, pulled or published here, but for
+those changed here and not published yet (see Categories and tags), so a
 newer list from the web app updates them, and a feed the list lists without
 tags, or a category it names without a color or icon, has none. A feed the
 list leaves out, such as one whose unsubscribe you undid while the list
 without it was going out, keeps its own, and the next list carries them
 on. Signing in with another npub clears them until its list arrives;
-stopping syncing and signing in again with the same one keeps them. A tag
+stopping syncing and signing in again with the same one keeps them, and
+the first npub set takes only those changed here. A tag
 that is blank or holds a control character is left out. A color is shown only as `#rgb` or `#rrggbb`, and
 an icon only when it is 16 UTF-16 code units or fewer (a letter or a simple
 emoji takes one or two, so about 8 emoji at most); anything else is left
@@ -238,9 +240,10 @@ keeps its own color and icon when it has either, or takes those of the one
 renamed; a plain rename keeps them. A right click on a tag, or `F2` and
 `Delete` with it selected, renames or deletes it on every feed that carries
 it, in every spelling of it that shows the same. Each change is saved in one
-transaction with the mark to publish the subscription list, and `Ctrl+Z`
-undoes it (not after signing in or out, as the change was made under the
-npub set then).
+transaction that marks the feeds and categories it changed, and the
+subscription list to publish, and `Ctrl+Z` undoes it (not after signing in
+or out, as the change was made under the npub set then); an undo or redo
+marks what it puts back too.
 
 A category's name or a tag that would not read back as it is once the web
 app's list is pulled again is refused, and the dialog says why and keeps
@@ -258,28 +261,36 @@ they are, unchecked, where the list is saved with them left as it showed
 them.
 
 The next subscription list published carries the categories, their colors
-and icons, and every feed's tags as they are here, so the web app shows
-them (see Publishing). Until it has gone out, a pull, even of a newer list
-from the web app, does not take these changes back: a feed whose tags, or a
-category whose color and icon, were changed here keeps them, while the
-others follow the list as before. The categories also go into an exported
-OPML file as its folders.
+and icons, and the tags of the feeds changed here as they are here, even
+none, so the web app shows them (see Publishing). Until a list that
+carried it has gone out, a pull, even of a newer list from the web app,
+does not take a change back: a feed's tags, the category a feed is in,
+and a category's color and icon are each marked apart when changed here,
+and keep what they have, while everything else follows the list, a feed's
+category included, so tags changed here still let the web app move the
+feed to another category. Once a list has gone out, every mark made
+before it was built goes, as the list holds what was changed of each feed
+it lists; a mark made while it was going out waits for the next one. The
+mark of a feed the list leaves out (one another device unsubscribed from,
+one on the local network, or one whose address is too long) goes too, as
+no list from here will carry it: the change stays here, unpublished. A category name over 256 characters, as an OPML file can
+have, goes out cut to 256, and the feeds stay in the category they have.
+The categories also go into an exported OPML file as its folders.
 
 The tags and the categories' colors and icons are those of the npub they
 were pulled or changed under, even after "Stop syncing": signing in again
-with that npub keeps them, and a change not published yet goes out once it
-is back, while what the web app changed meanwhile of the other feeds and
-categories still comes in with the next pull, as the last list pulled is
-kept to tell the two apart. Changes made before any npub was set are the
-first one's, and go out with it; as there is no list to tell them from the
-web app's then, that first pull keeps the tags of every feed that has some,
-and the style of every category, as they are here, and the publish after
-it carries them. Tags kept from before Readstr recorded whose they are,
-with no npub set, are not taken by the next one. Another npub starts
-without them; when they hold changes the
-last npub has not published yet, setting it first asks whether to remove
-them, as for the saved views (see Sync with the web app), and
-`readstr sync login` refuses unless given `--drop-views`.
+with that npub keeps them, with the marks of the changes not published yet,
+which go out once it is back, while what the web app changed meanwhile of
+the other feeds and categories still comes in with the next pull. Changes
+made before any npub was set are the first one's, and go out with it. Of
+tags and styles whose npub is not known, as those kept from before Readstr
+recorded it, the next npub takes only those changed here (a feed's tags
+only when its tags were, not when only its category was); the others could
+be an earlier npub's, so they are removed. Another npub starts without
+them; when some change the last npub made is not published yet, setting it
+first asks whether to remove them, as for the saved views (see Sync with
+the web app), and `readstr sync login` refuses unless given
+`--drop-views`.
 
 ## Nostr
 
@@ -415,9 +426,16 @@ Merging is close to the web app's and never removes anything here:
   the local network (localhost, a private address, a name without a dot) is
   left out and counted as unsupported, since whoever holds the npub's key
   picks these; OPML import still takes them. A category becomes the feed's
-  category. New feeds are fetched by the next refresh (the window fetches
-  them at once). Every feed here takes the tags the list gives it, and every
-  category its color and icon (see Tags and category colors).
+  category, for a feed already here too, unless its category was changed
+  here and has not gone out yet, and a feed the list lists with no category
+  comes out of the one it has here, as the web app says no category by
+  leaving the feed out of its categories; a feed the list does not list
+  keeps its own, and so does every feed when the list's categories are as
+  many as a list holds (5,000), as one published from here may then have
+  been cut short. New feeds are fetched by the next
+  refresh (the window fetches them at once). Every feed here takes the tags
+  the list gives it, and every category its color and icon (see Tags and
+  category colors), but for those changed here (see Categories and tags).
 - Read GUIDs mark the matching articles read in every feed, and are kept for
   articles that arrive later, which come in read. An article is never
   marked unread by a sync.
@@ -463,8 +481,8 @@ changes are kept, and they go out with that first "Publish now".
   icon the last list gave it, carried on from that list as it was, so what
   Readstr leaves out of them (a tag with a control character, a color it
   does not show) stays, unless they were changed here since that list went
-  out: then the feed carries them as they are here (see Categories and
-  tags). A feed in that list that Readstr
+  out: then the feed carries them as they are here, where they are not what
+  that list shows (see Categories and tags). A feed in that list that Readstr
   cannot follow (one on the local network, or neither a web feed nor an
   npub) stays in the list, and one it could follow but you unsubscribed
   goes into `deleted`. A feed another device unsubscribed from (in that

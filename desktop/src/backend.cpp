@@ -2546,9 +2546,9 @@ struct Backend::PublishRun {
     // than the list published from them.
     qint64 builtAt = 0;
     // The edits to the saved views, and to the categories and tags, the
-    // drafts carry (Sync::Drafts::viewsEdits, subscriptionsEdits).
+    // drafts carry (Sync::Drafts::viewsEdits, subscriptionEdits).
     qint64 viewsEdits = -1;
-    qint64 subscriptionsEdits = -1;
+    PendingEdits subscriptionEdits;
 };
 
 namespace {
@@ -2758,7 +2758,7 @@ void Backend::continuePublish(const Sync::Outcome &outcome) {
             }
             run->events = drafts.events;
             run->viewsEdits = drafts.viewsEdits;
-            run->subscriptionsEdits = drafts.subscriptionsEdits;
+            run->subscriptionEdits = drafts.subscriptionEdits;
             run->settled << drafts.unchanged;
             run->failed << drafts.failed << drafts.waiting;
             run->errors << drafts.errors;
@@ -2817,11 +2817,11 @@ void Backend::publishNext(const std::shared_ptr<PublishRun> &run) {
             }
             self->onWorker<WriteResult>(
                 [pubkey = run->account.pubkey, event, builtAt = run->builtAt, viewsEdits = run->viewsEdits,
-                 subscriptionsEdits = run->subscriptionsEdits](Store &store) {
+                 subscriptionEdits = run->subscriptionEdits](Store &store) {
                     WriteResult written;
                     bool superseded = false;
                     written.error = Sync::recordPublished(store, pubkey, event, builtAt, &superseded,
-                                                          &written.reload, viewsEdits, subscriptionsEdits);
+                                                          &written.reload, viewsEdits, subscriptionEdits);
                     written.changed = superseded ? 1 : 0;
                     return written;
                 },
@@ -3660,12 +3660,17 @@ QString feedTitle(const SourceModel &sources, qint64 feedId) {
 }
 }
 
-bool Backend::refuseOrganize(const QString &failure, const QString &why) {
-    emit organizeSaved(false, failure.arg(why));
-    return false;
+int Backend::refuseOrganize(const QString &failure, const QString &why) {
+    const int request = ++m_organizeRequests;
+    // Told once the caller holds the id, so it can tell the answer is to
+    // its own request.
+    QMetaObject::invokeMethod(
+        this, [this, request, message = failure.arg(why)] { emit organizeSaved(request, false, message); },
+        Qt::QueuedConnection);
+    return request;
 }
 
-bool Backend::renameCategory(const QString &from, const QString &to) {
+int Backend::renameCategory(const QString &from, const QString &to) {
     const QString failure = tr("Cannot rename the category: %1");
     if (!m_storeOpen)
         return refuseOrganize(failure, tr("the library is not open"));
@@ -3674,7 +3679,7 @@ bool Backend::renameCategory(const QString &from, const QString &to) {
     const QString name = to.trimmed();
     const QString shown = FeedParser::cleanText(from);
     const bool selected = selectedCategory() == from;
-    organize(
+    return organize(
         [shown, name](const OrganizeChange &change) {
             return change.merged ? tr("merged the category %1 into %2").arg(shown, name)
                                  : tr("renamed the category %1 to %2").arg(shown, name);
@@ -3690,17 +3695,14 @@ bool Backend::renameCategory(const QString &from, const QString &to) {
             if (const int row = m_sources.rowOfCategory(name); selected && m_sources.isSelectable(row))
                 selectSource(row);
         });
-    return true;
 }
 
-void Backend::deleteCategory(const QString &name) {
+int Backend::deleteCategory(const QString &name) {
     const QString failure = tr("Cannot delete the category: %1");
-    if (!m_storeOpen) {
-        refuseOrganize(failure, tr("the library is not open"));
-        return;
-    }
+    if (!m_storeOpen)
+        return refuseOrganize(failure, tr("the library is not open"));
     const QString shown = FeedParser::cleanText(name);
-    organize([shown](const OrganizeChange &) { return tr("deleted the category %1").arg(shown); },
+    return organize([shown](const OrganizeChange &) { return tr("deleted the category %1").arg(shown); },
              [name](Store &store, OrganizeChange *change, const QString &pubkey) {
                  return store.deleteCategory(name, change, pubkey);
              },
@@ -3711,7 +3713,7 @@ void Backend::deleteCategory(const QString &name) {
              });
 }
 
-bool Backend::setFeedCategory(qint64 feedId, const QString &name) {
+int Backend::setFeedCategory(qint64 feedId, const QString &name) {
     const QString failure = tr("Cannot move the feed: %1");
     if (!m_storeOpen)
         return refuseOrganize(failure, tr("the library is not open"));
@@ -3725,7 +3727,7 @@ bool Backend::setFeedCategory(qint64 feedId, const QString &name) {
     const QString category = known ? name : name.trimmed();
     const QString shown = FeedParser::cleanText(category);
     const QString title = feedTitle(m_sources, feedId);
-    organize(
+    return organize(
         [title, shown](const OrganizeChange &) {
             return shown.isEmpty() ? tr("took %1 out of its category").arg(title)
                                    : tr("moved %1 to %2").arg(title, shown);
@@ -3738,26 +3740,24 @@ bool Backend::setFeedCategory(qint64 feedId, const QString &name) {
             setStatus(shown.isEmpty() ? tr("Took %1 out of its category").arg(title)
                                       : tr("Moved %1 to %2").arg(title, shown));
         });
-    return true;
 }
 
-bool Backend::setFeedTags(qint64 feedId, const QString &list) {
+int Backend::setFeedTags(qint64 feedId, const QString &list) {
     const QString failure = tr("Cannot change the tags: %1");
     if (!m_storeOpen)
         return refuseOrganize(failure, tr("the library is not open"));
     if (const QString why = tagListProblem(list, feedId); !why.isEmpty())
         return refuseOrganize(failure, why);
     const QString title = feedTitle(m_sources, feedId);
-    organize([title](const OrganizeChange &) { return tr("changed the tags of %1").arg(title); },
+    return organize([title](const OrganizeChange &) { return tr("changed the tags of %1").arg(title); },
              [feedId, list](Store &store, OrganizeChange *change, const QString &pubkey) {
                  return store.setFeedTagList(feedId, list, change, pubkey);
              },
              failure,
              [this, title](const OrganizeChange &) { setStatus(tr("Changed the tags of %1").arg(title)); });
-    return true;
 }
 
-bool Backend::renameTag(const QString &name, const QString &to) {
+int Backend::renameTag(const QString &name, const QString &to) {
     const QString failure = tr("Cannot rename the tag: %1");
     if (!m_storeOpen)
         return refuseOrganize(failure, tr("the library is not open"));
@@ -3765,7 +3765,7 @@ bool Backend::renameTag(const QString &name, const QString &to) {
         return refuseOrganize(failure, why);
     const QString tag = to.trimmed();
     const bool selected = selectedTag() == name;
-    organize([name, tag](const OrganizeChange &) { return tr("renamed the tag %1 to %2").arg(name, tag); },
+    return organize([name, tag](const OrganizeChange &) { return tr("renamed the tag %1 to %2").arg(name, tag); },
              [name, tag](Store &store, OrganizeChange *change, const QString &pubkey) {
                  return store.renameTag(name, tag, change, pubkey);
              },
@@ -3775,16 +3775,13 @@ bool Backend::renameTag(const QString &name, const QString &to) {
                  if (const int row = m_sources.rowOfTag(Sync::tagName(tag)); selected && m_sources.isSelectable(row))
                      selectSource(row);
              });
-    return true;
 }
 
-void Backend::deleteTag(const QString &name) {
+int Backend::deleteTag(const QString &name) {
     const QString failure = tr("Cannot delete the tag: %1");
-    if (!m_storeOpen) {
-        refuseOrganize(failure, tr("the library is not open"));
-        return;
-    }
-    organize([name](const OrganizeChange &) { return tr("deleted the tag %1").arg(name); },
+    if (!m_storeOpen)
+        return refuseOrganize(failure, tr("the library is not open"));
+    return organize([name](const OrganizeChange &) { return tr("deleted the tag %1").arg(name); },
              [name](Store &store, OrganizeChange *change, const QString &pubkey) {
                  return store.deleteTag(name, change, pubkey);
              },
@@ -3794,8 +3791,9 @@ void Backend::deleteTag(const QString &name) {
              });
 }
 
-void Backend::organize(std::function<QString(const OrganizeChange &)> label, Organize work, const QString &failure,
-                       std::function<void(const OrganizeChange &)> done) {
+int Backend::organize(std::function<QString(const OrganizeChange &)> label, Organize work, const QString &failure,
+                      std::function<void(const OrganizeChange &)> done) {
+    const int request = ++m_organizeRequests;
     // Filled in on the worker, and read here only once its write is done.
     auto change = std::make_shared<OrganizeChange>();
     auto command = std::make_shared<UndoCommand>();
@@ -3813,7 +3811,7 @@ void Backend::organize(std::function<QString(const OrganizeChange &)> label, Org
             return work(store, change.get(), pubkey) ? int(change->changed) : -1;
         },
         failure,
-        [this, command, change, failure, done = std::move(done)](const WriteResult &result) {
+        [this, command, change, failure, request, done = std::move(done)](const WriteResult &result) {
             QString why = result.error;
             // Skipped as reloadSyncAccount() forgot the command, the account
             // having changed before the worker reached the write.
@@ -3827,7 +3825,7 @@ void Backend::organize(std::function<QString(const OrganizeChange &)> label, Org
                 if (why == Sync::accountChanged())
                     reloadSyncAccount();
                 reloadLibrary();
-                emit organizeSaved(false, failure.arg(why));
+                emit organizeSaved(request, false, failure.arg(why));
                 return;
             }
             // Asked for as it already was: nothing to publish or undo.
@@ -3840,9 +3838,10 @@ void Backend::organize(std::function<QString(const OrganizeChange &)> label, Org
             reloadLibrary();
             if (result.changed > 0 && done)
                 done(*change);
-            emit organizeSaved(true, {});
+            emit organizeSaved(request, true, {});
         },
         command->state);
+    return request;
 }
 
 void Backend::restoreOrganization(const std::shared_ptr<const OrganizeChange> &change, bool undo,
